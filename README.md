@@ -1,0 +1,144 @@
+**🌐 Sprache / Language:** [English](README.md) · [Deutsch](README.de.md)
+
+# gitmaster_flash
+
+A fast terminal overview (TUI) of every Git repository below the current
+directory, so you can see what still needs attention and tidy it up on the spot.
+Green means clean and in sync with your remote; red and yellow mean something is
+left over.
+
+One Python file, standard library only — no `pip install`, no daemon, no
+registration of repositories. It scans whatever is below the directory you start
+it in.
+
+![Overview of several repositories, problem repos sorted to the top](docs/overview.png)
+
+Try it without touching your own repositories:
+
+```sh
+python3 gitmaster_flash.py --demo
+```
+
+`--demo` builds a throwaway sandbox of fake repositories covering every state and
+opens the UI on it. The folder lives in your temp directory; delete it when done.
+
+## What a line tells you
+
+- **↑n / ↓n** — commits ahead of / behind the sync remote, based on the last
+  fetch. `R` refreshes the numbers with `git fetch`.
+- **↑n github** (cyan) — an extra hint: commits that exist on your sync remote
+  but were never pushed to the branch's *configured upstream* (typically GitHub).
+  Purely informational, so it also appears next to a green ✔ — that way "never
+  pushed upstream" does not quietly sit there forever.
+- **M / D / U** — number of modified, deleted and untracked files.
+- **⚑Stash:n** — stashes that exist in the repo (easy to forget, so it is shown).
+- **⚠conflict:n** — unmerged files, e.g. after a `git stash pop` that did not
+  apply cleanly. Kept separate from "modified", because it needs different work.
+- Warnings such as "no sync remote" or "branch not on remote".
+
+Repositories that need attention sort to the top, clean ones to the bottom.
+
+## Keys
+
+Every shortcut is permanently visible in the footer, so there is nothing to
+memorize. Case does not matter — `f` works like `F`.
+
+| Key | Action |
+|---|---|
+| ↑ / ↓ | select a repository |
+| → / ← | expand / collapse (files with M/D/U/C, stashes) |
+| ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
+| E | open the repository in a configured app (add your own in `config.json`) |
+| C | commit helper (see below) |
+| U | apply the latest stash (`git stash pop`, with confirmation) |
+| S | view the latest stash as a diff (read-only, scrollable) |
+| D | drop the latest stash (`git stash drop`, with confirmation) |
+| R | reload everything including `git fetch` |
+| Q | quit |
+
+A stash is never popped onto a tree that already has conflicts — resolve those
+first.
+
+## Commit helper (`C`)
+
+![Commit helper with per-file suggestions](docs/commit-helper.png)
+
+1. Every changed and new file is listed with a suggestion: typical junk
+   (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`, …) is proposed
+   for **.gitignore**, everything else for **committing**. Both are togglable per
+   file (`␣` commit on/off, `i` gitignore on/off).
+2. Before you type the commit message, the repository's last five messages are
+   shown as a style reference.
+3. `.gitignore` is extended without duplicates, the selection is staged and
+   committed. Optionally the commit is pushed to the sync remote afterwards
+   (only if the branch is not behind).
+
+## Installation
+
+Requires Python 3 and a terminal. Nothing else.
+
+```sh
+git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
+python3 gitmaster_flash/gitmaster_flash.py
+```
+
+For the `⏎ = cd into the repository` feature, source the shell wrapper — a child
+process cannot change the working directory of the shell that started it, so a
+small function has to do it:
+
+```sh
+echo 'source /path/to/gitmaster_flash/gmf.zsh' >> ~/.zshrc
+```
+
+In a new shell, `gmf` then starts the tool (and `cd`s where you asked it to):
+
+```sh
+cd ~/projects && gmf
+```
+
+Without the wrapper everything works the same, except that ⏎ prints the path
+instead of changing into it.
+
+## Non-interactive use (scripts, CI, agents)
+
+```sh
+gitmaster_flash.py --list          # colored text list
+gitmaster_flash.py --json          # machine-readable
+gitmaster_flash.py --json --fetch  # fetch each repo first
+```
+
+Exit code 0 means everything is clean and in sync, 1 means at least one
+repository needs attention. Without a TTY the tool prints the list instead of
+starting the UI, so a pipe does the sensible thing.
+
+## Configuration
+
+`~/.config/gitmaster_flash/config.json`, created on first run:
+
+- `apps` — key → application used to open a repository (macOS `open -a`). The key
+  shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":
+  "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
+  taken by the table above.
+- `sync_remote_names` / `sync_remote_hosts` — how the sync remote is recognized:
+  by remote name, or by host in the remote URL. Defaults to `origin`.
+- `skip_dirs` — directories the scan does not descend into.
+- `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
+- `git_timeout` / `fetch_timeout` — seconds per git call.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+The logic (status parsing, heuristics, repo scan) is separated from the curses UI
+and tested headlessly against real temporary repositories.
+
+## Name
+
+A nod to Grandmaster Flash — the tool is mostly about quick cuts between many
+records.
+
+## License
+
+**WTFPL** — see [LICENSE](LICENSE).
