@@ -4,10 +4,10 @@
 
 Eine schnelle Terminal-Übersicht (TUI) über alle Git-Repos unterhalb des
 aktuellen Ordners: Man sieht auf einen Blick, wo noch etwas liegen geblieben ist,
-und räumt es direkt auf. Grün heißt sauber und mit dem Remote synchron, Rot und
-Gelb heißen: da ist noch was.
+und räumt es direkt auf.
 
-Eine einzige Python-Datei, nur Standardbibliothek — kein `pip install`, kein
+Grün heißt sauber und mit dem Remote synchron, Rot und Gelb heißen: da ist noch
+was. Eine einzige Python-Datei, nur Standardbibliothek — kein `pip install`, kein
 Hintergrunddienst, keine Repo-Registrierung. Gescannt wird schlicht alles
 unterhalb des Ordners, in dem man es startet.
 

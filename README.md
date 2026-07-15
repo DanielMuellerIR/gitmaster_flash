@@ -4,12 +4,11 @@
 
 A fast terminal overview (TUI) of every Git repository below the current
 directory, so you can see what still needs attention and tidy it up on the spot.
-Green means clean and in sync with your remote; red and yellow mean something is
-left over.
 
-One Python file, standard library only — no `pip install`, no daemon, no
-registration of repositories. It scans whatever is below the directory you start
-it in.
+Green means clean and in sync with your remote; red and yellow mean something is
+left over. One Python file, standard library only — no `pip install`, no daemon,
+no registration of repositories. It scans whatever is below the directory you
+start it in.
 
 ![Overview of several repositories, problem repos sorted to the top](docs/overview.png)
 
