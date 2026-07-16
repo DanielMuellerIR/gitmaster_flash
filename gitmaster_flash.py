@@ -57,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -1661,14 +1661,18 @@ def _dgit(repo: Path, *args: str) -> None:
                    capture_output=True, text=True)
 
 
-def _demo_repo(root: Path, name: str) -> tuple[Path, Path]:
-    """Neues Repo mit eigenem bare-"origin"-Remote + Erst-Commit, gepusht, upstream=origin/main."""
+def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]:
+    """Neues Repo mit eigenem bare-"origin"-Remote + Erst-Commit, gepusht, upstream=origin/<branch>.
+
+    `branch` ist der einzige Branch des Repos — so lassen sich auch Repos mit
+    `master`, `develop` oder `feature/...` zeigen, ohne Sonderfälle im Aufrufer.
+    """
     bare = root / "_remotes" / f"{name}.git"
     bare.mkdir(parents=True)
     _dgit(bare, "init", "-q", "--bare")
     repo = root / name
     repo.mkdir()
-    _dgit(repo, "init", "-q", "-b", "main")
+    _dgit(repo, "init", "-q", "-b", branch)
     _dgit(repo, "config", "user.email", "demo@example.invalid")
     _dgit(repo, "config", "user.name", "Demo")
     _dgit(repo, "config", "commit.gpgsign", "false")
@@ -1680,7 +1684,7 @@ def _demo_repo(root: Path, name: str) -> tuple[Path, Path]:
     _dgit(repo, "add", "README.md")
     _dgit(repo, "commit", "-qm", "initial commit")
     _dgit(repo, "remote", "add", "origin", str(bare))
-    _dgit(repo, "push", "-q", "-u", "origin", "main")
+    _dgit(repo, "push", "-q", "-u", "origin", branch)
     return repo, bare
 
 
@@ -1690,12 +1694,45 @@ def _demo_commit(repo: Path, fname: str, content: str, msg: str) -> None:
     _dgit(repo, "commit", "-qm", msg)
 
 
+def _demo_extra_remote(root: Path, repo: Path, remote: str, branch: str = "main",
+                       url: str | None = None) -> None:
+    """Zweites Remote (z.B. `github`, `backup`) mit aktuellem Stand anlegen.
+
+    Es wird immer gegen ein lokales bare-Repo gepusht (kein Netz). `url` stellt die
+    Adresse danach auf eine Beispieladresse um — damit zeigt die Demo z.B. die echte
+    GitHub-Sicherheitsklasse, ohne je ins Netz zu gehen.
+    """
+    bare = root / "_remotes" / f"{repo.name}-{remote}.git"
+    bare.mkdir(parents=True)
+    _dgit(bare, "init", "-q", "--bare")
+    _dgit(repo, "remote", "add", remote, str(bare))
+    _dgit(repo, "push", "-q", remote, branch)
+    if url:
+        _dgit(repo, "remote", "set-url", remote, url)
+
+
+def _demo_ahead(repo: Path, n: int, branch: str = "main") -> None:
+    """n Commits erzeugen, die auf origin fehlen (Repo ist 'voraus')."""
+    for i in range(n):
+        _demo_commit(repo, "work.txt", f"step {i}\n", f"feat: step {i}")
+
+
+def _demo_behind(repo: Path, n: int) -> None:
+    """n Commits auf origin schieben und lokal zurücksetzen (Repo ist 'zurück')."""
+    for i in range(n):
+        _demo_commit(repo, "upstream.txt", f"remote step {i}\n", f"chore: remote step {i}")
+    _dgit(repo, "push", "-q", "origin", "HEAD")
+    _dgit(repo, "reset", "--hard", "-q", f"HEAD~{n}")
+
+
 def build_demo_sandbox(base: Path) -> Path:
     """Wegwerf-Sandbox mit Fake-Repos in allen Zuständen (Screenshots/Ausprobieren).
 
     Nutzt lokale bare-Repos als Remotes (kein Netz). Deckt ab: sauber & synchron,
-    modified/untracked, ahead/behind Sync-Remote, Merge-Konflikt + Stash, nur Stash,
-    kein Sync-Remote und ein 'fremder Upstream'-Hinweis (↑n github).
+    modified/untracked, ahead/behind/auseinandergelaufen, Merge-Konflikt + Stash, nur
+    Stash, kein Sync-Remote, mehrere Remotes (origin/backup/github), Branches abseits
+    von main (master, develop, feature/…, release/…) und den 'fremder Upstream'-Hinweis
+    (↑n github).
     """
     root = base / "gmf-demo"
     root.mkdir(parents=True, exist_ok=True)
@@ -1761,6 +1798,100 @@ def build_demo_sandbox(base: Path) -> Path:
 
     # 8) sauber & synchron (schlichtes Grün)
     _demo_repo(root, "notes-vault")
+
+    # 10) master statt main, sauber & synchron
+    _demo_repo(root, "legacy-cms", branch="master")
+
+    # 11) master + lokale Änderung
+    repo, _ = _demo_repo(root, "payroll-tool", branch="master")
+    (repo / "README.md").write_text("# payroll-tool\n\nrate table 2026\n")
+
+    # 12) auseinandergelaufen: 1 zurück und 2 voraus
+    repo, _ = _demo_repo(root, "site-generator")
+    _demo_behind(repo, 1)
+    _demo_ahead(repo, 2)
+
+    # 13) eigener Branch 'develop', 3 Commits voraus
+    repo, _ = _demo_repo(root, "iot-firmware", branch="develop")
+    _demo_ahead(repo, 3)
+
+    # 14) Feature-Branch mit Slash im Namen + untracked
+    repo, _ = _demo_repo(root, "data-pipeline", branch="feature/etl-rewrite")
+    (repo / "sketch.py").write_text("# draft\n")
+
+    # 15) drei Remotes (origin, backup, github), sauber
+    repo, _ = _demo_repo(root, "docs-portal")
+    _demo_extra_remote(root, repo, "backup")
+    _demo_extra_remote(root, repo, "github",
+                       url="https://github.com/example/docs-portal.git")
+
+    # 16) Backup-Remote + 2 Commits zurück
+    repo, _ = _demo_repo(root, "photo-sorter")
+    _demo_extra_remote(root, repo, "backup")
+    _demo_behind(repo, 2)
+
+    # 17) fremder Upstream (github) UND lokale Änderung
+    repo, _ = _demo_repo(root, "auth-service")
+    _demo_extra_remote(root, repo, "github",
+                       url="https://github.com/example/auth-service.git")
+    _demo_ahead(repo, 2)
+    _dgit(repo, "push", "-q", "origin", "main")
+    _dgit(repo, "branch", "--set-upstream-to=github/main", "main")
+    (repo / "token.py").write_text("SECRET = None\n")
+
+    # 18) zwei Stashes, Baum sonst sauber
+    repo, _ = _demo_repo(root, "recipe-app")
+    for i in range(2):
+        (repo / "README.md").write_text(f"# recipe-app\n\ndraft {i}\n")
+        _dgit(repo, "stash")
+
+    # 19) Release-Branch, sauber & synchron
+    _demo_repo(root, "monorepo-sandbox", branch="release/2.1")
+
+    # 20) viele Commits voraus
+    repo, _ = _demo_repo(root, "chess-engine")
+    _demo_ahead(repo, 5)
+
+    # 21) deutlich zurück
+    repo, _ = _demo_repo(root, "portfolio-site")
+    _demo_behind(repo, 3)
+
+    # 22) master + Backup-Remote + Stash
+    repo, _ = _demo_repo(root, "budget-tracker", branch="master")
+    _demo_extra_remote(root, repo, "backup", branch="master")
+    (repo / "README.md").write_text("# budget-tracker\n\nwip\n")
+    _dgit(repo, "stash")
+
+    # 23) viele untracked Dateien
+    repo, _ = _demo_repo(root, "sensor-logs")
+    for i in range(4):
+        (repo / f"run-{i}.csv").write_text("t,v\n")
+
+    # 24) Konflikt auf master (zweiter Konfliktfall, andere Farbe im Kopf)
+    repo, _ = _demo_repo(root, "test-harness", branch="master")
+    _demo_commit(repo, "case.txt", "base\n", "add case")
+    _dgit(repo, "push", "-q", "origin", "master")
+    (repo / "case.txt").write_text("stashed\n")
+    _dgit(repo, "stash")
+    (repo / "case.txt").write_text("head\n")
+    _dgit(repo, "commit", "-qam", "conflicting change")
+    _dgit(repo, "push", "-q", "origin", "master")
+    subprocess.run(["git", "-C", str(repo), "stash", "pop"],
+                   capture_output=True, text=True)
+
+    # 25) Änderung + Stash gleichzeitig
+    repo, _ = _demo_repo(root, "vpn-config")
+    (repo / "README.md").write_text("# vpn-config\n\nold\n")
+    _dgit(repo, "stash")
+    (repo / "peers.conf").write_text("[Peer]\n")
+
+    # 26) voraus + untracked
+    repo, _ = _demo_repo(root, "cli-toolkit")
+    _demo_ahead(repo, 1)
+    (repo / "TODO.md").write_text("- ship\n")
+
+    # 27) sauber & synchron auf develop
+    _demo_repo(root, "wiki-export", branch="develop")
 
     # 9) gar kein Remote
     repo = root / "scratchpad"

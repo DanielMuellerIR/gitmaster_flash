@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 864 466" width="864" height="466" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 864 602" width="864" height="602" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
 <title>gitmaster_flash overview — problem repos sorted to the top</title>
-<rect width="864" height="466" rx="8" fill="#1c1c1c"/>
-<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.7.0 · ~/git · 9 repos · 7 to review                          </text>
+<rect width="864" height="602" rx="8" fill="#1c1c1c"/>
+<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.8.0 · ~/git · 27 repos · 21 to review                          </text>
 <rect x="12.0" y="29.0" width="16.8" height="17.0" fill="#d8d8d8"/>
 <text x="12.0" y="42.0" fill="#1c1c1c" xml:space="preserve">▶ </text>
 <rect x="28.8" y="29.0" width="92.4" height="17.0" fill="#d8d8d8"/>
@@ -15,42 +15,140 @@
 <rect x="264.0" y="29.0" width="50.4" height="17.0" fill="#98c379"/>
 <text x="264.0" y="42.0" fill="#1c1c1c" xml:space="preserve">origin</text>
 <text x="12.0" y="59.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="59.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">dotfiles</text>
-<text x="112.8" y="59.0" fill="#e06c75" xml:space="preserve">U:3</text>
-<text x="138.0" y="59.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
-<text x="205.2" y="59.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="28.8" y="59.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">auth-service</text>
+<text x="146.4" y="59.0" fill="#e06c75" xml:space="preserve">U:1</text>
+<text x="171.6" y="59.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="238.8" y="59.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="297.6" y="59.0" fill="#56b6c2" xml:space="preserve">↑2 github</text>
 <text x="12.0" y="76.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="76.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">game-jam</text>
-<text x="112.8" y="76.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
-<text x="180.0" y="76.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
-<text x="247.2" y="76.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="28.8" y="76.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">budget-tracker</text>
+<text x="163.2" y="76.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="230.4" y="76.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
+<text x="314.4" y="76.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="364.8" y="76.0" fill="#d8d8d8" xml:space="preserve"> backup                                                   </text>
 <text x="12.0" y="93.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="93.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">ml-experiments</text>
-<text x="163.2" y="93.0" fill="#e06c75" xml:space="preserve">⚠conflict:2</text>
-<text x="264.0" y="93.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
-<text x="331.2" y="93.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
-<text x="398.4" y="93.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="28.8" y="93.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">cli-toolkit</text>
+<text x="138.0" y="93.0" fill="#e06c75" xml:space="preserve">U:1</text>
+<text x="163.2" y="93.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="230.4" y="93.0" fill="#e5c07b" xml:space="preserve">↑1 origin</text>
 <text x="12.0" y="110.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="110.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">blog-astro</text>
-<text x="112.8" y="110.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
-<text x="188.4" y="110.0" fill="#e5c07b" xml:space="preserve">↑2 origin</text>
+<text x="28.8" y="110.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">data-pipeline</text>
+<text x="154.8" y="110.0" fill="#e06c75" xml:space="preserve">U:1</text>
+<text x="180.0" y="110.0" fill="#d8d8d8" xml:space="preserve"> [feature/etl-rewrite] </text>
+<text x="373.2" y="110.0" fill="#98c379" xml:space="preserve">origin</text>
 <text x="12.0" y="127.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="127.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">invoice-parser</text>
-<text x="146.4" y="127.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
-<text x="222.0" y="127.0" fill="#e06c75" xml:space="preserve">↓1 origin</text>
+<text x="28.8" y="127.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">dotfiles</text>
+<text x="112.8" y="127.0" fill="#e06c75" xml:space="preserve">U:3</text>
+<text x="138.0" y="127.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="205.2" y="127.0" fill="#98c379" xml:space="preserve">origin</text>
 <text x="12.0" y="144.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="144.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">scratchpad</text>
-<text x="129.6" y="144.0" fill="#e5c07b" xml:space="preserve">no sync remote</text>
-<text x="247.2" y="144.0" fill="#d8d8d8" xml:space="preserve"> [main]                                                                 </text>
+<text x="28.8" y="144.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">game-jam</text>
+<text x="112.8" y="144.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="180.0" y="144.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="247.2" y="144.0" fill="#98c379" xml:space="preserve">origin</text>
 <text x="12.0" y="161.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
-<text x="28.8" y="161.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">notes-vault</text>
-<text x="138.0" y="161.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
-<text x="272.4" y="161.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
-<text x="339.6" y="161.0" fill="#98c379" xml:space="preserve">origin</text>
-<rect x="12.0" y="165.0" width="831.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="178.0" fill="#1c1c1c" xml:space="preserve"> ↑/↓ select · → expand · ← collapse · ⏎ cd &amp; quit · P sync push · L sync pull                      </text>
-<rect x="12.0" y="182.0" width="831.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="195.0" fill="#1c1c1c" xml:space="preserve"> E Editor · C commit · U stash pop · R fetch all · G GitHub push                                   </text>
-<rect x="12.0" y="199.0" width="831.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="212.0" fill="#1c1c1c" xml:space="preserve"> Q quit · S stash preview · D stash drop · H Git help                                              </text>
+<text x="28.8" y="161.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">ml-experiments</text>
+<text x="163.2" y="161.0" fill="#e06c75" xml:space="preserve">⚠conflict:2</text>
+<text x="264.0" y="161.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="331.2" y="161.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="398.4" y="161.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="178.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="178.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">payroll-tool</text>
+<text x="146.4" y="178.0" fill="#e06c75" xml:space="preserve">M:1</text>
+<text x="171.6" y="178.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
+<text x="255.6" y="178.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="195.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="195.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">recipe-app</text>
+<text x="129.6" y="195.0" fill="#e5c07b" xml:space="preserve">⚑Stash:2</text>
+<text x="196.8" y="195.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="264.0" y="195.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="212.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="212.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">sensor-logs</text>
+<text x="138.0" y="212.0" fill="#e06c75" xml:space="preserve">U:4</text>
+<text x="163.2" y="212.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="230.4" y="212.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="229.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="229.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">test-harness</text>
+<text x="146.4" y="229.0" fill="#e06c75" xml:space="preserve">⚠conflict:1</text>
+<text x="247.2" y="229.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="314.4" y="229.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
+<text x="398.4" y="229.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="246.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="246.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">vpn-config</text>
+<text x="129.6" y="246.0" fill="#e06c75" xml:space="preserve">U:1</text>
+<text x="163.2" y="246.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="230.4" y="246.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="297.6" y="246.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="263.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="263.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">blog-astro</text>
+<text x="112.8" y="263.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="188.4" y="263.0" fill="#e5c07b" xml:space="preserve">↑2 origin</text>
+<text x="12.0" y="280.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="280.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">chess-engine</text>
+<text x="129.6" y="280.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="205.2" y="280.0" fill="#e5c07b" xml:space="preserve">↑5 origin</text>
+<text x="12.0" y="297.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="297.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">invoice-parser</text>
+<text x="146.4" y="297.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="222.0" y="297.0" fill="#e06c75" xml:space="preserve">↓1 origin</text>
+<text x="12.0" y="314.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="314.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">iot-firmware</text>
+<text x="129.6" y="314.0" fill="#d8d8d8" xml:space="preserve">  [develop] </text>
+<text x="230.4" y="314.0" fill="#e5c07b" xml:space="preserve">↑3 origin</text>
+<text x="12.0" y="331.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="331.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">photo-sorter</text>
+<text x="129.6" y="331.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="205.2" y="331.0" fill="#e06c75" xml:space="preserve">↓2 origin</text>
+<text x="280.8" y="331.0" fill="#d8d8d8" xml:space="preserve"> backup                                                             </text>
+<text x="12.0" y="348.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="348.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">portfolio-site</text>
+<text x="146.4" y="348.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="222.0" y="348.0" fill="#e06c75" xml:space="preserve">↓3 origin</text>
+<text x="12.0" y="365.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="365.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">site-generator</text>
+<text x="146.4" y="365.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="222.0" y="365.0" fill="#e06c75" xml:space="preserve">↑2↓1 origin</text>
+<text x="12.0" y="382.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="382.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">scratchpad</text>
+<text x="129.6" y="382.0" fill="#e5c07b" xml:space="preserve">no sync remote</text>
+<text x="247.2" y="382.0" fill="#d8d8d8" xml:space="preserve"> [main]                                                                 </text>
+<text x="12.0" y="399.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="399.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">docs-portal</text>
+<text x="138.0" y="399.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="272.4" y="399.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="339.6" y="399.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="390.0" y="399.0" fill="#d8d8d8" xml:space="preserve"> backup </text>
+<text x="457.2" y="399.0" fill="#56b6c2" xml:space="preserve">github</text>
+<text x="12.0" y="416.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="416.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">legacy-cms</text>
+<text x="129.6" y="416.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="264.0" y="416.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
+<text x="348.0" y="416.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="433.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="433.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">monorepo-sandbox</text>
+<text x="180.0" y="433.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="314.4" y="433.0" fill="#d8d8d8" xml:space="preserve"> [release/2.1] </text>
+<text x="440.4" y="433.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="450.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="450.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">notes-vault</text>
+<text x="138.0" y="450.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="272.4" y="450.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="339.6" y="450.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="467.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="467.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">webshop-frontend</text>
+<text x="180.0" y="467.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="314.4" y="467.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
+<text x="381.6" y="467.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="440.4" y="467.0" fill="#56b6c2" xml:space="preserve">↑3 github</text>
+<text x="12.0" y="484.0" fill="#d8d8d8" xml:space="preserve">▶ </text>
+<text x="28.8" y="484.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">wiki-export</text>
+<text x="138.0" y="484.0" fill="#98c379" xml:space="preserve">✔ clean &amp; synced</text>
+<text x="272.4" y="484.0" fill="#d8d8d8" xml:space="preserve"> [develop] </text>
+<text x="364.8" y="484.0" fill="#98c379" xml:space="preserve">origin</text>
+<rect x="12.0" y="539.0" width="831.6" height="17.0" fill="#d8d8d8"/>
+<text x="12.0" y="552.0" fill="#1c1c1c" xml:space="preserve"> ↑/↓ select · → expand · ← collapse · ⏎ cd &amp; quit · P sync push · L sync pull                      </text>
+<rect x="12.0" y="556.0" width="831.6" height="17.0" fill="#d8d8d8"/>
+<text x="12.0" y="569.0" fill="#1c1c1c" xml:space="preserve"> E Editor · C commit · U stash pop · R fetch all · G GitHub push                                   </text>
+<rect x="12.0" y="573.0" width="831.6" height="17.0" fill="#d8d8d8"/>
+<text x="12.0" y="586.0" fill="#1c1c1c" xml:space="preserve"> Q quit · S stash preview · D stash drop · H Git help                                              </text>
 </svg>

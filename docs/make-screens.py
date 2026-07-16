@@ -38,7 +38,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 GMF = HERE.parent / "gitmaster_flash.py"
 
-COLS, ROWS = 100, 26
+# Tall enough for the whole demo sandbox (header + 27 repos + help bar) without the
+# TUI having to scroll. Empty rows below the help bar are cropped again in `_trim`,
+# so a generous height costs nothing in the finished SVG.
+COLS, ROWS = 100, 34
 
 # xterm-ish palette. Only what the TUI actually uses.
 FG = "#d8d8d8"
@@ -108,12 +111,12 @@ def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
     # Window size on the pty master. curses also honours LINES/COLUMNS (set in the
     # child env above) — belt and braces, because initscr() may run before we get here.
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-    def read_until_quiet(quiet: float = 0.5, cap: float = 20.0,
-                         first_wait: float = 15.0) -> bytes:
+    def read_until_quiet(quiet: float = 0.5, cap: float = 90.0,
+                         first_wait: float = 60.0) -> bytes:
         """Read until the program stops drawing for `quiet` seconds.
 
         `first_wait` is generous on purpose: before the first byte appears, `--demo`
-        builds a sandbox of nine git repos, which takes seconds. Giving up after
+        builds a sandbox of 27 git repos, which takes seconds. Giving up after
         `quiet` there captured an empty screen."""
         got = b""
         start = time.time()
@@ -261,10 +264,24 @@ def _tidy(grid: list) -> None:
             _set_line(row, line[:m.start()])
 
 
+def _trim(grid: list) -> list:
+    """Drop blank rows below the last drawn line.
+
+    The terminal is a fixed rectangle, so the program leaves the rest of the screen
+    empty below the help bar. On GitHub that turned into a tall grey void under the
+    picture; an SVG has no reason to keep it."""
+    last = 0
+    for y, row in enumerate(grid):
+        if any(c.ch.strip() or c.rev for c in row):
+            last = y
+    return grid[:last + 1]
+
+
 def to_svg(grid: list, title: str) -> str:
     """Cell grid -> SVG with selectable text."""
     cw, ch, pad = 8.4, 17.0, 12
-    w, h = int(COLS * cw + 2 * pad), int(ROWS * ch + 2 * pad)
+    rows = len(grid)
+    w, h = int(COLS * cw + 2 * pad), int(rows * ch + 2 * pad)
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" '
         f'height="{h}" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" '
@@ -325,7 +342,7 @@ def main() -> int:
     for name, extra, keys, title in SCREENS:
         grid = render_in_pty(["--demo", "--lang", "en"] + extra, keys=keys)
         _tidy(grid)
-        svg = to_svg(grid, title)
+        svg = to_svg(_trim(grid), title)
         if len([1 for row in grid for c in row if c.ch.strip()]) < 50:
             print(f"{name}: screen looks empty — pty capture failed", file=sys.stderr)
             return 2
