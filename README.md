@@ -23,12 +23,12 @@ opens the UI on it. The folder lives in your temp directory; delete it when done
 
 ## What a line tells you
 
-- **↑n / ↓n** — commits ahead of / behind the sync remote, based on the last
-  fetch. `R` refreshes the numbers with `git fetch`.
-- **↑n github** (cyan) — an extra hint: commits that exist on your sync remote
-  but were never pushed to the branch's *configured upstream* (typically GitHub).
-  Purely informational, so it also appears next to a green ✔ — that way "never
-  pushed upstream" does not quietly sit there forever.
+- **remote names are always visible** — every line ends with all configured
+  remotes, even when everything is synchronized. Their order is the private sync
+  remote first, other remotes next, and GitHub at the far right.
+- **↑n / ↓n next to a remote** — commits ahead of / behind that exact remote for
+  the current branch, based on the last fetch. `R` refreshes every remote in every
+  repository with `git fetch --all` without changing a working tree.
 - **M / D / U** — number of modified, deleted and untracked files.
 - **⚑Stash:n** — stashes that exist in the repo (easy to forget, so it is shown).
 - **⚠conflict:n** — unmerged files, e.g. after a `git stash pop` that did not
@@ -49,10 +49,14 @@ memorize. Case does not matter — `f` works like `F`.
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
 | C | commit helper (see below) |
+| P | safely push the current branch to the private sync remote |
+| L | safely fast-forward the current branch from the private sync remote |
+| G | guarded GitHub push with outgoing-commit/file preview and typed confirmation |
+| H | show the Git safety rules inside the TUI |
 | U | apply the latest stash (`git stash pop`, with confirmation) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | D | drop the latest stash (`git stash drop`, with confirmation) |
-| R | reload everything including `git fetch` |
+| R | reload everything including `git fetch --all` |
 | Q | quit |
 
 A stash is never popped onto a tree that already has conflicts — resolve those
@@ -69,8 +73,22 @@ first.
 2. Before you type the commit message, the repository's last five messages are
    shown as a style reference.
 3. `.gitignore` is extended without duplicates, the selection is staged and
-   committed. Optionally the commit is pushed to the sync remote afterwards
-   (only if the branch is not behind).
+   committed. Optionally the commit is pushed through the same guarded private
+   sync path as `P` afterwards.
+
+## Safe push and pull
+
+`P` and `L` are intentionally limited to a non-public sync remote. Both fetch
+first, require a clean working tree and reject divergent history. Pull is an
+explicit fast-forward only; it never merges or rebases. Push sends only the
+current branch through an explicit refspec, never tags and never force-pushes.
+
+GitHub uses the separate `G` path. It works only when the same branch already
+exists on one GitHub remote and the histories are related. Before publishing it
+shows every outgoing commit and changed file name. The exact phrase
+`PUSH <remote>` must then be typed. The final command still sends only the current
+branch: no force, no tags, no new branch. A remote that mixes GitHub and
+non-GitHub URLs is blocked entirely. Complex cases stay terminal-only.
 
 ## Installation
 
@@ -126,8 +144,10 @@ starting the UI, so a pipe does the sensible thing.
   shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
   taken by the table above.
-- `sync_remote_names` / `sync_remote_hosts` — how the sync remote is recognized:
-  by remote name, or by host in the remote URL. Defaults to `origin`.
+- `sync_remote_names` / `sync_remote_hosts` — how the private sync remote is
+  recognized: by remote name, or by host in the remote URL. Defaults to `origin`
+  for a generic installation. All remotes are displayed regardless; GitHub is
+  recognized from its URL and sorted last.
 - `skip_dirs` — directories the scan does not descend into.
 - `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
 - `git_timeout` / `fetch_timeout` — seconds per git call.

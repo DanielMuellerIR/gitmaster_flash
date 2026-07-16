@@ -22,9 +22,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   und unabhängig von der Maschine gleich aussehen (deshalb `core.excludesFile`
   und `core.hooksPath` in den Demo-Repos abschalten).
 - Screenshots in `docs/` stammen aus `TMPDIR=/tmp python3 gitmaster_flash.py
-  --demo --lang en` (englische UI, kurzer Pfad im Kopf). Aufgenommen wird nur der
-  Fensterinhalt ohne Titelleiste — die enthält Benutzernamen und Pfad. Terminal
-  muss ein deckendes Profil haben, sonst scheinen fremde Fenster durch.
+  --demo --lang en` (englische UI, kurzer Pfad im Kopf). Terminal-Aufnahme und
+  Zuschnitt nicht automatisieren: Daniel um den Screenshot bitten; er entfernt
+  die Titelleiste selbst in macOS Vorschau. Der Agent prüft nur die fertige Datei
+  und sendet insbesondere keine globalen synthetischen Tastendrücke.
+- Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
+  Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
+  fremde Python-Dienste und Automationen unangetastet lassen.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 

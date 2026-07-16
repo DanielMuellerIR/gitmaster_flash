@@ -25,12 +25,12 @@ einfach gelöscht werden.
 
 ## Was eine Zeile verrät
 
-- **↑n / ↓n** — Commits voraus/zurück gegenüber dem Sync-Remote, auf Basis des
-  letzten Fetch-Stands. `R` holt mit `git fetch` frische Zahlen.
-- **↑n github** (cyan) — Zusatzhinweis: Commits, die zwar auf dem Sync-Remote
-  liegen, aber nie zum *konfigurierten Upstream* des Branches (typischerweise
-  GitHub) gepusht wurden. Rein informativ, erscheint deshalb auch neben einem
-  grünen ✔ — so bleibt „nie nach oben gepusht" nicht unbemerkt liegen.
+- **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
+  Remotes, auch wenn alles synchron ist. Reihenfolge: privater Sync-Remote zuerst,
+  sonstige Remotes danach, GitHub ganz rechts.
+- **↑n / ↓n neben einem Remote** — Commits vor/zurück gegenüber genau diesem
+  Remote für den aktuellen Branch, auf Basis des letzten Fetch. `R` aktualisiert
+  alle Remotes aller Repos mit `git fetch --all`, ohne einen Working Tree zu ändern.
 - **M / D / U** — Anzahl geänderter, gelöschter und unversionierter Dateien.
 - **⚑Stash:n** — vorhandene Stashes. Die übersieht man sonst gern.
 - **⚠conflict:n** — ungemergte Dateien, etwa nach einem `git stash pop`, der
@@ -52,10 +52,14 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
 | C | Commit-Hilfe (siehe unten) |
+| P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
+| L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
+| G | geschützter GitHub-Push mit Commit-/Dateivorschau und Texteingabe |
+| H | Git-Sicherheitsregeln direkt in der TUI anzeigen |
 | U | neuesten Stash anwenden (`git stash pop`, mit Rückfrage) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | D | neuesten Stash endgültig verwerfen (`git stash drop`, mit Rückfrage) |
-| R | alles neu einlesen inklusive `git fetch` |
+| R | alles neu einlesen inklusive `git fetch --all` |
 | Q | beenden |
 
 Auf einen bereits konfliktbehafteten Baum wird nie ein weiterer Stash gepoppt —
@@ -73,8 +77,24 @@ erst die Konflikte auflösen.
 2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten fünf Messages
    des Repos als Stil-Vorlage.
 3. Die `.gitignore` wird ohne Duplikate ergänzt, die Auswahl gestaged und
-   committet. Danach auf Wunsch der Push zum Sync-Remote (nur, wenn der Branch
-   nicht hinterherhinkt).
+   committet. Danach kann der Commit optional über denselben geschützten privaten
+   Sync-Pfad wie bei `P` gepusht werden.
+
+## Sicheres Push und Pull
+
+`P` und `L` sind absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt.
+Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
+divergente History. Pull ist ausschließlich ein expliziter Fast-forward; es gibt
+weder Merge noch Rebase. Push überträgt mit einem expliziten Refspec nur den
+aktuellen Branch, niemals Tags und niemals per Force.
+
+Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
+Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
+sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
+Dateinamen. Danach muss exakt `PUSH <Remote>` eingegeben werden. Auch der letzte
+Befehl überträgt nur den aktuellen Branch: kein Force, keine Tags, kein neuer
+Branch. Ein Remote mit gemischten GitHub-/Nicht-GitHub-URLs wird vollständig
+gesperrt. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
 
 ## Installation
 
@@ -131,8 +151,11 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   automatisch im Footer auf: `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` ergibt `Z Zed`. Eine Taste wählen, die oben in der
   Tabelle nicht schon belegt ist.
-- `sync_remote_names` / `sync_remote_hosts` — woran der Sync-Remote erkannt wird:
-  am Remote-Namen oder am Host in der Remote-URL. Default ist `origin`.
+- `sync_remote_names` / `sync_remote_hosts` — woran der private Sync-Remote
+  erkannt wird: am Remote-Namen oder am Host in der Remote-URL. Für eine
+  generische Installation ist der Standard `origin`. Alle Remotes werden
+  unabhängig davon angezeigt; GitHub wird an seiner URL erkannt und zuletzt
+  einsortiert.
 - `skip_dirs` — Ordner, die der Scan gar nicht erst betritt.
 - `lang` — `"en"`, `"de"` oder `null` für automatisch nach `$LANG`.
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.

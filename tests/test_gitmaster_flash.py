@@ -14,8 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gitmaster_flash import (  # noqa: E402
-    DEFAULT_CONFIG, RepoStatus, collect_status, find_repos,
-    parse_porcelain, suggested_ignore, upstream_delta,
+    DEFAULT_CONFIG, RemoteStatus, RepoStatus, collect_status, find_repos,
+    inspect_transfer, is_github_url, parse_porcelain, safe_pull_args,
+    safe_push_args, suggested_ignore, upstream_delta,
 )
 
 # Die Defaults erkennen nur "origin" als Sync-Remote. Tests, die einen anders
@@ -84,6 +85,22 @@ class TestUpstreamBadge(unittest.TestCase):
     def test_badge_none_without_upstream(self):
         st = RepoStatus(path=Path("/x"), rel="x", upstream_ahead=5)
         self.assertEqual(st.upstream_badge(), "")
+
+
+class TestRemoteBadges(unittest.TestCase):
+    def test_synced_remote_is_still_named(self):
+        remote = RemoteStatus("minipc", is_sync=True, branch_exists=True)
+        self.assertEqual(remote.badge(), "minipc")
+
+    def test_delta_and_missing_branch(self):
+        self.assertEqual(RemoteStatus("github", public=True, branch_exists=True,
+                                      ahead=2, behind=3).badge(), "↑2↓3 github")
+        self.assertEqual(RemoteStatus("archive").badge(), "? archive")
+
+    def test_github_url_detection_is_name_independent(self):
+        self.assertTrue(is_github_url("git@github.com:example/demo.git"))
+        self.assertTrue(is_github_url("https://github.com/example/demo.git"))
+        self.assertFalse(is_github_url("ssh://internal.example/demo.git"))
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -217,11 +234,90 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
         self.assertEqual(st.upstream_badge(), "↑2 github")
         self.assertTrue(st.clean_and_synced)                # gilt trotzdem als sauber
 
+        # Alle Remotes erscheinen, auch der synchrone Backup-Remote. Nach URL-
+        # Klassifikation steht GitHub unabhängig vom Namen ganz rechts.
+        git(self.repo, "remote", "set-url", "github",
+            "https://github.com/example/demo.git")
+        st = collect_status(self.repo, self.root, SYNC_CONFIG)
+        self.assertEqual([r.name for r in st.remotes], ["backup", "github"])
+        self.assertEqual([r.badge() for r in st.remotes], ["backup", "↑2 github"])
+        self.assertFalse(st.remotes[0].public)
+        self.assertTrue(st.remotes[-1].public)
+
+    def test_mixed_fetch_and_push_url_is_visible_and_blockable(self):
+        git(self.repo, "remote", "set-url", "github",
+            "https://github.com/example/demo.git")
+        git(self.repo, "remote", "set-url", "--push", "github", str(self.gh))
+        st = collect_status(self.repo, self.root, SYNC_CONFIG)
+        public = next(r for r in st.remotes if r.name == "github")
+        self.assertTrue(public.public)
+        self.assertTrue(public.mixed_public)
+
     def test_no_badge_when_upstream_is_sync_remote(self):
         # Trackt der Branch den Sync-Remote selbst, gibt es keinen Zusatz-Badge.
         git(self.repo, "branch", "--set-upstream-to=backup/main", "main")
         up, ahead, behind = upstream_delta(self.repo, "backup", SYNC_CONFIG)
         self.assertIsNone(up)
+
+    def test_push_preflight_and_explicit_safe_refspec(self):
+        (self.repo / "a.md").write_text("2\n")
+        git(self.repo, "commit", "-qam", "c2")
+        check = inspect_transfer(self.repo, "github", "main", "push")
+        self.assertTrue(check.ready)
+        self.assertEqual(check.ahead, 1)
+        self.assertEqual(check.commits[0].split(" ", 1)[1], "c2")
+        self.assertEqual(check.files, ["M\ta.md"])
+
+        args = safe_push_args("github", "main")
+        self.assertEqual(args[-2:], ("github", "HEAD:refs/heads/main"))
+        self.assertIn("--no-follow-tags", args)
+        self.assertNotIn("--force", args)
+        self.assertNotIn("--tags", args)
+        git(self.repo, *args)
+        self.assertEqual(
+            subprocess.run(["git", f"--git-dir={self.gh}", "rev-parse", "main"],
+                           check=True, capture_output=True, text=True).stdout.strip(),
+            subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                           check=True, capture_output=True, text=True).stdout.strip(),
+        )
+
+    def test_push_preflight_blocks_dirty_and_new_remote_branch(self):
+        (self.repo / "dirty.txt").write_text("x\n")
+        self.assertEqual(
+            inspect_transfer(self.repo, "github", "main", "push").reason,
+            "dirty",
+        )
+        (self.repo / "dirty.txt").unlink()
+        git(self.repo, "checkout", "-qb", "new-branch")
+        self.assertEqual(
+            inspect_transfer(self.repo, "github", "new-branch", "push").reason,
+            "missing-branch",
+        )
+
+    def test_pull_preflight_allows_only_fast_forward(self):
+        other = self.root / "other"
+        git(self.bk, "symbolic-ref", "HEAD", "refs/heads/main")
+        subprocess.run(["git", "clone", "-q", str(self.bk), str(other)], check=True)
+        git(other, "config", "user.email", "t@example.invalid")
+        git(other, "config", "user.name", "T")
+        (other / "remote.md").write_text("remote\n")
+        git(other, "add", "remote.md")
+        git(other, "commit", "-qm", "remote")
+        git(other, "push", "-q", "origin", "main")
+        git(self.repo, "fetch", "-q", "backup")
+
+        check = inspect_transfer(self.repo, "backup", "main", "pull")
+        self.assertTrue(check.ready)
+        self.assertEqual((check.ahead, check.behind), (0, 1))
+        self.assertEqual(safe_pull_args(check.remote_ref),
+                         ("merge", "--ff-only", "--", "refs/remotes/backup/main"))
+        git(self.repo, *safe_pull_args(check.remote_ref))
+        self.assertEqual(
+            subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                           check=True, capture_output=True, text=True).stdout.strip(),
+            subprocess.run(["git", "-C", str(other), "rev-parse", "HEAD"],
+                           check=True, capture_output=True, text=True).stdout.strip(),
+        )
 
 
 if __name__ == "__main__":

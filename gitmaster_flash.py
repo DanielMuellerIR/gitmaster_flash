@@ -15,10 +15,14 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
         change the parent shell's working directory)
   F/…   open the repo in a configured app (see config.json)
   C     commit helper: suggests what to commit and what to .gitignore
+  P     safely push the current branch to the private sync remote
+  L     safely fast-forward the current branch from the private sync remote
+  G     guarded GitHub push (preview + typed confirmation; branch only, no tags)
+  H     explain the Git safety rules
   U     apply the latest stash (git stash pop, with confirmation)
   S     view the latest stash as a diff (read-only, scrollable)
   D     drop the latest stash (git stash drop, with confirmation)
-  R     reload everything incl. `git fetch` (shows progress)
+  R     reload everything incl. `git fetch --all` (shows progress)
   Q     quit
 
 Non-interactive: with --list / --json (or no TTY) it prints the overview as text
@@ -44,7 +48,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -115,12 +119,12 @@ TR = {
                        "de": "(U anwenden · S Vorschau · D verwerfen)"},
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
     # Footer
-    "f1": {"en": " ↑/↓ select · → expand · ← collapse · ⏎ cd & quit",
-           "de": " ↑/↓ wählen · → aufklappen · ← zuklappen · ⏎ cd & Exit"},
-    "f2": {"en": " {apps} · C commit · U stash pop · R fetch all",
-           "de": " {apps} · C Commit · U Stash pop · R fetch all"},
-    "f3": {"en": " Q quit · S stash preview · D stash drop",
-           "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen"},
+    "f1": {"en": " ↑/↓ select · → expand · ← collapse · ⏎ cd & quit · P sync push · L sync pull",
+           "de": " ↑/↓ wählen · → aufklappen · ← zuklappen · ⏎ cd & Exit · P Sync-Push · L Sync-Pull"},
+    "f2": {"en": " {apps} · C commit · U stash pop · R fetch all · G GitHub push",
+           "de": " {apps} · C Commit · U Stash pop · R fetch all · G GitHub-Push"},
+    "f3": {"en": " Q quit · S stash preview · D stash drop · H Git help",
+           "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen · H Git-Hilfe"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
@@ -187,9 +191,87 @@ TR = {
     "confirm_push": {"en": "Push {n} commit(s) to {r} now?",
                      "de": "Jetzt {n} Commit(s) zu {r} pushen?"},
     "committed_pushed": {"en": "Committed & pushed ({r}).", "de": "Committet & gepusht ({r})."},
-    "push_failed": {"en": "Push failed: {e}", "de": "Push fehlgeschlagen: {e}"},
+    "push_failed": {"en": "Push failed (Git exit code {code}).",
+                    "de": "Push fehlgeschlagen (Git-Exit-Code {code})."},
+    "pull_failed": {"en": "Fast-forward failed (Git exit code {code}).",
+                    "de": "Fast-forward fehlgeschlagen (Git-Exit-Code {code})."},
     "nothing_to_commit": {"en": "Nothing to commit in this repo.",
                           "de": "Nichts zu committen in diesem Repo."},
+    # Sichere Push-/Pull-Hilfe
+    "no_sync_for_action": {"en": "No sync remote is configured for this repository.",
+                           "de": "Für dieses Repo ist kein Sync-Remote konfiguriert."},
+    "public_simple_block": {
+        "en": "The sync remote is public. Use G for the guarded GitHub preview.",
+        "de": "Der Sync-Remote ist öffentlich. Nutze G für die geschützte GitHub-Vorschau."},
+    "transfer_fetch_failed": {"en": "Fetch from {r} failed (Git exit code {code}).",
+                              "de": "Fetch von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+    "transfer_inspect_failed": {
+        "en": "Git could not inspect the branch safely; no transfer was attempted.",
+        "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen."},
+    "remote_url_mismatch": {
+        "en": "{r} mixes GitHub and non-GitHub URLs; simple transfer is blocked.",
+        "de": "{r} mischt GitHub- und Nicht-GitHub-URLs; einfacher Transfer ist gesperrt."},
+    "transfer_dirty": {"en": "Working tree is not clean — commit, ignore, or stash first.",
+                       "de": "Arbeitsbaum ist nicht sauber — erst committen, ignorieren oder stashen."},
+    "transfer_detached": {"en": "Detached HEAD — use the terminal for this special case.",
+                          "de": "Detached HEAD — diesen Sonderfall im Terminal bearbeiten."},
+    "transfer_missing": {"en": "Branch '{b}' does not exist on {r}; creating remote branches is blocked here.",
+                         "de": "Branch '{b}' existiert nicht auf {r}; neue Remote-Branches sind hier gesperrt."},
+    "transfer_divergent": {"en": "Local and {r} have diverged ({a} ahead, {b} behind); no automatic reconciliation.",
+                           "de": "Lokal und {r} sind divergiert ({a} voraus, {b} zurück); kein automatischer Abgleich."},
+    "transfer_behind": {"en": "Local branch is {n} commit(s) behind {r}; pull first.",
+                        "de": "Der lokale Branch ist {n} Commit(s) hinter {r}; zuerst pullen."},
+    "nothing_to_push": {"en": "Nothing to push to {r}.", "de": "Nichts zu {r} zu pushen."},
+    "nothing_to_pull": {"en": "Nothing to pull from {r}.", "de": "Nichts von {r} zu pullen."},
+    "confirm_sync_push": {"en": "Push {n} commit(s) to the private sync remote {r}?",
+                          "de": "{n} Commit(s) zum privaten Sync-Remote {r} pushen?"},
+    "confirm_sync_pull": {"en": "Fast-forward {n} commit(s) from the private sync remote {r}?",
+                          "de": "{n} Commit(s) per Fast-forward vom privaten Sync-Remote {r} holen?"},
+    "sync_pushed": {"en": "Pushed current branch to {r} (no tags).",
+                    "de": "Aktuellen Branch zu {r} gepusht (keine Tags)."},
+    "sync_pulled": {"en": "Fast-forwarded current branch from {r}.",
+                    "de": "Aktuellen Branch per Fast-forward von {r} geholt."},
+    "no_github": {"en": "No GitHub remote in this repository.",
+                  "de": "Dieses Repo hat keinen GitHub-Remote."},
+    "many_github": {"en": "Several GitHub remotes ({names}); use the terminal to choose deliberately.",
+                    "de": "Mehrere GitHub-Remotes ({names}); bitte im Terminal bewusst auswählen."},
+    "github_preview": {"en": "GitHub push preview · {rel} → {r}/{b}",
+                       "de": "GitHub-Push-Vorschau · {rel} → {r}/{b}"},
+    "github_type": {"en": "Type '{phrase}' to publish this branch only: ",
+                    "de": "Zum Veröffentlichen nur dieses Branches '{phrase}' eingeben: "},
+    "github_cancelled": {"en": "GitHub push cancelled — nothing was published.",
+                         "de": "GitHub-Push abgebrochen — nichts wurde veröffentlicht."},
+    "github_pushed": {"en": "Published current branch to {r}; no tags were sent.",
+                      "de": "Aktuellen Branch zu {r} veröffentlicht; keine Tags übertragen."},
+    "github_changed": {"en": "Remote or outgoing files changed after the preview; review again.",
+                       "de": "Remote oder ausgehende Dateien änderten sich nach der Vorschau; bitte erneut prüfen."},
+    "preview_branch_only": {
+        "en": "Branch only: explicit refspec, no force, no tags, no new remote branch.",
+        "de": "Nur Branch: expliziter Refspec, kein Force, keine Tags, kein neuer Remote-Branch."},
+    "preview_privacy": {
+        "en": "Review every outgoing commit and file name; this is not an automatic privacy approval.",
+        "de": "Jeden ausgehenden Commit und Dateinamen prüfen; dies ist keine automatische Privacy-Freigabe."},
+    "outgoing_commits": {"en": "Outgoing commits:", "de": "Ausgehende Commits:"},
+    "changed_files": {"en": "Changed files:", "de": "Geänderte Dateien:"},
+    "none_label": {"en": "(none)", "de": "(keine)"},
+    "git_help_title": {"en": "Safe Git actions", "de": "Sichere Git-Aktionen"},
+    "git_help_body": {
+        "en": "P  Push only the current branch to the private sync remote.\n"
+              "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
+              "L  Pull only from the private sync remote by fast-forward.\n"
+              "   Never merges or rebases and refuses dirty/divergent repositories.\n\n"
+              "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
+              "   Requires typing PUSH <remote>; never sends tags or uses force.\n"
+              "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
+              "R  Fetches all remotes in all repositories; it does not change working trees.",
+        "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
+              "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
+              "L  Nur per Fast-forward vom privaten Sync-Remote holen.\n"
+              "   Führt nie Merge oder Rebase aus und verweigert dirty/divergente Repos.\n\n"
+              "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
+              "   Verlangt PUSH <Remote>; sendet nie Tags und nutzt nie Force.\n"
+              "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
+              "R  Fetcht alle Remotes aller Repos; Working Trees bleiben unverändert."},
     # main
     "not_a_dir": {"en": "Not a directory: {p}", "de": "Kein Ordner: {p}"},
     "git_timeout": {"en": "git timeout", "de": "git-Timeout"},
@@ -254,6 +336,7 @@ class RepoStatus:
     upstream: str | None = None   # z.B. "github/main"
     upstream_ahead: int = 0
     upstream_behind: int = 0
+    remotes: list = field(default_factory=list)  # RemoteStatus, GitHub immer zuletzt
     modified: int = 0
     deleted: int = 0
     untracked: int = 0
@@ -295,6 +378,50 @@ class RepoStatus:
         if self.remote_state != "ok":
             return 3
         return 4
+
+
+@dataclass
+class RemoteStatus:
+    """Anzeigezustand eines Remotes für den aktuellen Branch.
+
+    URLs bleiben absichtlich aus UI/JSON heraus. `public` wird ausschließlich aus
+    der URL-Klasse abgeleitet; dadurch kann auch ein Remote namens `origin`
+    verständlich und mit der GitHub-Sicherheitsstufe behandelt werden.
+    """
+
+    name: str
+    public: bool = False
+    mixed_public: bool = False
+    is_sync: bool = False
+    branch_exists: bool = False
+    ahead: int = 0
+    behind: int = 0
+
+    def badge(self) -> str:
+        arrows = ""
+        if self.ahead:
+            arrows += f"↑{self.ahead}"
+        if self.behind:
+            arrows += f"↓{self.behind}"
+        if not self.branch_exists:
+            arrows = "?"
+        return f"{arrows} {self.name}" if arrows else self.name
+
+
+@dataclass
+class TransferCheck:
+    """Deterministischer Preflight für genau einen Branch und einen Remote."""
+
+    reason: str
+    ahead: int = 0
+    behind: int = 0
+    remote_ref: str = ""
+    commits: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return self.reason == "ready"
 
 
 # Zwei-Buchstaben-Codes, die einen ungemergten Zustand (Merge-Konflikt) bedeuten.
@@ -390,6 +517,122 @@ def detect_sync_remote(repo: Path, cfg: dict) -> str | None:
     return None
 
 
+def remote_urls(repo: Path, cfg: dict) -> dict[str, list[str]]:
+    """Remote-Name → Fetch-/Push-URLs, ohne URLs weiterzugeben.
+
+    Fetch- und Push-URL können in Git voneinander abweichen. Für die sichere
+    Aktionswahl müssen deshalb beide Richtungen klassifiziert werden.
+    """
+    r = run_git(repo, "remote", "-v", timeout=cfg["git_timeout"])
+    if r.returncode != 0:
+        return {}
+    remotes: dict[str, list[str]] = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] in ("(fetch)", "(push)"):
+            urls = remotes.setdefault(parts[0], [])
+            if parts[1] not in urls:
+                urls.append(parts[1])
+    return remotes
+
+
+def is_github_url(url: str) -> bool:
+    """Nur GitHub ist hier die öffentliche Ein-Tipp-Gefahr, die G absichert."""
+    return "github.com" in url.lower()
+
+
+def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
+                            cfg: dict) -> list[RemoteStatus]:
+    """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt."""
+    states: list[RemoteStatus] = []
+    for name, urls in remote_urls(repo, cfg).items():
+        public_classes = {is_github_url(url) for url in urls}
+        state = RemoteStatus(
+            name=name,
+            public=True in public_classes,
+            mixed_public=len(public_classes) > 1,
+            is_sync=name == sync_remote,
+        )
+        if branch not in ("?", "(detached)"):
+            ref = f"refs/remotes/{name}/{branch}"
+            r = run_git(repo, "rev-parse", "-q", "--verify", ref,
+                        timeout=cfg["git_timeout"])
+            state.branch_exists = r.returncode == 0
+            if state.branch_exists:
+                r = run_git(repo, "rev-list", "--left-right", "--count",
+                            f"HEAD...{ref}", timeout=cfg["git_timeout"])
+                if r.returncode == 0:
+                    ahead, behind = r.stdout.split()
+                    state.ahead, state.behind = int(ahead), int(behind)
+        states.append(state)
+    # Sync-Remote zuerst; GitHub unabhängig vom tatsächlichen Namen ganz rechts.
+    states.sort(key=lambda r: (r.public, not r.is_sync, r.name.lower()))
+    return states
+
+
+def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
+                     timeout: int = 10) -> TransferCheck:
+    """Prüft Push/Pull, ohne etwas zu verändern.
+
+    Bewusst eng: sauberer Tree, vorhandener Remote-Branch und verwandte,
+    fast-forward-fähige History. Neue Branches und Divergenzen gehören ins
+    Terminal, wo der Mensch den Sonderfall ausdrücklich auflöst.
+    """
+    if branch in ("?", "(detached)"):
+        return TransferCheck("detached")
+    dirty = run_git(repo, "status", "--porcelain", timeout=timeout)
+    if dirty.returncode != 0:
+        return TransferCheck("inspect-failed")
+    if dirty.stdout.strip():
+        return TransferCheck("dirty")
+    ref = f"refs/remotes/{remote}/{branch}"
+    exists = run_git(repo, "rev-parse", "-q", "--verify", ref, timeout=timeout)
+    if exists.returncode != 0:
+        return TransferCheck("missing-branch", remote_ref=ref)
+    delta = run_git(repo, "rev-list", "--left-right", "--count",
+                    f"HEAD...{ref}", timeout=timeout)
+    if delta.returncode != 0 or len(delta.stdout.split()) != 2:
+        return TransferCheck("inspect-failed", remote_ref=ref)
+    ahead_s, behind_s = delta.stdout.split()
+    ahead, behind = int(ahead_s), int(behind_s)
+    if ahead and behind:
+        return TransferCheck("divergent", ahead, behind, ref)
+    if action == "push":
+        if behind:
+            return TransferCheck("behind", ahead, behind, ref)
+        if not ahead:
+            return TransferCheck("nothing-push", remote_ref=ref)
+        commits_r = run_git(repo, "log", "--oneline", "--no-decorate",
+                            f"{ref}..HEAD", timeout=timeout)
+        files_r = run_git(repo, "diff", "--name-status", f"{ref}..HEAD",
+                          timeout=timeout)
+        if commits_r.returncode != 0 or files_r.returncode != 0:
+            return TransferCheck("inspect-failed", ahead, behind, ref)
+        return TransferCheck(
+            "ready", ahead, behind, ref,
+            [line for line in commits_r.stdout.splitlines() if line.strip()],
+            [line for line in files_r.stdout.splitlines() if line.strip()],
+        )
+    if action == "pull":
+        if ahead:
+            return TransferCheck("nothing-pull", ahead, behind, ref)
+        if not behind:
+            return TransferCheck("nothing-pull", remote_ref=ref)
+        return TransferCheck("ready", ahead, behind, ref)
+    raise ValueError(f"unknown transfer action: {action}")
+
+
+def safe_push_args(remote: str, branch: str) -> tuple[str, ...]:
+    """Expliziter Branch-Push: nie Force, nie implizite Refs, nie Tags."""
+    return ("push", "--porcelain", "--no-follow-tags", "--", remote,
+            f"HEAD:refs/heads/{branch}")
+
+
+def safe_pull_args(remote_ref: str) -> tuple[str, ...]:
+    """Pull ohne Fetch-Konfigurationsmagie: nur lokaler Fast-forward-Merge."""
+    return ("merge", "--ff-only", "--", remote_ref)
+
+
 def upstream_delta(repo: Path, sync_remote: str | None,
                    cfg: dict) -> tuple[str | None, int, int]:
     """Stand gegenüber dem konfigurierten Upstream, WENN dieser ein anderer
@@ -437,25 +680,31 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         r = run_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
         st.stashes = [l for l in r.stdout.splitlines() if l.strip()]
 
-        # Vergleich mit dem Sync-Remote (auf Basis des letzten fetch-Stands)
+        # Vergleich mit ALLEN Remotes (auf Basis des letzten fetch-Stands).
         st.remote = detect_sync_remote(repo, cfg)
-        if st.remote is None:
-            st.remote_state = "no-remote"
-            return st
         if fetch:
-            run_git(repo, "fetch", st.remote, "--quiet", timeout=cfg["fetch_timeout"])
+            # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
+            # Fetch verändert weder Branch noch Working Tree.
+            fetched = run_git(repo, "fetch", "--all", "--prune", "--quiet",
+                              timeout=cfg["fetch_timeout"])
+            if fetched.returncode != 0:
+                st.error = t("transfer_fetch_failed", r="--all",
+                             code=fetched.returncode)
+                st.remote_state = "error"
+        st.remotes = collect_remote_statuses(repo, st.branch, st.remote, cfg)
+        if st.remote is None:
+            if st.remote_state != "detached":
+                st.remote_state = "no-remote"
+            st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(
+                repo, None, cfg)
+            return st
         if st.remote_state == "detached":
             return st
-        ref = f"refs/remotes/{st.remote}/{st.branch}"
-        r = run_git(repo, "rev-parse", "-q", "--verify", ref, timeout=t_)
-        if r.returncode != 0:
+        sync = next((remote for remote in st.remotes if remote.is_sync), None)
+        if sync is None or not sync.branch_exists:
             st.remote_state = "no-branch"
             return st
-        r = run_git(repo, "rev-list", "--left-right", "--count",
-                    f"HEAD...{ref}", timeout=t_)
-        if r.returncode == 0:
-            ahead, behind = r.stdout.split()
-            st.ahead, st.behind = int(ahead), int(behind)
+        st.ahead, st.behind = sync.ahead, sync.behind
 
         # Zusatz: Stand gegenüber einem fremden Upstream (z.B. github).
         st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(
@@ -495,6 +744,12 @@ def status_dict(st: RepoStatus) -> dict:
         "ahead": st.ahead, "behind": st.behind,
         "upstream": st.upstream,
         "upstream_ahead": st.upstream_ahead, "upstream_behind": st.upstream_behind,
+        "remotes": [
+            {"name": r.name, "public": r.public, "mixed_public": r.mixed_public,
+             "sync": r.is_sync,
+             "branch_exists": r.branch_exists, "ahead": r.ahead, "behind": r.behind}
+            for r in st.remotes
+        ],
         "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
         "conflicts": st.conflicts,
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
@@ -506,18 +761,18 @@ def print_list(statuses: list[RepoStatus]) -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
     for st in statuses:
-        badge = st.upstream_badge()
-        badge_txt = f"  {cyan}{badge}{reset}" if badge else ""
+        remote_bits = []
+        for remote in st.remotes:
+            color = cyan if remote.public else (
+                red if remote.behind else yellow if remote.ahead else green)
+            remote_bits.append(f"{color}{remote.badge()}{reset}")
+        badge_txt = ("  " + "  ".join(remote_bits)) if remote_bits else ""
         if st.clean_and_synced:
             print(f"{green}✔ {st.rel}{reset}{badge_txt}")
             continue
         bits = []
         if st.error:
             bits.append(f"{red}{t('error_prefix', e=st.error)}{reset}")
-        if st.ahead:
-            bits.append(f"{yellow}↑{st.ahead}{reset}")
-        if st.behind:
-            bits.append(f"{red}↓{st.behind}{reset}")
         if st.conflicts:
             bits.append(f"{red}{t('conflict_n', n=st.conflicts)}{reset}")
         if st.modified:
@@ -532,8 +787,7 @@ def print_list(statuses: list[RepoStatus]) -> None:
             bits.append(f"{yellow}{t('no_sync_remote')}{reset}")
         elif st.remote_state == "no-branch":
             bits.append(f"{yellow}{t('branch_not_on', b=st.branch, r=st.remote)}{reset}")
-        if badge:
-            bits.append(f"{cyan}{badge}{reset}")
+        bits.extend(remote_bits)
         print(f"{red}✘{reset} {st.rel}  {' '.join(bits)}")
 
 
@@ -627,12 +881,6 @@ class TUI:
         if st.clean_and_synced:
             part(t("clean_synced"), C_GREEN)
         else:
-            if st.ahead:
-                part(f"↑{st.ahead}", C_YELLOW)
-            if st.behind:
-                part(f"↓{st.behind}", C_RED)
-            if st.ahead == 0 and st.behind == 0 and st.remote_state == "ok":
-                part("=", C_GREEN)
             if st.conflicts:
                 part("⚠" + t("conflict_n", n=st.conflicts), C_RED)
             if st.modified:
@@ -649,11 +897,21 @@ class TUI:
                 part(t("branch_not_on", b=st.branch, r=st.remote), C_YELLOW)
             elif st.remote_state == "detached":
                 part(t("detached"), C_YELLOW)
-        # Fremder Upstream (z.B. github): cyan, auch neben einem grünen ✔ sichtbar.
-        badge = st.upstream_badge()
-        if badge:
-            part(badge, C_CYAN)
+        # Branch steht VOR den Remotes, damit ein GitHub-Remote garantiert ganz
+        # rechts bleibt. Auch synchrone Remotes werden immer angezeigt.
         part(f"[{st.branch}]", C_DIM)
+        for remote in st.remotes:
+            if remote.public:
+                pair = C_CYAN
+            elif remote.behind:
+                pair = C_RED
+            elif remote.ahead:
+                pair = C_YELLOW
+            elif remote.is_sync:
+                pair = C_GREEN
+            else:
+                pair = C_DIM
+            part(remote.badge(), pair)
 
     def draw(self):
         self.scr.erase()
@@ -861,6 +1119,178 @@ class TUI:
             elif ch == curses.KEY_PPAGE:
                 top = max(0, top - body_h)
 
+    # -- Sichere Push-/Pull-Aktionen ---------------------------------------
+
+    @staticmethod
+    def _remote(st: RepoStatus, name: str | None) -> RemoteStatus | None:
+        return next((remote for remote in st.remotes if remote.name == name), None)
+
+    def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
+        r = run_git(st.path, "fetch", "--prune", "--quiet", "--", remote,
+                    timeout=self.cfg["fetch_timeout"])
+        if r.returncode != 0:
+            self.message = t("transfer_fetch_failed", r=remote,
+                             code=r.returncode)
+            return None
+        return self.refresh_one(st)
+
+    def _transfer_message(self, check: TransferCheck, remote: str,
+                          branch: str) -> str:
+        if check.reason == "dirty":
+            return t("transfer_dirty")
+        if check.reason == "detached":
+            return t("transfer_detached")
+        if check.reason == "inspect-failed":
+            return t("transfer_inspect_failed")
+        if check.reason == "missing-branch":
+            return t("transfer_missing", b=branch, r=remote)
+        if check.reason == "divergent":
+            return t("transfer_divergent", r=remote, a=check.ahead, b=check.behind)
+        if check.reason == "behind":
+            return t("transfer_behind", n=check.behind, r=remote)
+        if check.reason == "nothing-push":
+            return t("nothing_to_push", r=remote)
+        if check.reason == "nothing-pull":
+            return t("nothing_to_pull", r=remote)
+        return check.reason
+
+    def action_sync_push(self):
+        """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
+        st = self.current()
+        if not st or not st.remote:
+            self.message = t("no_sync_for_action")
+            return
+        remote = self._remote(st, st.remote)
+        if not remote:
+            self.message = t("no_sync_for_action")
+            return
+        if remote.mixed_public:
+            self.message = t("remote_url_mismatch", r=remote.name)
+            return
+        if remote.public:
+            self.message = t("public_simple_block")
+            return
+        fresh = self._fetch_remote(st, remote.name)
+        if not fresh:
+            return
+        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
+                                 self.cfg["git_timeout"])
+        if not check.ready:
+            self.message = self._transfer_message(check, remote.name, fresh.branch)
+            return
+        if not self.confirm(t("confirm_sync_push", n=check.ahead, r=remote.name)):
+            self.message = t("cancelled")
+            return
+        r = run_git(fresh.path, *safe_push_args(remote.name, fresh.branch),
+                    timeout=self.cfg["fetch_timeout"])
+        self.refresh_one(fresh)
+        if r.returncode == 0:
+            self.message = t("sync_pushed", r=remote.name)
+        else:
+            self.message = t("push_failed", code=r.returncode)
+
+    def action_sync_pull(self):
+        """Einfacher Pull = Fetch + lokaler --ff-only-Merge vom privaten Sync."""
+        st = self.current()
+        if not st or not st.remote:
+            self.message = t("no_sync_for_action")
+            return
+        remote = self._remote(st, st.remote)
+        if not remote:
+            self.message = t("no_sync_for_action")
+            return
+        if remote.mixed_public:
+            self.message = t("remote_url_mismatch", r=remote.name)
+            return
+        if remote.public:
+            self.message = t("public_simple_block")
+            return
+        fresh = self._fetch_remote(st, remote.name)
+        if not fresh:
+            return
+        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "pull",
+                                 self.cfg["git_timeout"])
+        if not check.ready:
+            self.message = self._transfer_message(check, remote.name, fresh.branch)
+            return
+        if not self.confirm(t("confirm_sync_pull", n=check.behind, r=remote.name)):
+            self.message = t("cancelled")
+            return
+        r = run_git(fresh.path, *safe_pull_args(check.remote_ref),
+                    timeout=self.cfg["git_timeout"])
+        self.refresh_one(fresh)
+        if r.returncode == 0:
+            self.message = t("sync_pulled", r=remote.name)
+        else:
+            self.message = t("pull_failed", code=r.returncode)
+
+    def action_github_push(self):
+        """Öffentlicher Push nur nach Vorschau + ausgeschriebener Bestätigung."""
+        st = self.current()
+        if not st:
+            return
+        public = [remote for remote in st.remotes if remote.public]
+        if not public:
+            self.message = t("no_github")
+            return
+        if len(public) != 1:
+            self.message = t("many_github", names=", ".join(r.name for r in public))
+            return
+        remote = public[0]
+        if remote.mixed_public:
+            self.message = t("remote_url_mismatch", r=remote.name)
+            return
+        fresh = self._fetch_remote(st, remote.name)
+        if not fresh:
+            return
+        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
+                                 self.cfg["git_timeout"])
+        if not check.ready:
+            self.message = self._transfer_message(check, remote.name, fresh.branch)
+            return
+
+        lines = [
+            t("preview_branch_only"),
+            t("preview_privacy"),
+            "",
+            t("outgoing_commits"),
+            *(check.commits or [t("none_label")]),
+            "",
+            t("changed_files"),
+            *(check.files or [t("none_label")]),
+        ]
+        self.show_pager(t("github_preview", rel=fresh.rel, r=remote.name,
+                          b=fresh.branch), lines)
+        self.draw()
+        phrase = f"PUSH {remote.name}"
+        h, _ = self.scr.getmaxyx()
+        typed = self.prompt_line(h - 4, t("github_type", phrase=phrase))
+        if typed != phrase:
+            self.message = t("github_cancelled")
+            return
+
+        # Unmittelbar vor dem öffentlichen Push erneut fetchen. Ändert sich der
+        # ausgehende Satz seit der Vorschau, wird nicht mit veralteter Freigabe gepusht.
+        newest = self._fetch_remote(fresh, remote.name)
+        if not newest:
+            return
+        final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
+                                 self.cfg["git_timeout"])
+        if (not final.ready or final.commits != check.commits
+                or final.files != check.files):
+            self.message = t("github_changed")
+            return
+        r = run_git(newest.path, *safe_push_args(remote.name, newest.branch),
+                    timeout=self.cfg["fetch_timeout"])
+        self.refresh_one(newest)
+        if r.returncode == 0:
+            self.message = t("github_pushed", r=remote.name)
+        else:
+            self.message = t("push_failed", code=r.returncode)
+
+    def action_git_help(self):
+        self.show_pager(t("git_help_title"), t("git_help_body").splitlines())
+
     # -- Commit-Hilfe --------------------------------------------------------
 
     def action_commit_wizard(self):
@@ -988,16 +1418,10 @@ class TUI:
             return True
         new = self.refresh_one(st)
         self.message = t("committed_in", rel=st.rel)
-        # Push nur anbieten, wenn ein Sync-Remote da ist und wir nicht hinterher sind.
+        # Nach einem Commit denselben abgesicherten privaten Sync-Push anbieten wie P.
+        # Ein öffentlicher `origin` kann dadurch nie über die alte Kurzstrecke rutschen.
         if new.remote and new.behind == 0 and new.ahead > 0:
-            self.draw()
-            if self.confirm(t("confirm_push", n=new.ahead, r=new.remote)):
-                r = run_git(st.path, "push", new.remote, timeout=self.cfg["fetch_timeout"])
-                if r.returncode == 0:
-                    self.message = t("committed_pushed", r=new.remote)
-                else:
-                    self.message = t("push_failed", e=r.stderr.strip()[:120])
-                self.refresh_one(new)
+            self.action_sync_push()
         return True
 
     # -- Hauptschleife -------------------------------------------------------
@@ -1043,6 +1467,14 @@ class TUI:
                 self.action_stash_pop()
             elif key == "R":
                 self.reload(fetch=True)
+            elif key == "P":
+                self.action_sync_push()
+            elif key == "L":
+                self.action_sync_pull()
+            elif key == "G":
+                self.action_github_push()
+            elif key == "H":
+                self.action_git_help()
             elif key == "S":
                 self.action_stash_show()
             elif key == "D":
@@ -1117,6 +1549,10 @@ def build_demo_sandbox(base: Path) -> Path:
     _dgit(gh, "init", "-q", "--bare")
     _dgit(repo, "remote", "add", "github", str(gh))
     _dgit(repo, "push", "-q", "github", "main")               # github/main = Basis
+    # Nach dem lokalen Aufbau nur die URL auf eine harmlose Beispieladresse
+    # umstellen. So zeigt die Demo die echte GitHub-Sicherheitsklasse, ohne Netz.
+    _dgit(repo, "remote", "set-url", "github",
+          "https://github.com/example/webshop-frontend.git")
     for i in range(3):
         _demo_commit(repo, "app.js", f"// build {i}\n", f"feat: change {i}")
     _dgit(repo, "push", "-q", "origin", "main")               # origin synchron
