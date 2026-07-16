@@ -45,10 +45,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -660,6 +661,13 @@ def upstream_delta(repo: Path, sync_remote: str | None,
 def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> RepoStatus:
     """Kompletten Zustand eines Repos einsammeln (läuft parallel in Threads)."""
     rel = str(repo.relative_to(root)) if repo != root else repo.name
+    # macOS liefert Dateinamen je nach Herkunft in NFD ("ö" = "o" + kombinierender
+    # Punkt = 2 Codepoints) oder NFC (1 Codepoint). Fuer die Anzeige zaehlt aber die
+    # Zahl der Terminal-Zellen: bei NFD verrechnet sich len() und die Spalten hinter
+    # dem Namen verrutschen. rel ist reiner Anzeigename (der echte Pfad steht in
+    # st.path), deshalb hier auf NFC normalisieren — das haelt zugleich die
+    # --json-Ausgabe ueber Macs hinweg vergleichbar.
+    rel = unicodedata.normalize("NFC", rel)
     st = RepoStatus(path=repo, rel=rel)
     t_ = cfg["git_timeout"]
     try:
