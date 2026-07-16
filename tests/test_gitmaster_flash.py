@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gitmaster_flash import (  # noqa: E402
     DEFAULT_CONFIG, __version__, RemoteStatus, RepoStatus, collect_status, find_repos,
+    diff_status, _remote_root,
     inspect_transfer, is_github_url, parse_porcelain, safe_pull_args,
     safe_push_args, suggested_ignore, upstream_delta,
 )
@@ -319,6 +320,89 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             subprocess.run(["git", "-C", str(other), "rev-parse", "HEAD"],
                            check=True, capture_output=True, text=True).stdout.strip(),
         )
+
+
+def _repo(rel, branch="main", remotes=(), modified=0, untracked=0):
+    return {"rel": rel, "branch": branch, "modified": modified, "untracked": untracked,
+            "deleted": 0,
+            "remotes": [{"name": n, "ahead": a, "behind": b} for n, a, b in remotes]}
+
+
+def _side(version="9.9.9", repos=()):
+    return {"version": version, "root": "/x", "repos": list(repos)}
+
+
+class DiffTests(unittest.TestCase):
+    """--diff compares two machines. The split is the point: DRIFT (should be
+    identical, isn't -> actionable) vs local (different branch, dirty -> explainable).
+    A report that lists everything gets ignored."""
+
+    def test_identical_means_no_output(self):
+        s = [_repo("a", remotes=[("origin", 0, 0)])]
+        self.assertEqual(diff_status(_side(repos=s), _side(repos=s), "here", "there"), [])
+
+    def test_missing_remote_is_drift(self):
+        """The core case: git never transfers remotes, so they drift silently."""
+        a = _side(repos=[_repo("x", remotes=[("origin", 0, 0), ("github", 0, 0)])])
+        b = _side(repos=[_repo("x", remotes=[("origin", 0, 0)])])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertIn("DRIFT", out[0])
+        self.assertIn("github", out[0])
+        self.assertIn("here", out[0])
+
+    def test_missing_remote_other_direction(self):
+        a = _side(repos=[_repo("x", remotes=[("origin", 0, 0)])])
+        b = _side(repos=[_repo("x", remotes=[("origin", 0, 0), ("github", 0, 0)])])
+        out = diff_status(a, b, "here", "there")
+        self.assertIn("there", out[0])
+
+    def test_differing_remote_state_is_drift(self):
+        a = _side(repos=[_repo("x", remotes=[("github", 4, 2)])])
+        b = _side(repos=[_repo("x", remotes=[("github", 0, 0)])])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertIn("DRIFT", out[0])
+
+    def test_different_branch_is_local_not_drift(self):
+        a = _side(repos=[_repo("x", branch="main")])
+        b = _side(repos=[_repo("x", branch="feature")])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertNotIn("DRIFT", out[0])
+
+    def test_dirty_is_local_not_drift(self):
+        a = _side(repos=[_repo("x", modified=2, untracked=1)])
+        b = _side(repos=[_repo("x")])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertNotIn("DRIFT", out[0])
+        self.assertIn("3", out[0])
+
+    def test_repo_only_on_one_side(self):
+        a = _side(repos=[_repo("here-only"), _repo("both")])
+        b = _side(repos=[_repo("both")])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertIn("here-only", out[0])
+
+    def test_version_mismatch_is_flagged_first(self):
+        out = diff_status(_side("1.0.0"), _side("2.0.0"), "here", "there")
+        self.assertTrue(out[0].startswith("!"))
+
+    def test_remote_root_uses_remote_home(self):
+        """Home dirs differ between machines (/Users/anna vs /home/bob) — the path
+        must be resolved against the REMOTE $HOME, not pasted absolutely."""
+        r = _remote_root(Path.home() / "git", None)
+        self.assertIn('"$HOME"/', r)
+        self.assertIn("git", r)
+        self.assertNotIn(str(Path.home()), r)
+
+    def test_remote_root_explicit_path_wins(self):
+        self.assertEqual(_remote_root(Path.home() / "git", "/srv/code"), "/srv/code")
+
+    def test_remote_root_outside_home_stays_absolute(self):
+        self.assertEqual(_remote_root(Path("/srv/code"), None), "/srv/code")
 
 
 class VersionInOutputTests(unittest.TestCase):

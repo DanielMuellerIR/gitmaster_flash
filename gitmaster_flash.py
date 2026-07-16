@@ -28,6 +28,13 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
 Non-interactive: with --list / --json (or no TTY) it prints the overview as text
 or JSON (machine-readable). Exit code 1 if any repo needs attention.
 
+Two machines: `--diff HOST` compares this machine's repos with another one over
+ssh and prints only the differences (read-only, never changes anything). The only
+requirement is that `ssh HOST` works — gitmaster_flash does NOT need to be
+installed there: the script is piped over stdin, so both sides always run the
+exact same version. Remotes live in .git/config and are never carried by git
+itself, so they drift silently between machines — that is what this finds.
+
 Try it risk-free: `gitmaster_flash.py --demo` builds a throwaway sandbox of fake
 repos in every state and opens the UI on it (also used for the README screenshots).
 
@@ -42,6 +49,7 @@ import concurrent.futures
 import curses
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -49,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -105,6 +113,26 @@ TR = {
     "reading": {"en": "Reading repos", "de": "Lese Repos"},
     "fetching": {"en": "Fetching from remote", "de": "Hole Stand vom Remote (fetch)"},
     "hdr_repos": {"en": "repos", "de": "Repos"},
+    # --diff (two machines)
+    "diff_here": {"en": "here", "de": "hier"},
+    "diff_same": {"en": "No differences to {h}.", "de": "Kein Unterschied zu {h}."},
+    "diff_need_host": {"en": "--diff needs a host, e.g. --diff mymac",
+                       "de": "--diff braucht einen Host, z.B. --diff meinmac"},
+    "diff_ssh_failed": {"en": "Cannot reach {h}: {e}", "de": "{h} nicht erreichbar: {e}"},
+    "diff_version": {
+        "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
+        "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
+    "diff_only_on": {"en": "only on {m}: {rel}", "de": "nur auf {m}: {rel}"},
+    "diff_remote_missing": {
+        "en": "DRIFT  {rel}: remote '{r}' only on {m} (git never transfers remotes)",
+        "de": "DRIFT  {rel}: Remote '{r}' nur auf {m} (Git uebertraegt Remotes nie)"},
+    "diff_remote_state": {
+        "en": "DRIFT  {rel}: {r} is {aa} ahead/{ab} behind on {a}, {ba}/{bb} on {b}",
+        "de": "DRIFT  {rel}: {r} auf {a} {aa} voraus/{ab} zurueck, auf {b} {ba}/{bb}"},
+    "diff_branch": {"en": "local  {rel}: [{ba}] on {a}, [{bb}] on {b}",
+                    "de": "lokal  {rel}: [{ba}] auf {a}, [{bb}] auf {b}"},
+    "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) on {m}",
+                   "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) auf {m}"},
     "hdr_review": {"en": "{n} to review", "de": "{n} zu prüfen"},
     "hdr_clean": {"en": "all clean ✔", "de": "alles sauber ✔"},
     # Repo-Zeile
@@ -763,6 +791,118 @@ def status_dict(st: RepoStatus) -> dict:
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
         "error": st.error,
     }
+
+
+# --- Comparing two machines (--diff) ---------------------------------------
+# Why this exists: remotes live in .git/config and git NEVER transfers them. Clone a
+# repo on machine A, add a `github` remote there, and machine B simply doesn't have it
+# — so a pending push is invisible on B. Same for branches you don't have checked out.
+# Nothing warns you; you have to look. This makes looking a one-liner.
+#
+# The remote side runs THIS script via `ssh HOST python3 - --json <root>`, i.e. piped
+# over stdin. Two nice consequences: gitmaster_flash needs no installation there, and
+# both sides always run the identical version (no drift to reason about). The remote
+# only needs python3 + git.
+
+
+def _remote_root(local_root: Path, spec_path: str | None) -> str:
+    """Which directory to scan on the other machine.
+
+    `HOST:/some/path` wins. Otherwise: if the local root sits under $HOME, use the same
+    path relative to the REMOTE $HOME (home dirs differ — /Users/anna/git vs
+    /home/bob/git). Only if it is outside $HOME do we reuse the absolute path."""
+    if spec_path:
+        return spec_path
+    home = Path.home()
+    try:
+        return '"$HOME"/' + shlex.quote(str(local_root.relative_to(home)))
+    except ValueError:
+        return shlex.quote(str(local_root))
+
+
+def fetch_remote_status(host: str, root: str, *, fetch: bool) -> dict:
+    """Run this very script on `host` over ssh and return its --json output."""
+    inner = "python3 - --json" + (" --fetch" if fetch else "") + " " + root
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            r = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", host, inner],
+                stdin=fh, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(t("diff_ssh_failed", h=host, e=str(e)[:100]))
+    if not (r.stdout or "").strip():
+        last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
+        raise RuntimeError(t("diff_ssh_failed", h=host,
+                             e=(last[-1][:120] if last else "no output")))
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(t("diff_ssh_failed", h=host, e="unreadable JSON"))
+
+
+def _remotes_by_name(repo: dict) -> dict:
+    return {x["name"]: x for x in (repo.get("remotes") or [])}
+
+
+def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> list:
+    """Compare two --json payloads -> list of difference lines. Pure -> testable.
+
+    The split matters more than the comparison: `DRIFT` = should be identical but
+    isn't (actionable); `local` = explainable (different branch checked out, dirty
+    working tree). A report that lists everything gets ignored."""
+    out = []
+    if here.get("version") != there.get("version"):
+        out.append(t("diff_version", a=here_name, va=here.get("version"),
+                     b=there_name, vb=there.get("version")))
+    ra = {r["rel"]: r for r in here.get("repos", [])}
+    rb = {r["rel"]: r for r in there.get("repos", [])}
+    for rel in sorted(set(ra) - set(rb)):
+        out.append(t("diff_only_on", rel=rel, m=here_name))
+    for rel in sorted(set(rb) - set(ra)):
+        out.append(t("diff_only_on", rel=rel, m=there_name))
+
+    for rel in sorted(set(ra) & set(rb)):
+        x, y = ra[rel], rb[rel]
+        xr, yr = _remotes_by_name(x), _remotes_by_name(y)
+        for name, mine, other in ((here_name, xr, yr), (there_name, yr, xr)):
+            for rn in sorted(set(mine) - set(other)):
+                out.append(t("diff_remote_missing", rel=rel, r=rn, m=name))
+        for rn in sorted(set(xr) & set(yr)):
+            pa, pb = xr[rn], yr[rn]
+            if (pa.get("ahead"), pa.get("behind")) != (pb.get("ahead"), pb.get("behind")):
+                out.append(t("diff_remote_state", rel=rel, r=rn,
+                             a=here_name, aa=pa.get("ahead"), ab=pa.get("behind"),
+                             b=there_name, ba=pb.get("ahead"), bb=pb.get("behind")))
+        if x.get("branch") != y.get("branch"):
+            out.append(t("diff_branch", rel=rel, a=here_name, ba=x.get("branch"),
+                         b=there_name, bb=y.get("branch")))
+        for name, r in ((here_name, x), (there_name, y)):
+            n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
+            if n:
+                out.append(t("diff_dirty", rel=rel, m=name, n=n))
+    return out
+
+
+def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool) -> int:
+    """--diff HOST[:PATH]: compare this machine with `HOST`. Read-only."""
+    host, _, path = spec.partition(":")
+    if not host:
+        print(t("diff_need_host"), file=sys.stderr)
+        return 2
+    try:
+        there = fetch_remote_status(host, _remote_root(root, path or None), fetch=fetch)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    here = {"version": __version__, "root": str(root),
+            "repos": [status_dict(s) for s in collect_all(root, cfg, fetch=fetch)]}
+    lines = diff_status(here, there, t("diff_here"), host)
+    if as_json:
+        print(json.dumps({"here": here.get("version"), "host": host,
+                          "differences": lines}, indent=2, ensure_ascii=False))
+    else:
+        print("\n".join(lines) if lines else t("diff_same", h=host))
+    return 1 if lines else 0
 
 
 def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
@@ -1653,6 +1793,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="non-interactive JSON output (machine-readable)")
     ap.add_argument("--fetch", action="store_true",
                     help="`git fetch` each repo before output (with --list/--json)")
+    ap.add_argument("--diff", metavar="HOST[:PATH]",
+                    help="compare this machine's repos with HOST over ssh and print "
+                         "only the differences (read-only). Needs `ssh HOST` to work; "
+                         "gitmaster_flash need NOT be installed there. PATH overrides "
+                         "the directory scanned on the other side.")
     ap.add_argument("--lang", choices=["en", "de"],
                     help="UI language (overrides config; default: auto from $LANG)")
     ap.add_argument("--demo", action="store_true",
@@ -1680,6 +1825,9 @@ def main(argv: list[str] | None = None) -> int:
         if not root.is_dir():
             print(t("not_a_dir", p=root), file=sys.stderr)
             return 1
+
+    if args.diff:
+        return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json)
 
     if args.list or args.json or not sys.stdout.isatty():
         statuses = collect_all(root, cfg, fetch=args.fetch)

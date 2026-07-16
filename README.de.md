@@ -131,6 +131,50 @@ cd ~/projekte && gmf
 Ohne Wrapper funktioniert alles genauso, nur gibt ⏎ den Pfad aus, statt
 hineinzuwechseln.
 
+## Zwei Rechner vergleichen: `--diff` (nur lesend)
+
+Wer dieselben Repos auf mehreren Rechnern hat (Laptop + Desktop, Mac + Linux), bekommt
+Unterschiede, vor denen Git nicht warnt. **Remotes liegen in `.git/config` und werden von
+Git nie übertragen** — ein `github`-Remote auf dem einen Rechner fehlt auf dem anderen
+schlicht, ein fälliger Push ist dort also unsichtbar. Dasselbe gilt für Branches, die
+gerade nicht ausgecheckt sind.
+
+```sh
+gitmaster_flash.py --diff meinmac            # ~/git hier gegen ~/git auf meinmac
+gitmaster_flash.py --diff meinmac --json     # maschinenlesbar
+gitmaster_flash.py --diff meinmac:~/code     # anderes Verzeichnis drüben
+gitmaster_flash.py --diff meinmac --fetch    # vorher die ↑/↓-Zahlen auffrischen
+```
+
+Ausgegeben werden **nur die Unterschiede**, getrennt in zwei Klassen — diese Trennung
+ist der Punkt, ein Report der alles meldet wird ignoriert:
+
+```
+DRIFT  favenio: Remote 'github' nur auf hier (Git uebertraegt Remotes nie)
+DRIFT  notizen: origin auf hier 4 voraus/2 zurueck, auf meinmac 0/0
+lokal  webapp: [main] auf hier, [feature/x] auf meinmac
+lokal  blog: 3 geaenderte/neue Datei(en) auf hier
+nur auf meinmac: experiment
+```
+
+`DRIFT` = sollte gleich sein, ist es nicht (Handlungsbedarf). `lokal` = erklärbar
+(anderer Branch ausgecheckt, dirty). Exit **0** = kein Unterschied, **1** =
+Unterschiede, **2** = anderer Rechner nicht erreichbar.
+
+**Voraussetzung:** `ssh HOST` muss funktionieren — mehr nicht. gitmaster_flash muss auf
+dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber, drüben
+braucht es nur `python3` und `git`. Nebeneffekt: beide Seiten laufen immer in exakt
+derselben Fassung, Versionsdrift ist ausgeschlossen. Funktioniert auch gegen Linux.
+
+**Es ändert nie etwas** — kein Fetch in deine Repos, keine Remotes angelegt, nichts
+gepusht. Es sagt, was anders ist; das Reparieren bleibt bei dir.
+
+**Tipp:** Rechner in `~/.ssh/config` eintragen und `ControlMaster auto` /
+`ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s` setzen. Beim Scannen vieler Repos
+gehen viele ssh-Verbindungen gleichzeitig auf, und der sshd-Default
+(`MaxStartups 10:30:100`) wirft davon zufällig welche weg — das sieht aus wie ein
+kaputtes Repo, ist aber keins.
+
 ## Nicht-interaktiv (Skripte, CI, Agenten)
 
 ```sh
