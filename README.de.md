@@ -87,7 +87,15 @@ python3 gitmaster_flash/gitmaster_flash.py
 
 Damit ⏎ tatsächlich in den Repo-Ordner wechselt, den Shell-Wrapper einbinden.
 Der Grund: Ein Kindprozess kann das Arbeitsverzeichnis der aufrufenden Shell
-nicht ändern — das muss eine kleine Shell-Funktion übernehmen.
+nicht ändern — das muss eine kleine Shell-Funktion übernehmen. `install.sh`
+erledigt das: Es führt den Selbsttest aus und registriert `gmf.zsh` in der
+`~/.zshrc` (idempotent — ein zweiter Lauf ändert nichts):
+
+```sh
+gitmaster_flash/install.sh
+```
+
+Oder die Zeile von Hand eintragen:
 
 ```sh
 echo 'source /pfad/zu/gitmaster_flash/gmf.zsh' >> ~/.zshrc

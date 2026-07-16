@@ -83,7 +83,15 @@ python3 gitmaster_flash/gitmaster_flash.py
 
 For the `⏎ = cd into the repository` feature, source the shell wrapper — a child
 process cannot change the working directory of the shell that started it, so a
-small function has to do it:
+small function has to do it. `install.sh` does that for you: it runs the
+self-test, then registers `gmf.zsh` in your `~/.zshrc` (idempotent — a second
+run changes nothing):
+
+```sh
+gitmaster_flash/install.sh
+```
+
+Or add the line manually:
 
 ```sh
 echo 'source /path/to/gitmaster_flash/gmf.zsh' >> ~/.zshrc
