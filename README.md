@@ -10,7 +10,10 @@ left over. One Python file, standard library only — no `pip install`, no daemo
 no registration of repositories. It scans whatever is below the directory you
 start it in.
 
-![Overview of several repositories, problem repos sorted to the top](docs/overview.png)
+![Overview of several repositories, problem repos sorted to the top](docs/overview.svg)
+
+<sub>The screen above is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes.</sub>
+
 
 Try it without touching your own repositories:
 
@@ -64,7 +67,15 @@ first.
 
 ## Commit helper (`C`)
 
-![Commit helper with per-file suggestions](docs/commit-helper.png)
+```
+ Commit helper · api-gateway — review, then ⏎
+ M  README.md                                                    ✔ commit
+ U  notes.txt                                                    ✔ commit
+ U  server.py                                                    ✔ commit
+ U  build/out.o                                        ✎ .gitignore: build/
+
+ ␣ commit on/off · i gitignore on/off · ⏎ next · Esc cancel
+```
 
 1. Every changed and new file is listed with a suggestion: typical junk
    (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`, …) is proposed

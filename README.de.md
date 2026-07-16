@@ -11,7 +11,10 @@ was. Eine einzige Python-Datei, nur Standardbibliothek — kein `pip install`, k
 Hintergrunddienst, keine Repo-Registrierung. Gescannt wird schlicht alles
 unterhalb des Ordners, in dem man es startet.
 
-![Übersicht mehrerer Repos, problematische zuerst](docs/overview.png)
+![Übersicht mehrerer Repos, problematische zuerst](docs/overview.svg)
+
+<sub>Das Bild oben wird aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen.</sub>
+
 
 Zum gefahrlosen Ausprobieren, ohne die eigenen Repos anzufassen:
 
@@ -67,7 +70,15 @@ erst die Konflikte auflösen.
 
 ## Commit-Hilfe (`C`)
 
-![Commit-Hilfe mit Vorschlag je Datei](docs/commit-helper.png)
+```
+ Commit-Hilfe · api-gateway · prüfen, dann ⏎
+ M  README.md                                                  ✔ committen
+ U  notes.txt                                                  ✔ committen
+ U  server.py                                                  ✔ committen
+ U  build/out.o                                      ✎ .gitignore: build/
+
+ ␣ committen an/aus · i gitignore an/aus · ⏎ weiter · Esc abbrechen
+```
 
 1. Alle geänderten und neuen Dateien werden gelistet, jeweils mit Vorschlag:
    typischer Müll (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`,

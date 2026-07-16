@@ -21,11 +21,20 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Der Demo-Modus (`--demo`) ist die Referenz für Screenshots und muss ohne Netz
   und unabhängig von der Maschine gleich aussehen (deshalb `core.excludesFile`
   und `core.hooksPath` in den Demo-Repos abschalten).
-- Screenshots in `docs/` stammen aus `TMPDIR=/tmp python3 gitmaster_flash.py
-  --demo --lang en` (englische UI, kurzer Pfad im Kopf). Terminal-Aufnahme und
-  Zuschnitt nicht automatisieren: Daniel um den Screenshot bitten; er entfernt
-  die Titelleiste selbst in macOS Vorschau. Der Agent prüft nur die fertige Datei
-  und sendet insbesondere keine globalen synthetischen Tastendrücke.
+- Die Bilder in `docs/` sind **generiert, keine Screenshots** (seit 2026-07-17):
+  `python3 docs/make-screens.py` fährt das echte Programm in einem **Pseudo-Terminal**
+  auf der `--demo`-Sandbox und baut daraus SVG. Damit entfällt das frühere Gefummel
+  (Fenstertransparenz, Titelleiste, Zuschnitt) und die Bilder veralten nicht mehr
+  still — die alten PNGs zeigten zuletzt eine Kopfzeile ohne Version.
+  `--check` schlägt fehl, wenn sie neu erzeugt werden müssten (nach UI-Änderungen also
+  `make-screens.py` laufen lassen und das Ergebnis mitcommitten).
+  **Weiterhin gilt:** keine globalen synthetischen Tastendrücke — die Eingaben gehen
+  ausschließlich in den eigenen pty-Kindprozess, nie an das Fenstersystem.
+  Grenze des Generators: Nur der **Listen-Screen** ist reproduzierbar. Views, die
+  darüber gezeichnet werden (Commit-Hilfe, Pager), bräuchten echte Zellbreiten-Logik
+  (`⏎`/`⚑`/`✔` belegen zwei Spalten, ein String-Index eine) — dafür wäre ein voller
+  Terminal-Emulator nötig. Solche Ansichten gehören als vorformatierter Textblock ins
+  README, nicht als Bild.
 - Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
   Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
   fremde Python-Dienste und Automationen unangetastet lassen.
