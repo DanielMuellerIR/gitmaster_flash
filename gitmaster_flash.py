@@ -49,7 +49,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -765,9 +765,14 @@ def status_dict(st: RepoStatus) -> dict:
     }
 
 
-def print_list(statuses: list[RepoStatus]) -> None:
+def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
+    # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
+    # umgeleiteten Datei, die man spaeter gegen die eines anderen Macs diffed —
+    # ohne Version haelt man einen Versionsunterschied fuer einen Repo-Unterschied.
+    print(f"gitmaster_flash {__version__}"
+          + (f" · {root}" if root else "") + f" · {len(statuses)} {t('hdr_repos')}")
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
@@ -926,7 +931,12 @@ class TUI:
         h, w = self.scr.getmaxyx()
         dirty = sum(1 for s in self.statuses if not s.clean_and_synced)
         tail = t("hdr_review", n=dirty) if dirty else t("hdr_clean")
-        head = (f" gitmaster_flash · {self.root} · "
+        # Version mit in die Kopfzeile: Wer zwei Ausgaben von verschiedenen Macs
+        # vergleicht, muss sehen, ob dieselbe Fassung dahintersteckt — sonst haelt man
+        # einen Versionsunterschied fuer einen echten Repo-Unterschied. Auch eine
+        # LAUFENDE Instanz zeigt den Code von ihrem Start: nach einem Sync im
+        # Hintergrund vergleicht man sonst unbemerkt zwei Staende.
+        head = (f" gitmaster_flash {__version__} · {self.root} · "
                 f"{len(self.statuses)} {t('hdr_repos')} · {tail}")
         safe_addstr(self.scr, 0, 0, head.ljust(w - 1), curses.A_BOLD)
 
@@ -1674,10 +1684,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.list or args.json or not sys.stdout.isatty():
         statuses = collect_all(root, cfg, fetch=args.fetch)
         if args.json:
-            print(json.dumps([status_dict(s) for s in statuses],
+            # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
+            # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
+            # dieselbe Fassung dahintersteht. Die Repos liegen unter "repos".
+            print(json.dumps({"version": __version__, "root": str(root),
+                              "repos": [status_dict(s) for s in statuses]},
                              indent=2, ensure_ascii=False))
         else:
-            print_list(statuses)
+            print_list(statuses, root)
         # Exit-Code 1, wenn irgendein Repo Aufmerksamkeit braucht (skriptbar).
         return 0 if all(s.clean_and_synced for s in statuses) else 1
 

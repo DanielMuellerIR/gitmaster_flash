@@ -4,6 +4,7 @@ Die TUI selbst wird nicht getestet — die Datensammlung dafür schon:
 gegen ein echtes, temporär angelegtes Git-Repo.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gitmaster_flash import (  # noqa: E402
-    DEFAULT_CONFIG, RemoteStatus, RepoStatus, collect_status, find_repos,
+    DEFAULT_CONFIG, __version__, RemoteStatus, RepoStatus, collect_status, find_repos,
     inspect_transfer, is_github_url, parse_porcelain, safe_pull_args,
     safe_push_args, suggested_ignore, upstream_delta,
 )
@@ -318,6 +319,60 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             subprocess.run(["git", "-C", str(other), "rev-parse", "HEAD"],
                            check=True, capture_output=True, text=True).stdout.strip(),
         )
+
+
+class VersionInOutputTests(unittest.TestCase):
+    """Die Version muss in JEDER Ausgabe stehen (seit 0.6.0).
+
+    Zweck: Wer zwei Ausgaben von verschiedenen Macs vergleicht, muss sehen, ob
+    dieselbe Fassung dahintersteckt — sonst haelt man einen Versionsunterschied fuer
+    einen echten Repo-Unterschied. Betrifft auch eine laufende Instanz, die den Code
+    von ihrem Start zeigt, waehrend der Fleet-Sync im Hintergrund schon aktualisiert hat.
+    """
+
+    SCRIPT = str(Path(__file__).resolve().parent.parent / "gitmaster_flash.py")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        repo = Path(cls.tmp.name) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        (repo / "f.txt").write_text("x")
+        git(repo, "add", "f.txt")
+        git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def run_gmf(self, *args):
+        return subprocess.run([sys.executable, self.SCRIPT, *args, self.tmp.name],
+                              capture_output=True, text=True)
+
+    def test_version_flag(self):
+        r = subprocess.run([sys.executable, self.SCRIPT, "--version"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), __version__)
+
+    def test_list_kopfzeile_nennt_version(self):
+        out = self.run_gmf("--list").stdout
+        self.assertIn(f"gitmaster_flash {__version__}", out.splitlines()[0])
+
+    def test_json_traegt_version_und_root(self):
+        d = json.loads(self.run_gmf("--json").stdout)
+        self.assertEqual(d["version"], __version__)
+        # resolve() auf beiden Seiten: auf macOS ist /var ein Symlink auf /private/var,
+        # das Tool loest den Pfad auf — beide meinen dasselbe Verzeichnis.
+        self.assertEqual(Path(d["root"]).resolve(), Path(self.tmp.name).resolve())
+        self.assertIsInstance(d["repos"], list)
+
+    def test_json_repo_felder_unveraendert(self):
+        """Das Wrapper-Objekt darf die Repo-Eintraege selbst nicht veraendert haben."""
+        d = json.loads(self.run_gmf("--json").stdout)
+        self.assertTrue(d["repos"])
+        for feld in ("rel", "path", "branch", "clean_and_synced", "remotes"):
+            self.assertIn(feld, d["repos"][0])
 
 
 if __name__ == "__main__":

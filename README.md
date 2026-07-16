@@ -130,6 +130,12 @@ instead of changing into it.
 gitmaster_flash.py --list          # colored text list
 gitmaster_flash.py --json          # machine-readable
 gitmaster_flash.py --json --fetch  # fetch each repo first
+
+# Every output carries the version — so a diff of two machines' output shows
+# whether the same build produced them:
+#   --list header:  gitmaster_flash 0.6.0 · /Users/you/git · 61 repos
+#   --json (0.6.0+): {"version": "0.6.0", "root": "…", "repos": [ … ]}
+#                    (before 0.6.0 --json printed a bare array)
 ```
 
 Exit code 0 means everything is clean and in sync, 1 means at least one

@@ -137,6 +137,12 @@ hineinzuwechseln.
 gitmaster_flash.py --list          # farbige Textliste
 gitmaster_flash.py --json          # maschinenlesbar
 gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
+
+# Jede Ausgabe nennt die Version — so zeigt ein Diff zweier Rechner-Ausgaben,
+# ob dieselbe Fassung dahintersteckt:
+#   --list-Kopfzeile: gitmaster_flash 0.6.0 · /Users/du/git · 61 Repos
+#   --json (ab 0.6.0): {"version": "0.6.0", "root": "…", "repos": [ … ]}
+#                      (vor 0.6.0 gab --json ein nacktes Array aus)
 ```
 
 Exit-Code 0 heißt: alles sauber und synchron. 1 heißt: mindestens ein Repo
