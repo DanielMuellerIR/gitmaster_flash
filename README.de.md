@@ -157,20 +157,24 @@ gitmaster_flash.py --diff meinmac:~/code     # anderes Verzeichnis drüben
 gitmaster_flash.py --diff meinmac --fetch    # vorher die ↑/↓-Zahlen auffrischen
 ```
 
-Ausgegeben werden **nur die Unterschiede**, getrennt in zwei Klassen — diese Trennung
+Ausgegeben werden **nur die Unterschiede**, getrennt in Klassen — diese Trennung
 ist der Punkt, ein Report der alles meldet wird ignoriert:
 
 ```
-DRIFT  favenio: Remote 'github' nur auf hier (Git uebertraegt Remotes nie)
-DRIFT  notizen: origin auf hier 4 voraus/2 zurueck, auf meinmac 0/0
-lokal  webapp: [main] auf hier, [feature/x] auf meinmac
-lokal  blog: 3 geaenderte/neue Datei(en) auf hier
+DRIFT  favenio: Remote 'github' nur hier (Git uebertraegt Remotes nie)
+DRIFT  notizen: origin hier 4 voraus/2 zurueck, auf meinmac 0/0
+SYNC   musik: origin auf beiden Rechnern 0 voraus/3 zurueck
+lokal  webapp: [main] hier, [feature/x] auf meinmac
+lokal  blog: 3 geaenderte/neue Datei(en) hier
 nur auf meinmac: experiment
 ```
 
-`DRIFT` = sollte gleich sein, ist es nicht (Handlungsbedarf). `lokal` = erklärbar
-(anderer Branch ausgecheckt, dirty). Exit **0** = kein Unterschied, **1** =
-Unterschiede, **2** = anderer Rechner nicht erreichbar.
+`DRIFT` = sollte gleich sein, ist es nicht (Handlungsbedarf). `SYNC` = beide
+Rechner sind sich einig, stehen aber gemeinsam vor/hinter dem Sync-Remote — im
+reinen Zwei-Rechner-Vergleich unsichtbar, und doch meist die eigentlich
+interessante Zahl. `lokal` = erklärbar (anderer Branch ausgecheckt, dirty).
+Exit **0** = kein Unterschied, **1** = Unterschiede, **2** = anderer Rechner
+nicht erreichbar.
 
 **Voraussetzung:** `ssh HOST` muss funktionieren — mehr nicht. gitmaster_flash muss auf
 dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber, drüben

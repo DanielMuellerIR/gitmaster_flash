@@ -323,9 +323,12 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
 
 
 def _repo(rel, branch="main", remotes=(), modified=0, untracked=0):
+    # remotes: (name, ahead, behind) oder (name, ahead, behind, is_sync)
     return {"rel": rel, "branch": branch, "modified": modified, "untracked": untracked,
             "deleted": 0,
-            "remotes": [{"name": n, "ahead": a, "behind": b} for n, a, b in remotes]}
+            "remotes": [{"name": r[0], "ahead": r[1], "behind": r[2],
+                         "sync": bool(r[3]) if len(r) > 3 else False}
+                        for r in remotes]}
 
 
 def _side(version="9.9.9", repos=()):
@@ -363,6 +366,36 @@ class DiffTests(unittest.TestCase):
         out = diff_status(a, b, "here", "there")
         self.assertEqual(len(out), 1)
         self.assertIn("DRIFT", out[0])
+        # Die eigene Maschine steht ohne Praeposition da ("here", nicht "on here").
+        self.assertNotIn("on here", out[0])
+        self.assertIn("on there", out[0])
+
+    def test_sync_remote_equally_behind_is_shown(self):
+        """Beide Rechner gleichauf, aber gemeinsam hinter dem Sync-Remote: das ist
+        im reinen Zwei-Rechner-Vergleich unsichtbar, aber genau die Zahl, die
+        interessiert (wie weit hinter dem Hub?). -> eigene SYNC-Zeile."""
+        s = [_repo("x", remotes=[("origin", 0, 2, True)])]
+        out = diff_status(_side(repos=s), _side(repos=s), "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertIn("SYNC", out[0])
+        self.assertNotIn("DRIFT", out[0])
+
+    def test_sync_remote_in_sync_stays_silent(self):
+        s = [_repo("x", remotes=[("origin", 0, 0, True)])]
+        self.assertEqual(diff_status(_side(repos=s), _side(repos=s), "here", "there"), [])
+
+    def test_nonsync_remote_equally_behind_stays_silent(self):
+        # Fuer Nicht-Sync-Remotes (z.B. github) bleibt gleicher Stand = kein Report.
+        s = [_repo("x", remotes=[("github", 0, 2)])]
+        self.assertEqual(diff_status(_side(repos=s), _side(repos=s), "here", "there"), [])
+
+    def test_sync_remote_reported_before_other_remotes(self):
+        a = _side(repos=[_repo("x", remotes=[("github", 4, 0), ("origin", 1, 0, True)])])
+        b = _side(repos=[_repo("x", remotes=[("github", 0, 0), ("origin", 0, 0, True)])])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len(out), 2)
+        self.assertIn("origin", out[0])   # Sync-Remote zuerst, github danach
+        self.assertIn("github", out[1])
 
     def test_different_branch_is_local_not_drift(self):
         a = _side(repos=[_repo("x", branch="main")])

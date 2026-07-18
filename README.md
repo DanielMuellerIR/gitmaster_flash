@@ -150,20 +150,23 @@ gitmaster_flash.py --diff mymac:~/code     # different directory on the other si
 gitmaster_flash.py --diff mymac --fetch    # refresh ahead/behind counts first
 ```
 
-It prints **only the differences**, split into two classes — that split is the point,
+It prints **only the differences**, split into classes — that split is the point,
 a report that lists everything gets ignored:
 
 ```
-DRIFT  favenio: remote 'github' only on here (git never transfers remotes)
-DRIFT  notes: origin is 4 ahead/2 behind on here, 0/0 on mymac
-local  webapp: [main] on here, [feature/x] on mymac
-local  blog: 3 changed/new file(s) on here
+DRIFT  favenio: remote 'github' only here (git never transfers remotes)
+DRIFT  notes: origin is 4 ahead/2 behind here, 0/0 on mymac
+SYNC   music: origin 0 ahead/3 behind on both machines
+local  webapp: [main] here, [feature/x] on mymac
+local  blog: 3 changed/new file(s) here
 only on mymac: experiment
 ```
 
-`DRIFT` = should be identical but isn't (worth acting on). `local` = explainable
-(different branch checked out, dirty working tree). Exit code **0** = no differences,
-**1** = differences, **2** = the other machine could not be reached.
+`DRIFT` = should be identical but isn't (worth acting on). `SYNC` = both machines
+agree, but together they sit ahead/behind the sync remote — invisible in a pure
+two-machine comparison, yet usually the number you actually care about. `local` =
+explainable (different branch checked out, dirty working tree). Exit code **0** =
+no differences, **1** = differences, **2** = the other machine could not be reached.
 
 **Requirements:** `ssh HOST` has to work — that's it. gitmaster_flash does **not** need
 to be installed on the other machine: the script is piped over stdin, so the remote

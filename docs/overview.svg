@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 864 602" width="864" height="602" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
 <title>gitmaster_flash overview — problem repos sorted to the top</title>
 <rect width="864" height="602" rx="8" fill="#1c1c1c"/>
-<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.8.0 · ~/git · 27 repos · 21 to review                          </text>
+<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.9.0 · ~/git · 27 repos · 21 to review                          </text>
 <rect x="12.0" y="29.0" width="16.8" height="17.0" fill="#d8d8d8"/>
 <text x="12.0" y="42.0" fill="#1c1c1c" xml:space="preserve">▶ </text>
 <rect x="28.8" y="29.0" width="92.4" height="17.0" fill="#d8d8d8"/>

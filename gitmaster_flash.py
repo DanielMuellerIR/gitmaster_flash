@@ -57,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -122,17 +122,23 @@ TR = {
     "diff_version": {
         "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
         "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
-    "diff_only_on": {"en": "only on {m}: {rel}", "de": "nur auf {m}: {rel}"},
+    # {m}/{a}/{b} kommen vorformatiert aus _loc(): "hier" bleibt nackt,
+    # Hostnamen bekommen "auf"/"on" — deshalb steht die Praeposition NICHT im Text.
+    "diff_on": {"en": "on {m}", "de": "auf {m}"},
+    "diff_only_on": {"en": "only {m}: {rel}", "de": "nur {m}: {rel}"},
     "diff_remote_missing": {
-        "en": "DRIFT  {rel}: remote '{r}' only on {m} (git never transfers remotes)",
-        "de": "DRIFT  {rel}: Remote '{r}' nur auf {m} (Git uebertraegt Remotes nie)"},
+        "en": "DRIFT  {rel}: remote '{r}' only {m} (git never transfers remotes)",
+        "de": "DRIFT  {rel}: Remote '{r}' nur {m} (Git uebertraegt Remotes nie)"},
     "diff_remote_state": {
-        "en": "DRIFT  {rel}: {r} is {aa} ahead/{ab} behind on {a}, {ba}/{bb} on {b}",
-        "de": "DRIFT  {rel}: {r} auf {a} {aa} voraus/{ab} zurueck, auf {b} {ba}/{bb}"},
-    "diff_branch": {"en": "local  {rel}: [{ba}] on {a}, [{bb}] on {b}",
-                    "de": "lokal  {rel}: [{ba}] auf {a}, [{bb}] auf {b}"},
-    "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) on {m}",
-                   "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) auf {m}"},
+        "en": "DRIFT  {rel}: {r} is {aa} ahead/{ab} behind {a}, {ba}/{bb} {b}",
+        "de": "DRIFT  {rel}: {r} {a} {aa} voraus/{ab} zurueck, {b} {ba}/{bb}"},
+    "diff_sync_even": {
+        "en": "SYNC   {rel}: {r} {aa} ahead/{ab} behind on both machines",
+        "de": "SYNC   {rel}: {r} auf beiden Rechnern {aa} voraus/{ab} zurueck"},
+    "diff_branch": {"en": "local  {rel}: [{ba}] {a}, [{bb}] {b}",
+                    "de": "lokal  {rel}: [{ba}] {a}, [{bb}] {b}"},
+    "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) {m}",
+                   "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}"},
     "hdr_review": {"en": "{n} to review", "de": "{n} zu prüfen"},
     "hdr_clean": {"en": "all clean ✔", "de": "alles sauber ✔"},
     # Repo-Zeile
@@ -844,39 +850,59 @@ def _remotes_by_name(repo: dict) -> dict:
     return {x["name"]: x for x in (repo.get("remotes") or [])}
 
 
+def _loc(name: str) -> str:
+    """Ortsangabe fuer die Diff-Zeilen: Hostnamen bekommen eine Praeposition
+    ("auf M5"/"on M5"), die eigene Maschine bleibt nackt — "auf hier" ist kein
+    Deutsch, "hier" schon."""
+    return name if name == t("diff_here") else t("diff_on", m=name)
+
+
 def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> list:
     """Compare two --json payloads -> list of difference lines. Pure -> testable.
 
     The split matters more than the comparison: `DRIFT` = should be identical but
-    isn't (actionable); `local` = explainable (different branch checked out, dirty
-    working tree). A report that lists everything gets ignored."""
+    isn't (actionable); `SYNC` = both machines agree but sit ahead/behind the sync
+    remote (invisible in a pure two-machine diff, yet exactly the number you care
+    about); `local` = explainable (different branch checked out, dirty working
+    tree). A report that lists everything gets ignored."""
     out = []
     if here.get("version") != there.get("version"):
         out.append(t("diff_version", a=here_name, va=here.get("version"),
                      b=there_name, vb=there.get("version")))
+    here_at, there_at = _loc(here_name), _loc(there_name)
     ra = {r["rel"]: r for r in here.get("repos", [])}
     rb = {r["rel"]: r for r in there.get("repos", [])}
     for rel in sorted(set(ra) - set(rb)):
-        out.append(t("diff_only_on", rel=rel, m=here_name))
+        out.append(t("diff_only_on", rel=rel, m=here_at))
     for rel in sorted(set(rb) - set(ra)):
-        out.append(t("diff_only_on", rel=rel, m=there_name))
+        out.append(t("diff_only_on", rel=rel, m=there_at))
 
     for rel in sorted(set(ra) & set(rb)):
         x, y = ra[rel], rb[rel]
         xr, yr = _remotes_by_name(x), _remotes_by_name(y)
-        for name, mine, other in ((here_name, xr, yr), (there_name, yr, xr)):
+        for name, mine, other in ((here_at, xr, yr), (there_at, yr, xr)):
             for rn in sorted(set(mine) - set(other)):
                 out.append(t("diff_remote_missing", rel=rel, r=rn, m=name))
-        for rn in sorted(set(xr) & set(yr)):
+        # Sync-Remote zuerst: sein Stand ist die interessantere Zahl als z.B. github.
+        for rn in sorted(set(xr) & set(yr),
+                         key=lambda n: (not (xr[n].get("sync") or yr[n].get("sync")), n)):
             pa, pb = xr[rn], yr[rn]
-            if (pa.get("ahead"), pa.get("behind")) != (pb.get("ahead"), pb.get("behind")):
+            sa = (pa.get("ahead"), pa.get("behind"))
+            sb = (pb.get("ahead"), pb.get("behind"))
+            if sa != sb:
                 out.append(t("diff_remote_state", rel=rel, r=rn,
-                             a=here_name, aa=pa.get("ahead"), ab=pa.get("behind"),
-                             b=there_name, ba=pb.get("ahead"), bb=pb.get("behind")))
+                             a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
+                             b=there_at, ba=pb.get("ahead"), bb=pb.get("behind")))
+            elif ((pa.get("sync") or pb.get("sync"))
+                  and (pa.get("ahead") or pa.get("behind"))):
+                # Beide Rechner gleichauf, aber gemeinsam neben dem Sync-Remote:
+                # im reinen Zwei-Rechner-Vergleich unsichtbar, trotzdem Handlungsbedarf.
+                out.append(t("diff_sync_even", rel=rel, r=rn,
+                             aa=pa.get("ahead"), ab=pa.get("behind")))
         if x.get("branch") != y.get("branch"):
-            out.append(t("diff_branch", rel=rel, a=here_name, ba=x.get("branch"),
-                         b=there_name, bb=y.get("branch")))
-        for name, r in ((here_name, x), (there_name, y)):
+            out.append(t("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
+                         b=there_at, bb=y.get("branch")))
+        for name, r in ((here_at, x), (there_at, y)):
             n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
             if n:
                 out.append(t("diff_dirty", rel=rel, m=name, n=n))
