@@ -166,7 +166,9 @@ only on mymac: experiment
 agree, but together they sit ahead/behind the sync remote — invisible in a pure
 two-machine comparison, yet usually the number you actually care about. `local` =
 explainable (different branch checked out, dirty working tree). Exit code **0** =
-no differences, **1** = differences, **2** = the other machine could not be reached.
+nothing to report, **1** = findings (note: a `SYNC` line means the machines agree
+with each other, so "identical machines" alone no longer guarantees exit 0),
+**2** = the other machine could not be reached.
 
 **Requirements:** `ssh HOST` has to work — that's it. gitmaster_flash does **not** need
 to be installed on the other machine: the script is piped over stdin, so the remote

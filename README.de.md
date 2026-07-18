@@ -173,8 +173,9 @@ nur auf meinmac: experiment
 Rechner sind sich einig, stehen aber gemeinsam vor/hinter dem Sync-Remote — im
 reinen Zwei-Rechner-Vergleich unsichtbar, und doch meist die eigentlich
 interessante Zahl. `lokal` = erklärbar (anderer Branch ausgecheckt, dirty).
-Exit **0** = kein Unterschied, **1** = Unterschiede, **2** = anderer Rechner
-nicht erreichbar.
+Exit **0** = nichts zu melden, **1** = Befunde (Achtung: bei einer `SYNC`-Zeile
+sind sich die Rechner untereinander einig — „beide Rechner identisch" allein
+garantiert also keinen Exit 0 mehr), **2** = anderer Rechner nicht erreichbar.
 
 **Voraussetzung:** `ssh HOST` muss funktionieren — mehr nicht. gitmaster_flash muss auf
 dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber, drüben
