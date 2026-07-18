@@ -852,8 +852,8 @@ def _remotes_by_name(repo: dict) -> dict:
 
 def _loc(name: str) -> str:
     """Ortsangabe fuer die Diff-Zeilen: Hostnamen bekommen eine Praeposition
-    ("auf M5"/"on M5"), die eigene Maschine bleibt nackt — "auf hier" ist kein
-    Deutsch, "hier" schon."""
+    ("auf mymac"/"on mymac"), die eigene Maschine bleibt nackt — "auf hier" ist
+    kein Deutsch, "hier" schon."""
     return name if name == t("diff_here") else t("diff_on", m=name)
 
 
