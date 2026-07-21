@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -28,15 +29,16 @@ SYNC_CONFIG = {**DEFAULT_CONFIG, "sync_remote_names": ["backup"]}
 
 class TestParsePorcelain(unittest.TestCase):
     def test_counts_and_letters(self):
-        lines = [
+        output = "\0".join([
             " M geändert.py",
             "M  gestaged.py",
             " D geloescht.txt",
             "?? neu.md",
             "?? unterordner/noch-neu.md",
             "A  hinzugefuegt.py",
-        ]
-        m, d, u, c, files = parse_porcelain(lines)
+            "",
+        ])
+        m, d, u, c, files = parse_porcelain(output)
         self.assertEqual((m, d, u, c), (3, 1, 2, 0))
         self.assertIn(("U", "neu.md"), files)
         self.assertIn(("D", "geloescht.txt"), files)
@@ -44,14 +46,27 @@ class TestParsePorcelain(unittest.TestCase):
 
     def test_conflicts_detected_first(self):
         # UU/UD/AA sind Merge-Konflikte und dürfen NICHT als M oder D zählen.
-        lines = ["UU beide.txt", "UD ich-geloescht.txt", "AA beide-neu.txt"]
-        m, d, u, c, files = parse_porcelain(lines)
+        output = "UU beide.txt\0UD ich-geloescht.txt\0AA beide-neu.txt\0"
+        m, d, u, c, files = parse_porcelain(output)
         self.assertEqual((m, d, u, c), (0, 0, 0, 3))
         self.assertIn(("C", "beide.txt"), files)
         self.assertIn(("C", "ich-geloescht.txt"), files)
 
+    def test_unicode_and_control_characters_remain_literal(self):
+        output = "?? übungen/Abendsession 2026-07-21.pdf\0?? zeile\numbruch.txt\0"
+        _, _, untracked, _, files = parse_porcelain(output)
+        self.assertEqual(untracked, 2)
+        self.assertIn(("U", "übungen/Abendsession 2026-07-21.pdf"), files)
+        self.assertIn(("U", "zeile\numbruch.txt"), files)
+
+    def test_rename_uses_destination_and_consumes_source(self):
+        output = "R  neu ü.txt\0alt ü.txt\0 M danach.txt\0"
+        modified, _, _, _, files = parse_porcelain(output)
+        self.assertEqual(modified, 2)
+        self.assertEqual(files, [("M", "neu ü.txt"), ("M", "danach.txt")])
+
     def test_empty(self):
-        self.assertEqual(parse_porcelain([]), (0, 0, 0, 0, []))
+        self.assertEqual(parse_porcelain(""), (0, 0, 0, 0, []))
 
 
 class TestSuggestedIgnore(unittest.TestCase):
@@ -157,6 +172,31 @@ class TestAgainstRealRepo(unittest.TestCase):
         self.assertEqual(len(st.stashes), 1)       # der Stash von oben
         self.assertEqual(st.remote_state, "no-remote")
         self.assertFalse(st.clean_and_synced)
+
+    def test_unicode_path_from_status_can_be_staged(self):
+        # Der reale Fehlerfall: Git maskierte den Umlaut ohne -z als
+        # "\\303\\274bungen/..."; GMF reichte diese Anzeige an git add weiter.
+        dirname = "u\u0308bungen"
+        filename = "Abendsession2026-07-21-aufgaben.pdf"
+        (self.repo / dirname).mkdir()
+        (self.repo / dirname / "bestehend.txt").write_text("schon getrackt\n")
+        git(self.repo, "add", "--", f"{dirname}/bestehend.txt")
+        git(self.repo, "commit", "-qm", "Übungsordner anlegen")
+        (self.repo / dirname / filename).write_bytes(b"test")
+
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.untracked, 1)
+        path = st.files[0][1]
+        self.assertEqual(unicodedata.normalize("NFC", path), f"übungen/{filename}")
+
+        # Derselbe unveränderte Wert, den der Commit-Assistent nutzt, muss ein
+        # gültiger Pathspec sein. Das testet Gits echte macOS-Normalisierung mit.
+        git(self.repo, "add", "--", path)
+        tracked = subprocess.run(
+            ["git", "-C", str(self.repo), "ls-files", "--error-unmatch", "--", path],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(tracked.returncode, 0, tracked.stderr)
 
     def test_stash_pop_conflict_keeps_stash(self):
         # Ein Stash, dessen Änderungen mit dem inzwischen committeten Stand

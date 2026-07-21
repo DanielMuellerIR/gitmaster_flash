@@ -57,7 +57,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -464,20 +464,33 @@ class TransferCheck:
 UNMERGED_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
 
 
-def parse_porcelain(lines: list[str]) -> tuple[int, int, int, int, list]:
-    """`git status --porcelain` auswerten.
+def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
+    """NUL-getrenntes ``git status --porcelain=v1 -z`` auswerten.
 
     -> (modified, deleted, untracked, conflicts, dateien).
     Vereinfachung fürs Auge: Konflikt = C, Untracked = U, Gelöschtes = D, jede
     andere Änderung (modified/added/renamed/…) = M. Konflikte werden ZUERST
     geprüft, sonst würde z.B. `UD` fälschlich als Löschung zählen.
+
+    ``-z`` ist für die Commit-Hilfe entscheidend: Ohne diese Option setzt Git
+    Pfade mit Umlauten oder Steuerzeichen in Anführungszeichen und maskiert sie.
+    Diese Anzeigeform ist kein gültiger Pfad für ein späteres ``git add``.
+    Rename-/Copy-Einträge besitzen bei ``-z`` ein zweites Feld mit dem alten
+    Namen; für Anzeige und Staging brauchen wir den ersten, neuen Namen.
     """
     m = d = u = c = 0
     files = []
-    for line in lines:
-        if not line.strip():
+    fields = output.split("\0")
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if not record:
             continue
-        xy, path = line[:2], line[3:]
+        xy, path = record[:2], record[3:]
+        if "R" in xy or "C" in xy:
+            # Bei -z folgt nach dem Zielpfad noch der Quellpfad.
+            i += 1
         if xy in UNMERGED_CODES:
             c += 1
             files.append(("C", path))
@@ -714,9 +727,9 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             st.remote_state = "detached"
 
         # Arbeitsverzeichnis-Zustand
-        r = run_git(repo, "status", "--porcelain", timeout=t_)
+        r = run_git(repo, "status", "--porcelain=v1", "-z", timeout=t_)
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
-            r.stdout.splitlines())
+            r.stdout)
 
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = run_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
