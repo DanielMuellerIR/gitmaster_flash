@@ -61,7 +61,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -123,6 +123,10 @@ TR = {
     "diff_need_host": {"en": "--diff needs a host, e.g. --diff mymac",
                        "de": "--diff braucht einen Host, z.B. --diff meinmac"},
     "diff_ssh_failed": {"en": "Cannot reach {h}: {e}", "de": "{h} nicht erreichbar: {e}"},
+    "diff_ssh_exit": {"en": "ssh exited with code {code}",
+                      "de": "ssh endete mit Code {code}"},
+    "diff_ssh_no_output": {"en": "no output", "de": "keine Ausgabe"},
+    "diff_ssh_bad_json": {"en": "unreadable JSON", "de": "unlesbares JSON"},
     "diff_version": {
         "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
         "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
@@ -1151,14 +1155,23 @@ def fetch_remote_status(host: str, root: str, *, fetch: bool) -> dict:
                 stdin=fh, capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.SubprocessError) as e:
         raise RuntimeError(t("diff_ssh_failed", h=host, e=str(e)[:100]))
-    if r.returncode != 0 or not (r.stdout or "").strip():
+    # `--json` behält den normalen CLI-Exit-Code bei: 1 bedeutet, dass mindestens
+    # ein Repo Aufmerksamkeit braucht. Das JSON ist trotzdem vollständig und muss
+    # für den Rechnervergleich ausgewertet werden. Nur echte SSH-/Prozessfehler
+    # (Exit-Codes außerhalb 0/1) machen die Gegenstelle unerreichbar.
+    if r.returncode not in (0, 1):
         last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
         raise RuntimeError(t("diff_ssh_failed", h=host,
-                             e=(last[-1][:120] if last else "no output")))
+                             e=(last[-1][:120] if last else
+                                t("diff_ssh_exit", code=r.returncode))))
+    if not (r.stdout or "").strip():
+        last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
+        raise RuntimeError(t("diff_ssh_failed", h=host,
+                             e=(last[-1][:120] if last else t("diff_ssh_no_output"))))
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError:
-        raise RuntimeError(t("diff_ssh_failed", h=host, e="unreadable JSON"))
+        raise RuntimeError(t("diff_ssh_failed", h=host, e=t("diff_ssh_bad_json")))
 
 
 def _remotes_by_name(repo: dict) -> dict:

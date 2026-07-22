@@ -706,6 +706,20 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertEqual(shlex.split(command)[-1], root)
         self.assertEqual(shlex.split(command).count(root), 1)
 
+    def test_remote_json_with_attention_exit_is_accepted(self):
+        """Exit 1 ist bei --json ein Befund, kein fehlgeschlagener SSH-Aufruf."""
+        payload = {"version": "x", "repos": [{"rel": "needs-attention"}]}
+        completed = subprocess.CompletedProcess(
+            [], 1, stdout=json.dumps(payload), stderr="")
+        with mock.patch("gitmaster_flash.subprocess.run", return_value=completed):
+            self.assertEqual(fetch_remote_status("example", "~/git", fetch=True), payload)
+
+    def test_remote_process_failure_without_stderr_reports_exit_code(self):
+        completed = subprocess.CompletedProcess([], 255, stdout="", stderr="")
+        with mock.patch("gitmaster_flash.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "255"):
+                fetch_remote_status("example", "~/git", fetch=False)
+
     def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
         source = Path(__file__).resolve().parents[1] / "docs" / "make-screens.py"
         spec = importlib.util.spec_from_file_location("gmf_make_screens_test", source)
