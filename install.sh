@@ -27,10 +27,12 @@ if ! ( cd -- "$repo_dir" && python3 -m unittest discover -s tests -q ); then
   exit 1
 fi
 
-# 3) Wrapper in der zshrc registrieren. Pfad unter $HOME als ~ schreiben,
-#    damit die Zeile maschinenunabhängig lesbar bleibt.
+# 3) Wrapper in der zshrc registrieren. Der absolute Pfad wird als vollständiges
+#    zsh-Wort serialisiert; Leerzeichen, Quotes und Metazeichen bleiben Daten.
 zshrc="${ZDOTDIR:-$HOME}/.zshrc"
-source_line="source ${repo_dir/#$HOME/~}/gmf.zsh"
+wrapper_path="$repo_dir/gmf.zsh"
+quoted_wrapper="${(qqq)wrapper_path}"
+source_line="source -- $quoted_wrapper"
 
 if [[ -f "$zshrc" ]] && grep -qF "gmf.zsh" -- "$zshrc"; then
   existing="$(grep -F "gmf.zsh" -- "$zshrc" | head -1)"

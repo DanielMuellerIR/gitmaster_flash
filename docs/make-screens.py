@@ -27,12 +27,13 @@ import os
 import pty
 import re
 import select
-import shutil
 import signal
 import struct
 import sys
+import tempfile
 import termios
 import time
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -52,17 +53,6 @@ ANSI = {
     90: "#7f7f7f", 91: "#e06c75", 92: "#98c379", 93: "#e5c07b",
     94: "#61afef", 95: "#c678dd", 96: "#56b6c2", 97: "#ffffff",
 }
-
-
-def _cleanup_sandboxes() -> None:
-    """Remove the throwaway demo sandboxes this script created.
-
-    `--demo` builds one per run under $TMPDIR (we pin TMPDIR=/tmp to keep the path
-    short) and never deletes it — fine for a human trying it out, litter for a
-    generator. Only ever touches /tmp/gmf-demo-* : unambiguous, ours, disposable."""
-    for d in Path("/tmp").glob("gmf-demo-*"):
-        if d.is_dir():
-            shutil.rmtree(d, ignore_errors=True)
 
 
 def _split_keys(keys: bytes) -> list:
@@ -91,7 +81,17 @@ class Cell:
         self.ch, self.fg, self.bold, self.rev = " ", FG, False, False
 
 
-def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
+WIDE_TERMINAL_SYMBOLS = {"⏎", "⚑", "✔", "⚠"}
+
+
+def _cell_width(ch: str) -> int:
+    if unicodedata.combining(ch) or ch in ("\ufe0e", "\ufe0f"):
+        return 0
+    return 2 if (ch in WIDE_TERMINAL_SYMBOLS
+                 or unicodedata.east_asian_width(ch) in ("W", "F")) else 1
+
+
+def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> list:
     """Run the program in a pty, feed `keys`, return the final screen as a Cell grid.
 
     We parse only the escape sequences curses actually emits here (absolute cursor
@@ -105,7 +105,7 @@ def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
     pid, fd = pty.fork()
     if pid == 0:                                    # child
         os.environ.update(TERM="xterm-256color", LINES=str(ROWS), COLUMNS=str(COLS),
-                          LANG="en_US.UTF-8", TMPDIR="/tmp")
+                          LANG="en_US.UTF-8", TMPDIR=owned_tmp)
         os.execvp(sys.executable, [sys.executable, str(GMF)] + args)
 
     # Window size on the pty master. curses also honours LINES/COLUMNS (set in the
@@ -144,31 +144,32 @@ def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
     # Phase 1: let it draw the first screen. Phase 2: type, let it redraw. Doing this
     # explicitly (instead of "send keys whenever select is idle") is what makes the
     # capture reliable — the earlier version raced the drawing and caught a blank screen.
-    buf = read_until_quiet()
-    for chunk in _split_keys(keys):
-        os.write(fd, chunk)
-        buf += read_until_quiet()
+    buf = b""
     try:
-        os.write(fd, b"q")                          # quit the TUI
-    except OSError:
-        pass                                        # already gone — fine, we have the screen
-    time.sleep(0.2)
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    # Reap properly. A half-reaped child from the previous screen left the next capture
-    # writing into a dead pty ("[Errno 5] Input/output error").
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
-    _cleanup_sandboxes()
-
+        buf = read_until_quiet(quiet=settle)
+        for chunk in _split_keys(keys):
+            os.write(fd, chunk)
+            buf += read_until_quiet(quiet=settle)
+    finally:
+        try:
+            os.write(fd, b"q")                      # quit the TUI
+        except OSError:
+            pass                                    # already gone — fine
+        time.sleep(0.2)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        # Always reap the exact child. Otherwise a failed capture can leave the next
+        # one writing into a dead pty ("[Errno 5] Input/output error").
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
     text = buf.decode("utf-8", "replace")
     i = 0
     while i < len(text):
@@ -227,11 +228,28 @@ def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
         elif ch == "\x1b":
             i += 1                                  # unknown escape: skip the byte
         elif ch >= " " and 0 <= cy < ROWS and 0 <= cx < COLS:
-            c = grid[cy][cx]
-            c.ch, c.fg, c.bold, c.rev = ch, cur_fg, cur_bold, cur_rev
-            cx += 1
+            width = _cell_width(ch)
+            if width == 0 and cx > 0:
+                grid[cy][cx - 1].ch += ch
+            else:
+                c = grid[cy][cx]
+                c.ch, c.fg, c.bold, c.rev = ch, cur_fg, cur_bold, cur_rev
+                # SVG monospace text does not reliably reserve the second terminal
+                # cell of emoji-style symbols, so represent continuation cells.
+                for extra in range(1, min(width, COLS - cx)):
+                    c = grid[cy][cx + extra]
+                    c.ch, c.fg, c.bold, c.rev = " ", cur_fg, cur_bold, cur_rev
+                cx += width
         i += 1
     return grid
+
+
+def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
+    """Render inside one owned TMPDIR and clean exactly that directory in all cases."""
+    # Keep the securely created unique path short enough that the complete demo
+    # root and status summary both fit into the captured header before _tidy().
+    with tempfile.TemporaryDirectory(prefix="gmfs-", dir="/tmp") as owned_tmp:
+        return _render_in_pty(args, keys, settle, owned_tmp)
 
 
 def _set_line(row: list, text: str) -> None:
@@ -245,7 +263,7 @@ def _tidy(grid: list) -> None:
 
     1. The demo sandbox's random tmp path -> `~/git`. Needed for reproducibility
        (otherwise `--check` can never pass) and because
-       `/var/folders/gn/vs63.../gmf-demo-8a2f/gmf-demo` in a header is pure noise.
+       `/tmp/gmfs-.../gmf-demo-.../gmf-demo` in a header is pure noise.
     2. Leftovers of the scan progress counter ("6/97/98/99/9"). While scanning, the
        program prints `6/9`, `7/9` … on the first list line; the repo line then drawn
        over it is shorter, and curses does not bother clearing the tail because it
@@ -254,8 +272,7 @@ def _tidy(grid: list) -> None:
     """
     for row in grid:
         line = "".join(c.ch for c in row)
-        m = re.search(r"(/var/folders/\S*?gmf-demo|/tmp/gmf-demo\S*?)(/gmf-demo)?(?=\s|$)",
-                      line)
+        m = re.search(r"/\S*?gmf-demo-\S*?(?:/gmf-demo)?(?=\s|$)", line)
         if m:
             _set_line(row, line[:m.start()] + "~/git" + line[m.end():])
             line = "".join(c.ch for c in row)
@@ -324,9 +341,9 @@ def to_svg(grid: list, title: str) -> str:
 # The list view is drawn onto a freshly cleared screen, so replaying the escape codes
 # reproduces it exactly. Any view opened LATER (commit helper, pager) is painted OVER
 # the list, and curses only sends the cells it believes changed. Reconstructing that
-# needs real cell-width accounting: ⏎, ⚑ and ✔ occupy two terminal columns but one
-# string index, so our grid drifts by one and the old line bleeds through. Getting that
-# right means writing a full terminal emulator — not worth it for a screenshot.
+# needs far more terminal-state reconstruction than the overview. The renderer does
+# account for the wide symbols used here, but deliberately remains a small replay tool
+# rather than a complete terminal emulator.
 SCREENS = [
     ("overview.svg", [], b"", "gitmaster_flash overview — problem repos sorted to the top"),
 ]
