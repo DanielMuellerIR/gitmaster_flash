@@ -66,7 +66,9 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | Q | beenden |
 
 Auf einen bereits konfliktbehafteten Baum wird nie ein weiterer Stash gepoppt —
-erst die Konflikte auflösen.
+erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und binäre
+Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
+destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
 
 ## Commit-Hilfe (`C`)
 
@@ -87,25 +89,34 @@ erst die Konflikte auflösen.
    `i` gitignore an/aus).
 2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten fünf Messages
    des Repos als Stil-Vorlage.
-3. Die `.gitignore` wird ohne Duplikate ergänzt, die Auswahl gestaged und
-   committet. Danach kann der Commit optional über denselben geschützten privaten
-   Sync-Pfad wie bei `P` gepusht werden.
+3. Merge-Konflikte sperren die Hilfe vollständig. Die `.gitignore` wird atomar und
+   ohne Folgen von Symlinks ergänzt. Der Commit entsteht über einen temporären Index,
+   der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
+   samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Danach kann der
+   Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
+   werden.
 
 ## Sicheres Push und Pull
 
 `P` und `L` sind absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt.
 Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
-divergente History. Pull ist ausschließlich ein expliziter Fast-forward; es gibt
-weder Merge noch Rebase. Push überträgt mit einem expliziten Refspec nur den
-aktuellen Branch, niemals Tags und niemals per Force.
+divergente History. Fetch- und Push-URL müssen genau dasselbe zugangsdatenfreie
+Host-/Repo-Ziel bezeichnen; mehrere oder abweichende Push-URLs werden gesperrt.
+Unmittelbar vor der bestätigten Mutation werden Branch, HEAD, Index, Arbeitsbaum,
+Remote-Identität und Ziel-OID nochmals geprüft. Pull übernimmt nur die freigegebene
+unveränderliche OID per Fast-forward. Push überträgt die freigegebene Commit-OID mit
+einem expliziten Refspec. Eine exakte Ziel-OID-Lease verhindert, dass eine
+Remote-Löschung oder parallele Verschiebung daraus eine ungeprüfte Aktualisierung
+macht; Tags werden nie gesendet.
 
 Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
 Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
 sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
 Dateinamen. Danach muss exakt `PUSH <Remote>` eingegeben werden. Auch der letzte
-Befehl überträgt nur den aktuellen Branch: kein Force, keine Tags, kein neuer
-Branch. Ein Remote mit gemischten GitHub-/Nicht-GitHub-URLs wird vollständig
-gesperrt. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
+Befehl überträgt nur den aktuellen Branch: freigegebene Quell-OID, exakte
+Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
+abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide
+Ziele auf GitHub liegen. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
 
 ## Installation
 
@@ -119,8 +130,9 @@ python3 gitmaster_flash/gitmaster_flash.py
 Damit ⏎ tatsächlich in den Repo-Ordner wechselt, den Shell-Wrapper einbinden.
 Der Grund: Ein Kindprozess kann das Arbeitsverzeichnis der aufrufenden Shell
 nicht ändern — das muss eine kleine Shell-Funktion übernehmen. `install.sh`
-erledigt das: Es führt den Selbsttest aus und registriert `gmf.zsh` in der
-`~/.zshrc` (idempotent — ein zweiter Lauf ändert nichts):
+erledigt das: Es führt den Selbsttest aus und registriert den sicher gequoteten
+absoluten Pfad zu `gmf.zsh` in der `~/.zshrc` (idempotent — ein zweiter Lauf ändert
+nichts, auch bei Clone-Pfaden mit Leerzeichen oder Shell-Metazeichen):
 
 ```sh
 gitmaster_flash/install.sh
@@ -169,7 +181,10 @@ lokal  blog: 3 geaenderte/neue Datei(en) hier
 nur auf meinmac: experiment
 ```
 
-`DRIFT` = sollte gleich sein, ist es nicht (Handlungsbedarf). `SYNC` = beide
+`DRIFT` umfasst außerdem Fehler, Konflikte, Stashes, Branch-Verfügbarkeit,
+Remote-Sicherheitsklassen und zugangsdatenfreie Ziel-Fingerprints; rohe Remote-URLs
+und Zugangsdaten gelangen nie ins JSON. `DRIFT` = sollte gleich sein, ist es nicht
+(Handlungsbedarf). `SYNC` = beide
 Rechner sind sich einig, stehen aber gemeinsam vor/hinter dem Sync-Remote — im
 reinen Zwei-Rechner-Vergleich unsichtbar, und doch meist die eigentlich
 interessante Zahl. `lokal` = erklärbar (anderer Branch ausgecheckt, dirty).
@@ -218,7 +233,8 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   "/Applications/Zed.app"}}` ergibt `Z Zed`. Eine Taste wählen, die oben in der
   Tabelle nicht schon belegt ist.
 - `sync_remote_names` / `sync_remote_hosts` — woran der private Sync-Remote
-  erkannt wird: am Remote-Namen oder am Host in der Remote-URL. Für eine
+  erkannt wird: am Remote-Namen oder an einem exakt normalisierten Host in der
+  Remote-URL (Teiltreffer werden nie akzeptiert). Für eine
   generische Installation ist der Standard `origin`. Alle Remotes werden
   unabhängig davon angezeigt; GitHub wird an seiner URL erkannt und zuletzt
   einsortiert.

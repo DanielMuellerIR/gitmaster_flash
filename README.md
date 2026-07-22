@@ -63,7 +63,9 @@ memorize. Case does not matter — `f` works like `F`.
 | Q | quit |
 
 A stash is never popped onto a tree that already has conflicts — resolve those
-first.
+first. Its preview includes untracked and binary files; a failed or unexpectedly
+empty Git preview is labelled explicitly before the destructive drop action
+remains available.
 
 ## Commit helper (`C`)
 
@@ -83,23 +85,31 @@ first.
    file (`␣` commit on/off, `i` gitignore on/off).
 2. Before you type the commit message, the repository's last five messages are
    shown as a style reference.
-3. `.gitignore` is extended without duplicates, the selection is staged and
-   committed. Optionally the commit is pushed through the same guarded private
-   sync path as `P` afterwards.
+3. Merge conflicts block the helper completely. `.gitignore` is extended atomically
+   without following symlinks. The commit is built in a temporary index containing
+   only the approved paths; an existing user index, including deliberately staged
+   but excluded work, stays intact. Optionally the commit is pushed through the same
+   guarded private sync path as `P` afterwards.
 
 ## Safe push and pull
 
 `P` and `L` are intentionally limited to a non-public sync remote. Both fetch
-first, require a clean working tree and reject divergent history. Pull is an
-explicit fast-forward only; it never merges or rebases. Push sends only the
-current branch through an explicit refspec, never tags and never force-pushes.
+first, require a clean working tree and reject divergent history. Fetch and push
+URLs must identify one identical credential-free host/repository target; multiple
+or differing push URLs are blocked. Immediately before a confirmed mutation the
+branch, HEAD, index, worktree, remote identity and target OID are checked again.
+Pull merges only the approved immutable OID by fast-forward; push sends the approved
+commit OID through an explicit refspec. An exact target-OID lease prevents a
+remote deletion or concurrent move from turning it into an unreviewed update;
+tags are never sent.
 
 GitHub uses the separate `G` path. It works only when the same branch already
 exists on one GitHub remote and the histories are related. Before publishing it
 shows every outgoing commit and changed file name. The exact phrase
 `PUSH <remote>` must then be typed. The final command still sends only the current
-branch: no force, no tags, no new branch. A remote that mixes GitHub and
-non-GitHub URLs is blocked entirely. Complex cases stay terminal-only.
+branch: approved source OID, exact target lease, no tags, no new branch. A remote
+with multiple or differing fetch/push targets is blocked entirely, even if both
+targets are on GitHub. Complex cases stay terminal-only.
 
 ## Installation
 
@@ -113,8 +123,9 @@ python3 gitmaster_flash/gitmaster_flash.py
 For the `⏎ = cd into the repository` feature, source the shell wrapper — a child
 process cannot change the working directory of the shell that started it, so a
 small function has to do it. `install.sh` does that for you: it runs the
-self-test, then registers `gmf.zsh` in your `~/.zshrc` (idempotent — a second
-run changes nothing):
+self-test, then registers the safely quoted absolute path to `gmf.zsh` in your
+`~/.zshrc` (idempotent — a second run changes nothing, including from clone paths
+with spaces or shell metacharacters):
 
 ```sh
 gitmaster_flash/install.sh
@@ -162,10 +173,13 @@ local  blog: 3 changed/new file(s) here
 only on mymac: experiment
 ```
 
-`DRIFT` = should be identical but isn't (worth acting on). `SYNC` = both machines
-agree, but together they sit ahead/behind the sync remote — invisible in a pure
-two-machine comparison, yet usually the number you actually care about. `local` =
-explainable (different branch checked out, dirty working tree). Exit code **0** =
+`DRIFT` also covers errors, conflicts, stashes, branch availability, remote safety
+classification and credential-free endpoint fingerprints; raw remote URLs and
+credentials never enter JSON. `DRIFT` = should be identical but isn't (worth
+acting on). `SYNC` = both machines agree, but together they sit ahead/behind the
+sync remote — invisible in a pure two-machine comparison, yet usually the number
+you actually care about. `local` = explainable (different branch checked out,
+dirty working tree). Exit code **0** =
 nothing to report, **1** = findings (note: a `SYNC` line means the machines agree
 with each other, so "identical machines" alone no longer guarantees exit 0),
 **2** = the other machine could not be reached.
@@ -210,7 +224,8 @@ starting the UI, so a pipe does the sensible thing.
   "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
   taken by the table above.
 - `sync_remote_names` / `sync_remote_hosts` — how the private sync remote is
-  recognized: by remote name, or by host in the remote URL. Defaults to `origin`
+  recognized: by remote name, or by an exact normalized host in the remote URL
+  (substring matches are never accepted). Defaults to `origin`
   for a generic installation. All remotes are displayed regardless; GitHub is
   recognized from its URL and sorted last.
 - `skip_dirs` — directories the scan does not descend into.
