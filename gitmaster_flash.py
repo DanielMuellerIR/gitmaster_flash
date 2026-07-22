@@ -61,7 +61,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -1008,6 +1008,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
     rel = unicodedata.normalize("NFC", rel)
     st = RepoStatus(path=repo, rel=rel)
     t_ = cfg["git_timeout"]
+    detached = False
     try:
         # Branch (oder detached HEAD)
         r = run_git(repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=t_)
@@ -1017,6 +1018,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             _required_git(repo, "rev-parse", "--verify", "HEAD", timeout=t_)
             st.branch = "(detached)"
             st.remote_state = "detached"
+            detached = True
 
         # Arbeitsverzeichnis-Zustand
         r = _required_git(repo, "status", "--porcelain=v1", "-z", timeout=t_)
@@ -1033,26 +1035,35 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         if fetch:
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
             # Fetch verändert weder Branch noch Working Tree.
-            fetched = run_git(repo, "fetch", "--all", "--prune", "--quiet",
-                              timeout=cfg["fetch_timeout"])
-            if fetched.returncode != 0:
-                st.error = t("transfer_fetch_failed", r="--all",
-                             code=fetched.returncode)
+            try:
+                fetched = run_git(repo, "fetch", "--all", "--prune", "--quiet",
+                                  timeout=cfg["fetch_timeout"])
+            except subprocess.TimeoutExpired:
+                st.error = t("git_timeout")
                 st.remote_state = "error"
-                return st
+            else:
+                if fetched.returncode != 0:
+                    st.error = t("transfer_fetch_failed", r="--all",
+                                 code=fetched.returncode)
+                    st.remote_state = "error"
+            # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
+            # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
+            # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
             configs = read_remote_configs(repo, cfg)
+            st.remote = detect_sync_remote(repo, cfg, configs)
         st.remotes = collect_remote_statuses(repo, st.branch, st.remote, cfg, configs)
         if st.remote is None:
-            if st.remote_state != "detached":
+            if not st.error and not detached:
                 st.remote_state = "no-remote"
             st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(
                 repo, None, cfg)
             return st
-        if st.remote_state == "detached":
+        if detached:
             return st
         sync = next((remote for remote in st.remotes if remote.is_sync), None)
         if sync is None or not sync.branch_exists:
-            st.remote_state = "no-branch"
+            if not st.error:
+                st.remote_state = "no-branch"
             return st
         st.ahead, st.behind = sync.ahead, sync.behind
 
