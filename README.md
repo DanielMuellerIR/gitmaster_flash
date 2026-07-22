@@ -1,6 +1,15 @@
+<p align="center">
+  <img src="docs/gitmaster-flash.png" width="128" alt="Gitmaster Flash project icon">
+</p>
+
+<h1 align="center">Gitmaster Flash</h1>
+
 **🌐 Sprache / Language:** [English](README.md) · [Deutsch](README.de.md)
 
-# gitmaster_flash
+<p align="center">
+  <em>“It's like a jungle sometimes”</em><br>
+  <sub>— Grandmaster Flash and the Furious Five, “The Message”</sub>
+</p>
 
 A fast terminal overview (TUI) of every Git repository below the current
 directory, so you can see what still needs attention and tidy it up on the spot.
