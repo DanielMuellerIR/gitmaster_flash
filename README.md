@@ -79,9 +79,12 @@ keystrokes. Expanding files and stashes stays in the detail view.
 ## Command log, always visible
 
 The last commands stay below the list — three lines by default. `Tab` moves the
-focus there, the pane grows to a third of the window, and `↑`/`↓` scroll through
-the session. `Tab` again returns to the list. Cancelled dialogs appear as
-`⊘ … (not run — cancelled)`, so the log never suggests something ran that did not.
+focus there and the pane grows to a third of the window. The selection bar moves
+with the focus: while you are in the log, the repository list has none, so it is
+always obvious which pane the arrow keys belong to. `↑`/`↓` walk through the
+commands, `Tab` returns to the list — both sides remember where you were.
+Cancelled dialogs appear as `⊘ … (not run — cancelled)`, so the log never
+suggests something ran that did not.
 
 `H` shows the same log in full, above the safety rules. Read-only scan commands
 are deliberately left out — they would bury the interesting lines. Arguments are

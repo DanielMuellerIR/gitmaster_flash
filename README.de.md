@@ -83,10 +83,12 @@ vorbehalten.
 ## Befehlsprotokoll, immer sichtbar
 
 Die letzten Befehle stehen unter der Liste — normal drei Zeilen. `Tab` setzt den
-Fokus dorthin, der Bereich wächst auf ein Drittel des Fensters und `↑`/`↓`
-scrollen durch die Sitzung; `Tab` führt zurück zur Liste. Abgebrochene Dialoge
-erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit das Protokoll nie
-etwas als gelaufen ausweist, das gar nicht lief.
+Fokus dorthin, der Bereich wächst auf ein Drittel des Fensters. Der Auswahlbalken
+wandert mit dem Fokus: Solange man im Protokoll ist, hat die Repo-Liste keinen —
+so ist immer klar, wem die Pfeiltasten gerade gehören. `↑`/`↓` gehen durch die
+Befehle, `Tab` führt zurück zur Liste; beide Seiten merken sich, wo man war.
+Abgebrochene Dialoge erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit
+das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief.
 
 `H` zeigt dasselbe Protokoll vollständig, über den Sicherheitsregeln. Die reinen
 Lesebefehle des Scans stehen bewusst nicht drin — sie würden die interessanten

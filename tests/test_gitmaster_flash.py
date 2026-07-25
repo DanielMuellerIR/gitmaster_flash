@@ -1440,6 +1440,64 @@ class CompactViewTests(unittest.TestCase):
                     ui.reload()
                 self.assertEqual(ui.view_mode, expected)
 
+    def test_only_the_focused_pane_shows_a_selection_bar(self):
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        for i in range(6):
+            gmf_module.log_command(Path("/tmp/repo"), ("status", str(i)), 0)
+        class Recorder(list):
+            pass
+
+        for focus, expect_repo_bar in (("repos", True), ("log", False)):
+            with self.subTest(focus):
+                ui = self._ui(9, height=26, width=100)
+                ui.view_mode = "compact"
+                ui.focus = focus
+                ui.log_selected = 2
+                marked = Recorder()
+
+                def addstr(y, x, text, attr=0, _marked=marked):
+                    _marked.append((text, bool(attr & curses.A_REVERSE)))
+
+                ui.scr.addstr = addstr
+                with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+                    ui.draw()
+                repo_bar = any(mark for text, mark in marked if "repo-00" in text)
+                log_bar = any(mark for text, mark in marked if "git status 2" in text)
+                self.assertEqual(repo_bar, expect_repo_bar, marked)
+                self.assertEqual(log_bar, not expect_repo_bar, marked)
+
+    def test_log_selection_and_repo_selection_survive_switching(self):
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        for i in range(10):
+            gmf_module.log_command(Path("/tmp/repo"), ("status", str(i)), 0)
+        ui = self._ui(9, height=26, width=100)
+        ui.selected = 4
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            # Tab nach unten, zweimal hoch, Tab zurück, einmal runter, wieder Tab.
+            ui.scr.keys = iter([9, curses.KEY_UP, curses.KEY_UP, 9,
+                                curses.KEY_DOWN, 9, ord("q")])
+            ui.run()
+        self.assertEqual(ui.focus, "log")
+        self.assertEqual(ui.log_selected, 7)   # 9 (neuester) minus zwei nach oben
+        self.assertEqual(ui.selected, 5)       # oben eins weiter, blieb erhalten
+
+    def test_first_visit_to_the_log_starts_at_the_newest_entry(self):
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        for i in range(4):
+            gmf_module.log_command(Path("/tmp/repo"), ("status", str(i)), 0)
+        ui = self._ui(3)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.scr.keys = iter([9, ord("q")])
+            ui.run()
+        self.assertEqual(ui.log_selected, 3)
+
     def test_tab_moves_focus_to_the_log_and_arrows_then_scroll(self):
         ui = self._ui(5)
         gmf_module.COMMAND_LOG.clear()

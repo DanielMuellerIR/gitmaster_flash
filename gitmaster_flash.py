@@ -2303,7 +2303,8 @@ class TUI:
         # Kurzfassung. Der Startmodus richtet sich nach der Repo-Zahl (s. reload).
         self.view_mode = "detail"
         self.focus = "repos"       # "repos" oder "log" (Tab wechselt)
-        self.log_top = 0           # Scroll-Position im Befehlsprotokoll
+        self.log_top = 0           # erste sichtbare Protokollzeile
+        self.log_selected = None   # gewählte Protokollzeile (None = noch nie dort)
         self.compact_col = 0       # erste sichtbare Spalte der Kompaktansicht
 
     # -- Datenbeschaffung ---------------------------------------------------
@@ -2486,7 +2487,8 @@ class TUI:
         for row in rows[self.offset:self.offset + body_h]:
             kind = row[0]
             if kind == "repo":
-                self.draw_repo_line(y, self.statuses[row[1]], row[1] == self.selected)
+                self.draw_repo_line(y, self.statuses[row[1]],
+                                    row[1] == self.selected and self.focus == "repos")
             elif kind == "file":
                 code, path = row[2], row[3]
                 pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[code]
@@ -2534,7 +2536,7 @@ class TUI:
             text = (pad_cells(mark, COMPACT_MARK_WIDTH) + " "
                     + pad_cells(ellipsize(name, name_width), name_width))
             attr = curses.color_pair(pair)
-            if index == self.selected:
+            if index == self.selected and self.focus == "repos":
                 attr |= curses.A_REVERSE
             safe_addstr(self.scr, top + row, x, text, attr)
         if total_columns > columns:
@@ -2546,25 +2548,45 @@ class TUI:
                         curses.color_pair(C_DIM))
 
     def draw_log(self, top: int, log_h: int, w: int) -> None:
-        """Befehlsprotokoll unter der Liste — immer sichtbar, mit Tab scrollbar."""
+        """Befehlsprotokoll unter der Liste — immer sichtbar, mit Tab bedienbar.
+
+        Der Auswahlbalken gehört immer nur einem Bereich: liegt der Fokus hier,
+        verschwindet er oben in der Repo-Liste. Sonst sähe man zwei Balken und
+        müsste raten, welche Taste wohin geht.
+        """
         focused = self.focus == "log"
         title = t("log_pane_title") + (t("log_pane_focus") if focused
                                        else t("log_pane_hint"))
         safe_addstr(self.scr, top, 0, pad_cells(title, w - 1),
                     curses.color_pair(C_DIM)
                     | (curses.A_REVERSE if focused else curses.A_BOLD))
-        visible = log_h - 1
+        visible = max(1, log_h - 1)
         entries = COMMAND_LOG or [t("cmdlog_empty")]
         max_top = max(0, len(entries) - visible)
-        # Ohne Fokus immer am Ende bleiben: die letzte Aktion ist die interessante.
-        self.log_top = max_top if not focused else max(0, min(self.log_top, max_top))
+        if focused:
+            # Die Auswahl bleibt beim Hin- und Herwechseln stehen; sie muss nur
+            # sichtbar sein, deshalb wandert der Ausschnitt hinter ihr her.
+            self.log_selected = min(max(0, self.log_selected or 0), len(entries) - 1)
+            if self.log_selected < self.log_top:
+                self.log_top = self.log_selected
+            if self.log_selected >= self.log_top + visible:
+                self.log_top = self.log_selected - visible + 1
+            self.log_top = max(0, min(self.log_top, max_top))
+        else:
+            # Ohne Fokus immer am Ende: die letzte Aktion ist die interessante.
+            self.log_top = max_top
         for offset, entry in enumerate(entries[self.log_top:self.log_top + visible]):
+            index = self.log_top + offset
             pair = C_DIM
             if entry.startswith("✘"):
                 pair = C_RED
             elif entry.startswith("⊘"):
                 pair = C_YELLOW
-            safe_addstr(self.scr, top + 1 + offset, 1, entry, curses.color_pair(pair))
+            attr = curses.color_pair(pair)
+            if focused and index == self.log_selected:
+                attr |= curses.A_REVERSE
+            safe_addstr(self.scr, top + 1 + offset, 1,
+                        pad_cells(entry, w - 2), attr)
 
     # -- Dialog-Helfer ------------------------------------------------------
 
@@ -3361,18 +3383,23 @@ class TUI:
             # Protokoll bedeuten die Cursortasten dann scrollen statt auswählen.
             if ch == 9:
                 self.focus = "log" if self.focus == "repos" else "repos"
+                if self.focus == "log" and self.log_selected is None:
+                    # Erster Besuch: beim neuesten Befehl anfangen.
+                    self.log_selected = max(0, len(COMMAND_LOG) - 1)
                 continue
             if self.focus == "log":
+                last = max(0, len(COMMAND_LOG) - 1)
+                current = self.log_selected or 0
                 if ch == curses.KEY_UP:
-                    self.log_top = max(0, self.log_top - 1)
+                    self.log_selected = max(0, current - 1)
                     continue
                 if ch == curses.KEY_DOWN:
-                    self.log_top += 1
+                    self.log_selected = min(last, current + 1)
                     continue
                 if ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
                     step = max(1, self.log_height(self.scr.getmaxyx()[0]) - 1)
-                    self.log_top = max(0, self.log_top
-                                       + (step if ch == curses.KEY_NPAGE else -step))
+                    self.log_selected = max(0, min(
+                        last, current + (step if ch == curses.KEY_NPAGE else -step)))
                     continue
                 if ch == 27:
                     self.focus = "repos"
