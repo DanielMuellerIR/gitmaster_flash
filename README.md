@@ -158,6 +158,16 @@ branch: approved source OID, exact target lease, no tags, no new branch. A remot
 with multiple or differing fetch/push targets is blocked entirely, even if both
 targets are on GitHub. Complex cases stay terminal-only.
 
+Git never asks for credentials here. Every Git call runs with terminal prompts and
+askpass disabled and in its own session, because Git writes such a question
+(`Username for 'https://github.com':`) straight to the terminal rather than to the
+captured output — inside the curses screen that destroys the display and then waits
+for input that never arrives. A remote that needs a login therefore fails right away
+with `<remote> needs a login (no credential helper or SSH key).` instead of asking.
+Store HTTPS credentials in a credential helper (macOS:
+`git config --global credential.helper osxkeychain`) or use SSH with a key in the
+agent; both work without any prompt.
+
 ## Installation
 
 Requires Python 3 and a terminal. Nothing else.

@@ -62,7 +62,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -263,6 +263,11 @@ TR = {
         "de": "Der Sync-Remote ist öffentlich. Nutze G für die geschützte GitHub-Vorschau."},
     "transfer_fetch_failed": {"en": "Fetch from {r} failed (Git exit code {code}).",
                               "de": "Fetch von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+    # Kurz halten: diese Meldung erscheint auch als Badge in der Repo-Zeile und
+    # wird dort auf die Terminalbreite abgeschnitten. Die Langfassung steht im README.
+    "transfer_auth_missing": {
+        "en": "{r} needs a login (no credential helper or SSH key).",
+        "de": "{r} braucht einen Login (kein Credential-Helper/SSH-Key)."},
     "transfer_inspect_failed": {
         "en": "Git could not inspect the branch safely; no transfer was attempted.",
         "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen."},
@@ -746,11 +751,66 @@ def stash_preview(repo: Path, timeout: int) -> tuple[bool, str]:
     return True, r.stdout
 
 
+# Git darf uns nie nach Zugangsdaten fragen. Seinen Prompt ("Username for
+# 'https://github.com':") schreibt Git nämlich direkt auf das Terminal (/dev/tty)
+# und nicht auf die von uns abgefangenen Kanäle: das zerlegt das curses-Bild und
+# Git wartet dann bis zum Timeout auf eine Eingabe, die die TUI nie liefert. Bei
+# `R` (fetch über alle Repos) laufen zwölf solche Fragen gleichzeitig — daher blieb
+# nur noch Strg-C. Mit diesen Variablen scheitert der Aufruf stattdessen sofort mit
+# einer Fehlermeldung, die wir lesen und anzeigen können.
+NONINTERACTIVE_GIT_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",     # keine Login-Frage auf dem Terminal
+    "GIT_ASKPASS": "",              # kein Askpass-Programm/-Dialog
+    "SSH_ASKPASS": "",
+    "SSH_ASKPASS_REQUIRE": "never",  # OpenSSH: auch keinen GUI-Dialog aufmachen
+    "LC_ALL": "C",                  # Meldungen bleiben stabil englisch (s.u.)
+}
+
+# Marker aus Git-/SSH-Meldungen für "es fehlen Zugangsdaten". Git übersetzt seine
+# Meldungen je nach Systemsprache, deshalb laufen die Kindprozesse mit LC_ALL=C —
+# nur so sind diese englischen Marker verlässlich.
+CREDENTIAL_ERROR_MARKERS = (
+    "terminal prompts disabled",
+    "could not read username",
+    "could not read password",
+    "authentication failed",
+    "permission denied (publickey",
+    "host key verification failed",
+)
+
+
+def credentials_missing(result: subprocess.CompletedProcess) -> bool:
+    """Ist der Aufruf an fehlenden Zugangsdaten gescheitert (statt an sonst was)?"""
+    text = (result.stderr or "").lower()
+    return any(marker in text for marker in CREDENTIAL_ERROR_MARKERS)
+
+
+def failed_fetch_remotes(result: subprocess.CompletedProcess) -> list[str]:
+    """Namen der Remotes, die Git in `fetch --all` als gescheitert meldet.
+
+    Git schreibt pro erfolglosem Remote eine Zeile "error: could not fetch <name>";
+    dank LC_ALL=C ist dieser Text stabil. Findet sich nichts, bleibt die Liste leer
+    und der Aufrufer nennt eben nur den Sammelbegriff.
+    """
+    names = []
+    for line in (result.stderr or "").splitlines():
+        _, sep, rest = line.partition("could not fetch ")
+        if sep and rest.strip():
+            names.append(rest.strip())
+    return names
+
+
 def run_git(repo: Path, *args: str, timeout: int = 10,
             env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, timeout=timeout, env=env,
+        capture_output=True, text=True, timeout=timeout,
+        env=dict(env or os.environ, **NONINTERACTIVE_GIT_ENV),
+        stdin=subprocess.DEVNULL,
+        # Eigene Session = kein kontrollierendes Terminal. Damit kommt auch ein
+        # von Git gestartetes ssh nicht mehr an unser /dev/tty, um dort nach einer
+        # Passphrase zu fragen; der ssh-agent funktioniert davon unberührt weiter.
+        start_new_session=True,
     )
 
 
@@ -1248,8 +1308,17 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                 st.remote_state = "error"
             else:
                 if fetched.returncode != 0:
-                    st.error = t("transfer_fetch_failed", r="--all",
-                                 code=fetched.returncode)
+                    if credentials_missing(fetched):
+                        # Fehlende Zugangsdaten sind kein Repo-Schaden, sondern eine
+                        # Einrichtungsfrage — der Exit-Code allein sagt das nicht.
+                        # Bei nur einem Remote nennt Git keinen Namen (es verhält sich
+                        # dann wie ein einfaches `fetch`), deshalb der Fallback.
+                        failed = failed_fetch_remotes(fetched) or list(configs)
+                        st.error = t("transfer_auth_missing",
+                                     r=", ".join(failed) or "--all")
+                    else:
+                        st.error = t("transfer_fetch_failed", r="--all",
+                                     code=fetched.returncode)
                     st.remote_state = "error"
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
@@ -1927,8 +1996,10 @@ class TUI:
         r = run_git(st.path, "fetch", "--prune", "--quiet", "--", remote,
                     timeout=self.cfg["fetch_timeout"])
         if r.returncode != 0:
-            self.message = t("transfer_fetch_failed", r=remote,
-                             code=r.returncode)
+            self.message = (t("transfer_auth_missing", r=remote)
+                            if credentials_missing(r)
+                            else t("transfer_fetch_failed", r=remote,
+                                   code=r.returncode))
             return None
         return self.refresh_one(st)
 
@@ -1995,6 +2066,8 @@ class TUI:
         self.refresh_one(newest)
         if r.returncode == 0:
             self.message = t("sync_pushed", r=remote.name)
+        elif credentials_missing(r):
+            self.message = t("transfer_auth_missing", r=remote.name)
         else:
             self.message = t("push_failed", code=r.returncode)
 
@@ -2103,6 +2176,8 @@ class TUI:
         self.refresh_one(newest)
         if r.returncode == 0:
             self.message = t("github_pushed", r=remote.name)
+        elif credentials_missing(r):
+            self.message = t("transfer_auth_missing", r=remote.name)
         else:
             self.message = t("push_failed", code=r.returncode)
 

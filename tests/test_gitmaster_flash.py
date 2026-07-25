@@ -13,8 +13,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -708,6 +711,127 @@ class StashAndReadFailureTests(unittest.TestCase):
             self.assertTrue(st.error)
             self.assertEqual(st.remote_state, "error")
             self.assertFalse(st.clean_and_synced)
+
+
+class NonInteractiveGitTests(unittest.TestCase):
+    """Git darf nie nach Zugangsdaten fragen — sonst zerlegt der Prompt die TUI."""
+
+    @staticmethod
+    def _deny_server():
+        """Lokaler HTTP-Server, der jede Anfrage mit 401 + Basic-Auth abweist.
+
+        Damit lässt sich der Login-Fall ohne Netz und ohne echten Host testen:
+        Git fragt genau hier nach Username/Passwort.
+        """
+        class Deny(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="test"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Deny)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def _serving(self):
+        """Server starten und am Testende wieder abbauen (Socket inklusive)."""
+        srv = self._deny_server()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return "http://127.0.0.1:%d" % srv.server_address[1]
+
+    def test_fetch_fails_fast_instead_of_asking_for_a_username(self):
+        base = self._serving()
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            git(repo, "init", "-q")
+            git(repo, "remote", "add", "faux", base + "/x.git")
+            started = time.monotonic()
+            r = gmf_module.run_git(repo, "fetch", "--prune", "--quiet", "--", "faux",
+                                   timeout=30)
+            elapsed = time.monotonic() - started
+        self.assertNotEqual(r.returncode, 0)
+        # Kein Warten auf eine Eingabe, die niemals kommt.
+        self.assertLess(elapsed, 15)
+        self.assertTrue(gmf_module.credentials_missing(r), r.stderr)
+
+    def _repo_with_denying_remotes(self, root: Path, *names: str) -> Path:
+        base = self._serving()
+        repo = root / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        git(repo, "config", "user.email", "t@example.invalid")
+        git(repo, "config", "user.name", "T")
+        (repo / "a").write_text("a")
+        git(repo, "add", "a")
+        git(repo, "commit", "-qm", "base")
+        for name in names:
+            git(repo, "remote", "add", name, "%s/%s.git" % (base, name))
+        return repo
+
+    def test_fetch_all_names_every_remote_that_wants_a_login(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo_with_denying_remotes(root, "faux", "zwei")
+            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+        self.assertEqual(st.remote_state, "error")
+        self.assertIn("faux", st.error)
+        self.assertIn("zwei", st.error)
+        self.assertIn("login", st.error.lower())
+
+    def test_fetch_all_names_the_single_remote_too(self):
+        # Bei genau einem Remote nennt Git den Namen nicht — die Meldung trotzdem.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo_with_denying_remotes(root, "faux")
+            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+        self.assertEqual(st.remote_state, "error")
+        self.assertIn("faux", st.error)
+        self.assertIn("login", st.error.lower())
+
+    def test_run_git_disables_prompts_and_keeps_caller_env(self):
+        recorded = {}
+
+        def fake_run(argv, **kwargs):
+            recorded.update(kwargs)
+            recorded["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch("gitmaster_flash.subprocess.run", fake_run):
+            gmf_module.run_git(Path("/tmp"), "status", env={"GIT_INDEX_FILE": "/tmp/i"})
+        env = recorded["env"]
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(env["GIT_ASKPASS"], "")
+        self.assertEqual(env["LC_ALL"], "C")
+        # Der Aufrufer-Env (temporärer Index beim Commit) darf nicht verloren gehen.
+        self.assertEqual(env["GIT_INDEX_FILE"], "/tmp/i")
+        self.assertEqual(recorded["stdin"], subprocess.DEVNULL)
+        self.assertTrue(recorded["start_new_session"])
+
+    def test_credentials_missing_only_for_login_errors(self):
+        def result(stderr):
+            return subprocess.CompletedProcess(["git"], 128, "", stderr)
+
+        self.assertTrue(gmf_module.credentials_missing(result(
+            "fatal: could not read Username for 'https://github.com': "
+            "terminal prompts disabled")))
+        self.assertTrue(gmf_module.credentials_missing(result(
+            "git@github.com: Permission denied (publickey).")))
+        self.assertFalse(gmf_module.credentials_missing(result(
+            "fatal: couldn't find remote ref main")))
+
+    def test_failed_fetch_remotes_reads_the_names(self):
+        r = subprocess.CompletedProcess(["git"], 1, "", (
+            "fatal: could not read Username for 'https://github.com': "
+            "terminal prompts disabled\n"
+            "error: could not fetch github\n"))
+        self.assertEqual(gmf_module.failed_fetch_remotes(r), ["github"])
+        self.assertEqual(gmf_module.failed_fetch_remotes(
+            subprocess.CompletedProcess(["git"], 1, "", "boom\n")), [])
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

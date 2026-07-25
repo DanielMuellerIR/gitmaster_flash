@@ -166,6 +166,16 @@ Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
 abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide
 Ziele auf GitHub liegen. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
 
+Git fragt hier nie nach Zugangsdaten. Jeder Git-Aufruf läuft ohne Terminal-Prompt,
+ohne Askpass und in eigener Session, denn Git schreibt so eine Frage
+(`Username for 'https://github.com':`) direkt auf das Terminal statt in die
+abgefangene Ausgabe — im curses-Bild zerstört das die Anzeige und Git wartet dann
+auf eine Eingabe, die nie kommt. Ein Remote, das einen Login braucht, scheitert
+deshalb sofort mit `<Remote> braucht einen Login (kein Credential-Helper/SSH-Key).`
+statt zu fragen. HTTPS-Zugangsdaten gehören in einen
+Credential-Helper (macOS: `git config --global credential.helper osxkeychain`),
+oder man nutzt SSH mit einem Key im Agenten; beides läuft ohne Rückfrage.
+
 ## Installation
 
 Vorausgesetzt werden Python 3 und ein Terminal. Sonst nichts.

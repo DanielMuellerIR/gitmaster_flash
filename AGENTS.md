@@ -38,6 +38,12 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
   Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
   fremde Python-Dienste und Automationen unangetastet lassen.
+- Alle Git-Aufrufe gehen über `run_git()` und laufen strikt nicht interaktiv
+  (`GIT_TERMINAL_PROMPT=0`, leeres Askpass, `stdin=DEVNULL`, eigene Session,
+  `LC_ALL=C`). Git schreibt Login-Fragen sonst direkt auf `/dev/tty`, zerlegt damit
+  das curses-Bild und blockiert bis zum Timeout. Fehlende Zugangsdaten erkennt
+  `credentials_missing()` an den englischen Markern (deshalb `LC_ALL=C`) und die UI
+  zeigt einen Einrichtungshinweis statt nur eines Exit-Codes.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 
