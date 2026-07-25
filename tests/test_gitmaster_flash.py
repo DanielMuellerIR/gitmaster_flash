@@ -27,11 +27,11 @@ import gitmaster_flash as gmf_module  # noqa: E402
 
 from gitmaster_flash import (  # noqa: E402
     DEFAULT_CONFIG, __version__, CommitSafetyError, RemoteStatus, RepoStatus, TUI,
-    collect_status, find_repos,
+    build_info_view, check_remote, classify_remote_check, collect_status, find_repos,
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
     detect_sync_remote, display_remote_url, fetch_remote_status, inspect_transfer,
-    is_github_url, pad_cells, parse_porcelain, repo_info_lines, safe_pull_args,
-    stash_preview, status_dict,
+    is_github_url, pad_cells, parse_porcelain, remote_check_message, repo_info_lines,
+    safe_pull_args, stash_preview, status_dict,
     safe_push_args, suggested_ignore, terminal_text, truncate_cells,
     update_gitignore_atomic, upstream_delta,
 )
@@ -491,6 +491,14 @@ class DiffTests(unittest.TestCase):
         s = [_repo("x", remotes=[("origin", 0, 0, True)])]
         self.assertEqual(diff_status(_side(repos=s), _side(repos=s), "here", "there"), [])
 
+    def test_offline_side_does_not_fake_drift(self):
+        # fetch_failed haengt am Netz des jeweiligen Rechners und darf den Vergleich
+        # nicht beeinflussen — sonst meldete jede Offline-Seite lauter Unterschiede.
+        a = _side(repos=[_repo("x", remotes=[("github", 0, 0)])])
+        b = _side(repos=[_repo("x", remotes=[("github", 0, 0)])])
+        a["repos"][0]["remotes"][0]["fetch_failed"] = True
+        self.assertEqual(diff_status(a, b, "here", "there"), [])
+
     def test_nonsync_remote_equally_behind_stays_silent(self):
         # Fuer Nicht-Sync-Remotes (z.B. github) bleibt gleicher Stand = kein Report.
         s = [_repo("x", remotes=[("github", 0, 2)])]
@@ -793,6 +801,22 @@ class NonInteractiveGitTests(unittest.TestCase):
         self.assertIn("faux", st.error)
         self.assertIn("login", st.error.lower())
 
+    def test_failing_fetch_marks_the_remote_instead_of_only_the_repo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo_with_denying_remotes(root, "faux", "zwei")
+            # Ein drittes, lokales Remote muss unberührt bleiben.
+            spare = root / "spare.git"
+            git(root, "init", "-q", "--bare", str(spare))
+            git(repo, "remote", "add", "lokal", str(spare))
+            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+        failed = {r.name for r in st.remotes if r.fetch_failed}
+        self.assertEqual(failed, {"faux", "zwei"})
+        badges = {r.name: r.badge() for r in st.remotes}
+        self.assertTrue(badges["faux"].startswith("✘"), badges)
+        self.assertNotIn("✘", badges["lokal"])
+        self.assertTrue(status_dict(st)["remotes"][0].get("fetch_failed") is not None)
+
     def test_run_git_disables_prompts_and_keeps_caller_env(self):
         recorded = {}
 
@@ -832,6 +856,207 @@ class NonInteractiveGitTests(unittest.TestCase):
         self.assertEqual(gmf_module.failed_fetch_remotes(r), ["github"])
         self.assertEqual(gmf_module.failed_fetch_remotes(
             subprocess.CompletedProcess(["git"], 1, "", "boom\n")), [])
+
+
+class RemoteCheckTests(unittest.TestCase):
+    """`T` auf der Info-Seite: existiert das Remote-Repo — und wenn nicht, warum?"""
+
+    @staticmethod
+    def _result(stderr, code=128):
+        return subprocess.CompletedProcess(["git"], code, "", stderr)
+
+    def test_causes_are_told_apart(self):
+        cases = {
+            "gone": "remote: Repository not found.\nfatal: repository 'https://x/y.git' not found",
+            "auth": "fatal: could not read Username for 'https://github.com': "
+                    "terminal prompts disabled",
+            "dns": "ssh: Could not resolve hostname nirgendwo: nodename nor servname "
+                   "provided, or not known",
+            "unreachable": "ssh: connect to host 10.0.0.9 port 22: Connection refused",
+            "server": "fatal: unable to access 'https://x/y.git/': "
+                      "The requested URL returned error: 503",
+            "unknown": "fatal: something entirely new happened",
+        }
+        for expected, stderr in cases.items():
+            with self.subTest(expected):
+                self.assertEqual(classify_remote_check(self._result(stderr)), expected)
+
+    def test_deleted_repo_and_broken_network_do_not_look_alike(self):
+        gone = remote_check_message("github", "gone", 0, "", 30)
+        offline = remote_check_message("github", "dns", 0, "", 30)
+        down = remote_check_message("github", "unreachable", 0, "", 30)
+        self.assertNotEqual(gone, offline)
+        self.assertNotEqual(gone, down)
+        self.assertNotEqual(offline, down)
+
+    def test_check_reports_existing_and_missing_repository(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            origin = root / "origin.git"
+            git(root, "init", "-q", "--bare", str(origin))
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q")
+            git(repo, "config", "user.email", "t@example.invalid")
+            git(repo, "config", "user.name", "T")
+            (repo / "a").write_text("a")
+            git(repo, "add", "a")
+            git(repo, "commit", "-qm", "base")
+            git(repo, "remote", "add", "origin", str(origin))
+            git(repo, "push", "-q", "origin", "HEAD")
+            git(repo, "remote", "add", "weg", str(root / "gibt-es-nicht.git"))
+
+            self.assertEqual(check_remote(repo, "origin", 10)[:2], ("ok", 1))
+            outcome, _, detail = check_remote(repo, "weg", 10)
+        self.assertEqual(outcome, "gone", detail)
+
+    def test_check_of_empty_repository_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            empty = root / "empty.git"
+            git(root, "init", "-q", "--bare", str(empty))
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q")
+            git(repo, "remote", "add", "leer", str(empty))
+            self.assertEqual(check_remote(repo, "leer", 10)[0], "empty")
+
+
+class RemoteRemovalAndCommandLogTests(unittest.TestCase):
+    """`X` entfernt nur lokale Config — und jede Aktion landet im Befehlsprotokoll."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q")
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.md").write_text("hallo\n")
+        git(self.repo, "add", "a.md")
+        git(self.repo, "commit", "-qm", "erster Commit")
+        self.origin = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(self.origin))
+        git(self.repo, "remote", "add", "origin", str(self.origin))
+        git(self.repo, "push", "-q", "-u", "origin", "HEAD")
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_removing_a_remote_keeps_commits_and_files(self):
+        head_before = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True).stdout
+        r = gmf_module.run_git_logged(self.repo, "remote", "remove", "origin", timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        config = (self.repo / ".git" / "config").read_text()
+        self.assertNotIn('[remote "origin"]', config)
+        # Tracking-Refs weg, Commit und Datei unangetastet.
+        refs = subprocess.run(["git", "-C", str(self.repo), "for-each-ref",
+                               "refs/remotes/origin"], capture_output=True, text=True)
+        self.assertEqual(refs.stdout.strip(), "")
+        head_after = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True).stdout
+        self.assertEqual(head_before, head_after)
+        self.assertTrue((self.repo / "a.md").exists())
+        # Das Remote-Repo selbst bleibt bestehen — entfernt wird nur die Config.
+        self.assertTrue(self.origin.exists())
+
+    def test_command_log_shows_the_real_git_syntax(self):
+        gmf_module.run_git_logged(self.repo, "remote", "remove", "origin", timeout=10)
+        self.assertEqual(len(gmf_module.COMMAND_LOG), 1)
+        entry = gmf_module.COMMAND_LOG[0]
+        self.assertIn("git remote remove origin", entry)
+        self.assertTrue(entry.startswith("✔"), entry)
+        self.assertIn("repo", entry)
+
+    def test_failed_command_is_logged_with_exit_code(self):
+        gmf_module.run_git_logged(self.repo, "remote", "remove", "gibtsnicht", timeout=10)
+        entry = gmf_module.COMMAND_LOG[0]
+        self.assertTrue(entry.startswith("✘"), entry)
+        self.assertIn("Exit", entry)
+
+    def test_log_quotes_arguments_so_the_line_can_be_pasted(self):
+        self.assertEqual(
+            gmf_module.format_git_command(("commit", "-m", "zwei Wörter")),
+            "git commit -m 'zwei Wörter'")
+
+    def test_log_keeps_only_the_newest_entries(self):
+        for i in range(gmf_module.COMMAND_LOG_MAX + 5):
+            gmf_module.log_command(self.repo, ("status", str(i)), 0)
+        self.assertEqual(len(gmf_module.COMMAND_LOG), gmf_module.COMMAND_LOG_MAX)
+        self.assertIn(str(gmf_module.COMMAND_LOG_MAX + 4), gmf_module.COMMAND_LOG[-1])
+
+    def _info_screen(self, keys):
+        """Fake-Screen fuer die Info-Ansicht; liefert die gedrueckten Tasten der Reihe."""
+        class Screen:
+            def __init__(self):
+                self.keys = iter(keys)
+                self.written = []
+
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return (30, 100)
+
+            def addstr(self, y, x, text, *rest):
+                self.written.append(text)
+
+            def refresh(self):
+                pass
+
+            def getch(self):
+                return next(self.keys)
+
+        return Screen()
+
+    def test_tab_selects_the_next_remote_before_acting_on_it(self):
+        git(self.repo, "remote", "add", "github", str(self.root / "geloescht.git"))
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(self._info_screen([9, ord("t"), ord("q")]), self.root,
+                 DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        # origin (Sync) steht an erster Stelle, github zuletzt — Tab muss weiterspringen.
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_repo_info()
+        self.assertIn("github", ui.message)
+        self.assertIn("no repository", ui.message)
+
+    def test_x_removes_only_after_confirmation(self):
+        ui = TUI(self._info_screen([ord("x"), ord("q")]), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [collect_status(self.repo, self.root, DEFAULT_CONFIG)]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm", return_value=False):
+            ui.action_repo_info()
+        self.assertIn('[remote "origin"]', (self.repo / ".git" / "config").read_text())
+        self.assertEqual(ui.message, "Nothing was removed.")
+
+        ui = TUI(self._info_screen([ord("x"), ord("q")]), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [collect_status(self.repo, self.root, DEFAULT_CONFIG)]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm", return_value=True):
+            ui.action_repo_info()
+        self.assertNotIn('[remote "origin"]', (self.repo / ".git" / "config").read_text())
+        self.assertIn("origin", ui.message)
+        self.assertIn("git remote remove origin", "\n".join(gmf_module.COMMAND_LOG))
+
+    def test_info_view_maps_remote_blocks_to_lines(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        view = build_info_view(st, DEFAULT_CONFIG)
+        self.assertEqual(view.remote_names, ["origin", "github"])
+        for name, first, last in view.remote_blocks:
+            self.assertIn(name, view.lines[first])
+            self.assertLessEqual(first, last)
+            # Der Block endet vor dem naechsten Remote-Kopf.
+            self.assertTrue(all(not line.startswith("  " + other)
+                                for other in view.remote_names if other != name
+                                for line in view.lines[first:last + 1]))
+        # Der Textmodus bleibt unveraendert nutzbar (CLI/Tests).
+        self.assertEqual(repo_info_lines(st, DEFAULT_CONFIG), view.lines)
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

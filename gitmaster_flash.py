@@ -62,7 +62,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -235,6 +235,7 @@ TR = {
     "nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "commit_in": {"en": "Commit in {rel}", "de": "Commit in {rel}"},
     "new_in_gitignore": {"en": "New in .gitignore:", "de": "Neu in .gitignore:"},
+    "more_entries": {"en": "… and {n} more", "de": "… und {n} weitere"},
     "to_commit_n": {"en": "To commit: {n} file(s)", "de": "Zu committen: {n} Datei(en)"},
     "recent_msgs": {"en": "Recent commit messages (style reference):",
                     "de": "Letzte Commit-Messages (Stil-Vorlage):"},
@@ -268,6 +269,9 @@ TR = {
     "transfer_auth_missing": {
         "en": "{r} needs a login (no credential helper or SSH key).",
         "de": "{r} braucht einen Login (kein Credential-Helper/SSH-Key)."},
+    "fetch_remote_failed": {
+        "en": "Fetch from {r} failed; press I to check the cause.",
+        "de": "Fetch von {r} fehlgeschlagen; mit I die Ursache prüfen."},
     "transfer_inspect_failed": {
         "en": "Git could not inspect the branch safely; no transfer was attempted.",
         "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen."},
@@ -320,7 +324,8 @@ TR = {
     "outgoing_commits": {"en": "Outgoing commits:", "de": "Ausgehende Commits:"},
     "changed_files": {"en": "Changed files:", "de": "Geänderte Dateien:"},
     "none_label": {"en": "(none)", "de": "(keine)"},
-    "git_help_title": {"en": "Safe Git actions", "de": "Sichere Git-Aktionen"},
+    "git_help_title": {"en": "Safe Git actions & command log",
+                       "de": "Sichere Git-Aktionen & Befehlsprotokoll"},
     "git_help_body": {
         "en": "P  Push only the current branch to the private sync remote.\n"
               "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
@@ -379,6 +384,75 @@ TR = {
     "info_remote_error": {
         "en": "Remote details unavailable: {e}",
         "de": "Remote-Details nicht verfügbar: {e}"},
+    "info_fetch_failed": {"en": "last fetch failed", "de": "letzter Fetch fehlgeschlagen"},
+    # Info-Ansicht: Navigation und Remote-Aktionen
+    "info_footer_nav": {
+        "en": " ↑/↓ or Tab select remote · PgUp/PgDn scroll · Q/Esc close",
+        "de": " ↑/↓ oder Tab Remote wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
+    "info_footer_actions": {
+        "en": " T test remote (does it still exist?) · X remove remote (local config only)",
+        "de": " T Remote prüfen (existiert es noch?) · X Remote entfernen (nur lokale Config)"},
+    "info_no_remotes": {"en": "This repository has no remote.",
+                        "de": "Dieses Repo hat kein Remote."},
+    # Remote prüfen (T)
+    "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
+    "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
+                 "de": "{r} existiert und antwortet ({n} Branch(es) dort)."},
+    "check_empty": {"en": "{r} answers but has no branches yet (empty repository).",
+                    "de": "{r} antwortet, hat aber noch keine Branches (leeres Repo)."},
+    "check_gone": {
+        "en": "{r}: address reachable, but no repository there (or no access).",
+        "de": "{r}: Adresse erreichbar, aber dort ist kein Repo (oder kein Zugriff)."},
+    "check_auth": {"en": "{r}: server wants a login (credential helper or SSH key missing).",
+                   "de": "{r}: Server verlangt einen Login (Credential-Helper/SSH-Key fehlt)."},
+    "check_dns": {"en": "{r}: host name does not resolve — no network or DNS problem.",
+                  "de": "{r}: Hostname nicht auflösbar — kein Netz oder DNS-Problem."},
+    "check_unreachable": {
+        "en": "{r}: no connection to the host — offline, firewall, or server down.",
+        "de": "{r}: keine Verbindung zum Host — offline, Firewall oder Server aus."},
+    "check_server": {
+        "en": "{r}: server replied with an error — problem on their side, not your repo.",
+        "de": "{r}: Server antwortet mit Fehler — Problem dort, nicht an deinem Repo."},
+    "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
+                      "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
+    "check_unknown": {"en": "{r}: unclear result — {e}", "de": "{r}: unklares Ergebnis — {e}"},
+    # Remote entfernen (X)
+    "remove_title": {"en": "Remove remote · {r}", "de": "Remote entfernen · {r}"},
+    "remove_what_happens": {"en": "What this does:", "de": "Was dabei passiert:"},
+    "remove_effect_config": {
+        "en": "· the [remote \"{r}\"] section disappears from .git/config",
+        "de": "· der Abschnitt [remote \"{r}\"] verschwindet aus .git/config"},
+    "remove_effect_refs": {
+        "en": "· the remote-tracking branches refs/remotes/{r}/* are deleted",
+        "de": "· die Remote-Tracking-Branches refs/remotes/{r}/* werden gelöscht"},
+    "remove_effect_upstream": {
+        "en": "· a local branch tracking {r} loses its upstream setting",
+        "de": "· ein lokaler Branch mit Upstream auf {r} verliert diese Verknüpfung"},
+    "remove_effect_safe": {
+        "en": "· commits, files, branches and stashes stay untouched — nothing is sent",
+        "de": "· Commits, Dateien, Branches und Stashes bleiben unberührt — nichts wird gesendet"},
+    "remove_effect_server": {
+        "en": "· nothing changes on the server; this is purely local",
+        "de": "· auf dem Server ändert sich nichts; das ist rein lokal"},
+    "remove_undo": {"en": "Undo (same URL again):", "de": "Rückgängig (URL wieder eintragen):"},
+    "remove_command": {"en": "Command:", "de": "Befehl:"},
+    "remove_sync_warning": {
+        "en": "Careful: {r} is the sync remote here — P and L stop working for this repo.",
+        "de": "Achtung: {r} ist hier der Sync-Remote — P und L funktionieren danach nicht mehr."},
+    "remove_confirm": {"en": "Remove remote {r} now?", "de": "Remote {r} jetzt entfernen?"},
+    "remove_done": {"en": "Removed remote {r}.", "de": "Remote {r} entfernt."},
+    "remove_failed": {"en": "Removing {r} failed (Git exit code {code}).",
+                      "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+    "remove_cancelled": {"en": "Nothing was removed.", "de": "Es wurde nichts entfernt."},
+    # Befehlsprotokoll
+    "cmdlog_title": {"en": "Commands this session ran",
+                     "de": "In dieser Sitzung ausgeführte Befehle"},
+    "cmdlog_empty": {
+        "en": "(none yet — actions like C, P, L, G, U, D and X are listed here)",
+        "de": "(noch keine — Aktionen wie C, P, L, G, U, D und X stehen hier)"},
+    "cmdlog_hint": {
+        "en": "Every line is a real Git command; you can run it in a terminal yourself.",
+        "de": "Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar."},
     # main
     "not_a_dir": {"en": "Not a directory: {p}", "de": "Kein Ordner: {p}"},
     "git_timeout": {"en": "git timeout", "de": "git-Timeout"},
@@ -494,6 +568,7 @@ class RemoteStatus:
     push_fingerprints: list[str] = field(default_factory=list)
     target_mismatch: bool = False
     multiple_pushurls: bool = False
+    fetch_failed: bool = False
 
     @property
     def transfer_safe(self) -> bool:
@@ -507,6 +582,9 @@ class RemoteStatus:
             arrows += f"↓{self.behind}"
         if not self.branch_exists:
             arrows = "?"
+        if self.fetch_failed:
+            # ✘ heißt: der Stand daneben ist der letzte bekannte, nicht der aktuelle.
+            arrows = f"✘{arrows}" if arrows else "✘"
         return f"{arrows} {self.name}" if arrows else self.name
 
 
@@ -717,7 +795,7 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int) ->
         index_path = str(Path(temp) / "index")
         env = dict(os.environ, GIT_INDEX_FILE=index_path)
         _required_git(repo, "read-tree", "HEAD", timeout=timeout, env=env)
-        staged = run_git(repo, "add", "--", *paths, timeout=timeout, env=env)
+        staged = run_git_logged(repo, "add", "--", *paths, timeout=timeout, env=env)
         if staged.returncode != 0:
             return staged
         names = _required_git(repo, "diff", "--cached", "--name-only", "-z", "--",
@@ -735,7 +813,8 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int) ->
         tree_after = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if tree_after != tree_before:
             raise CommitSafetyError("approved files changed during commit preparation")
-        result = run_git(repo, "commit", "-m", message, timeout=timeout, env=env)
+        result = run_git_logged(repo, "commit", "-m", message, timeout=timeout,
+                                 env=env)
     if _real_index_signature(repo, timeout) != real_before:
         raise CommitSafetyError("Git changed the real index unexpectedly")
     return result
@@ -785,6 +864,77 @@ def credentials_missing(result: subprocess.CompletedProcess) -> bool:
     return any(marker in text for marker in CREDENTIAL_ERROR_MARKERS)
 
 
+# Ursachen, die ein fehlgeschlagener Remote-Zugriff haben kann — in dieser Reihenfolge
+# geprüft. Wichtig ist die Trennung von "der Server hat geantwortet, das Repo gibt es
+# nicht" und "wir sind gar nicht hingekommen": beides sieht sonst gleich aus, verlangt
+# aber völlig verschiedene Reaktionen (Remote entfernen vs. Netz reparieren/warten).
+REMOTE_CHECK_CAUSES = (
+    # (Ergebnis, Marker in der englischen Git-/SSH-Meldung)
+    ("dns", ("could not resolve host", "could not resolve hostname",
+             "name or service not known", "nodename nor servname",
+             "temporary failure in name resolution", "no address associated")),
+    ("unreachable", ("connection refused", "connection timed out",
+                     "no route to host", "network is unreachable",
+                     "operation timed out", "connection closed by remote host",
+                     "connection reset by peer", "couldn't connect to server",
+                     "failed to connect to")),
+    ("server", ("the requested url returned error: 5", "http code = 5",
+                "error: 502", "error: 503", "internal server error",
+                "service unavailable", "bad gateway")),
+    ("auth", CREDENTIAL_ERROR_MARKERS),
+    ("gone", ("repository not found", "not found", "does not appear to be a git repository",
+              "does not exist", "access denied", "the requested url returned error: 404",
+              "no such file or directory")),
+)
+
+
+def classify_remote_check(result: subprocess.CompletedProcess) -> str:
+    """Warum ist der Zugriff auf das Remote gescheitert?
+
+    Liefert "dns", "unreachable", "server", "auth", "gone" oder "unknown". Reine
+    Textauswertung von Gits Meldung — deshalb laufen die Aufrufe mit LC_ALL=C.
+    """
+    text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+    for cause, markers in REMOTE_CHECK_CAUSES:
+        if any(marker in text for marker in markers):
+            return cause
+    return "unknown"
+
+
+def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
+    """Existiert das Remote-Repo unter seiner Adresse — und wenn nicht, warum?
+
+    `git ls-remote` fragt nur die Ref-Liste ab: es überträgt keine Objekte, ändert
+    lokal nichts und ist damit der harmloseste echte Zugriffstest.
+    Rückgabe: (Ergebnis, Anzahl Refs, letzte Fehlerzeile). Ergebnis ist "ok",
+    "empty", "timeout" oder eine Ursache aus classify_remote_check().
+    """
+    try:
+        r = run_git_logged(repo, "ls-remote", "--heads", "--", name, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "timeout", 0, ""
+    if r.returncode == 0:
+        refs = [line for line in r.stdout.splitlines() if line.strip()]
+        return ("ok" if refs else "empty"), len(refs), ""
+    detail = next((line.strip() for line in reversed((r.stderr or "").splitlines())
+                   if line.strip()), "")
+    return classify_remote_check(r), 0, detail[:160]
+
+
+def remote_check_message(name: str, outcome: str, refs: int, detail: str,
+                         timeout: int) -> str:
+    """Prüfergebnis als fertiger, erklärender Satz für die Meldungszeile."""
+    if outcome == "ok":
+        return t("check_ok", r=name, n=refs)
+    if outcome == "empty":
+        return t("check_empty", r=name)
+    if outcome == "timeout":
+        return t("check_timeout", r=name, s=timeout)
+    if outcome in ("dns", "unreachable", "server", "auth", "gone"):
+        return t("check_" + outcome, r=name)
+    return t("check_unknown", r=name, e=detail or outcome)
+
+
 def failed_fetch_remotes(result: subprocess.CompletedProcess) -> list[str]:
     """Namen der Remotes, die Git in `fetch --all` als gescheitert meldet.
 
@@ -812,6 +962,43 @@ def run_git(repo: Path, *args: str, timeout: int = 10,
         # Passphrase zu fragen; der ssh-agent funktioniert davon unberührt weiter.
         start_new_session=True,
     )
+
+
+# Protokoll der Befehle, die diese Sitzung bewusst abgesetzt hat (Reihenfolge = Verlauf).
+# Zweck: Wer gmf benutzt, soll die Git-Syntax nebenbei mitlesen können, statt sie zu
+# erraten. Nur ausgelöste Aktionen landen hier — die Lesebefehle des Repo-Scans würden
+# das Protokoll unbrauchbar zumüllen.
+COMMAND_LOG: list[str] = []
+COMMAND_LOG_MAX = 200
+
+
+def format_git_command(args: tuple[str, ...] | list[str]) -> str:
+    """Den Befehl so schreiben, wie man ihn im Repo-Ordner selbst eintippen würde."""
+    return "git " + " ".join(shlex.quote(a) for a in args)
+
+
+def log_command(repo: Path, args: tuple[str, ...] | list[str],
+                returncode: int | None = None) -> str:
+    """Einen abgesetzten Git-Befehl protokollieren und die Protokollzeile liefern."""
+    mark = "…" if returncode is None else ("✔" if returncode == 0 else "✘")
+    line = f"{mark} {repo.name}: {format_git_command(args)}"
+    if returncode not in (None, 0):
+        line += f"   (Exit {returncode})"
+    COMMAND_LOG.append(line)
+    del COMMAND_LOG[:-COMMAND_LOG_MAX]
+    return line
+
+
+def run_git_logged(repo: Path, *args: str, timeout: int = 10,
+                   env: dict | None = None) -> subprocess.CompletedProcess:
+    """Wie run_git, protokolliert den Aufruf aber für die Befehlsansicht (H)."""
+    try:
+        r = run_git(repo, *args, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        log_command(repo, args, returncode=None)
+        raise
+    log_command(repo, args, r.returncode)
+    return r
 
 
 class GitReadError(RuntimeError):
@@ -938,10 +1125,17 @@ def is_github_url(url: str) -> bool:
 
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
-                            configs: dict[str, RemoteConfig] | None = None) -> list[RemoteStatus]:
-    """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt."""
+                            configs: dict[str, RemoteConfig] | None = None,
+                            fetch_failed: set[str] | None = None) -> list[RemoteStatus]:
+    """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt.
+
+    `fetch_failed` sind die Namen der Remotes, deren Fetch gerade scheiterte; sie
+    werden markiert, damit die Zeile sie rot zeigt statt einen veralteten Stand
+    als aktuell auszugeben.
+    """
     states: list[RemoteStatus] = []
     configs = configs if configs is not None else read_remote_configs(repo, cfg)
+    failed = fetch_failed or set()
     for name, remote in configs.items():
         targets = remote.fetch_targets + remote.push_targets
         public_classes = {target.host == "github.com" for target in targets}
@@ -955,6 +1149,7 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
             push_fingerprints=[target.fingerprint for target in remote.push_targets],
             target_mismatch=not remote.transfer_safe,
             multiple_pushurls=len(remote.push_targets) != 1,
+            fetch_failed=name in failed,
         )
         if branch not in ("?", "(detached)"):
             ref = f"refs/remotes/{name}/{branch}"
@@ -1027,8 +1222,30 @@ def github_web_urls(remote: RemoteConfig) -> list[str]:
     return urls
 
 
+@dataclass
+class InfoView:
+    """Repo-Details als Text plus die Info, welche Zeilen zu welchem Remote gehören.
+
+    Damit kann die TUI einen Auswahlbalken über die Remote-Blöcke legen, ohne den
+    Text erneut zu parsen — und `repo_info_lines()` bleibt reine Textausgabe.
+    """
+
+    lines: list[str] = field(default_factory=list)
+    # Name -> (erste Zeile, letzte Zeile) des Blocks in `lines`
+    remote_blocks: list[tuple[str, int, int]] = field(default_factory=list)
+
+    @property
+    def remote_names(self) -> list[str]:
+        return [name for name, _, _ in self.remote_blocks]
+
+
 def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
     """Read-only Repo-Details als Textzeilen; keinerlei curses-Abhängigkeit."""
+    return build_info_view(st, cfg).lines
+
+
+def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
+    """Wie repo_info_lines, liefert zusätzlich die Zeilenbereiche der Remotes."""
     t_ = cfg["git_timeout"]
 
     def read_git(*args: str) -> subprocess.CompletedProcess:
@@ -1094,16 +1311,17 @@ def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
     lines.append(f"{t('info_tags')}: {tag_value}")
 
     lines.extend(["", f"{t('info_remotes')}:"])
+    view = InfoView(lines=lines)
     try:
         configs = read_remote_configs(st.path, cfg)
     # Auch malformed Fremdkonfigurationen (etwa eine ungültige URL) sollen nur
     # diese Ansicht degradieren, nicht die komplette curses-Sitzung beenden.
     except Exception as exc:
         lines.append("  " + t("info_remote_error", e=terminal_text(exc)))
-        return lines
+        return view
     if not configs:
         lines.append("  " + t("none_label"))
-        return lines
+        return view
 
     states = {remote.name: remote for remote in st.remotes}
     ordered_names = [remote.name for remote in st.remotes if remote.name in configs]
@@ -1119,9 +1337,12 @@ def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
             labels.append(t("info_github"))
         if not remote.transfer_safe:
             labels.append(t("info_unsafe_remote"))
+        if state and state.fetch_failed:
+            labels.append(t("info_fetch_failed"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
         if index:
             lines.append("")
+        first = len(lines)
         lines.append(f"  {terminal_text(name)}{suffix}")
         for url in remote.fetch_urls:
             lines.append(f"    {t('info_fetch_url')}: {display_remote_url(url)}")
@@ -1136,7 +1357,8 @@ def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
                     a=state.ahead, d=state.behind))
             else:
                 lines.append("    " + t("info_remote_branch_missing", b=branch))
-    return lines
+        view.remote_blocks.append((name, first, len(lines) - 1))
+    return view
 
 
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
@@ -1297,6 +1519,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         # Vergleich mit ALLEN Remotes (auf Basis des letzten fetch-Stands).
         configs = read_remote_configs(repo, cfg)
         st.remote = detect_sync_remote(repo, cfg, configs)
+        failed_remotes: set[str] = set()
         if fetch:
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
             # Fetch verändert weder Branch noch Working Tree.
@@ -1306,26 +1529,27 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             except subprocess.TimeoutExpired:
                 st.error = t("git_timeout")
                 st.remote_state = "error"
+                failed_remotes = set(configs)
             else:
                 if fetched.returncode != 0:
-                    if credentials_missing(fetched):
-                        # Fehlende Zugangsdaten sind kein Repo-Schaden, sondern eine
-                        # Einrichtungsfrage — der Exit-Code allein sagt das nicht.
-                        # Bei nur einem Remote nennt Git keinen Namen (es verhält sich
-                        # dann wie ein einfaches `fetch`), deshalb der Fallback.
-                        failed = failed_fetch_remotes(fetched) or list(configs)
-                        st.error = t("transfer_auth_missing",
-                                     r=", ".join(failed) or "--all")
-                    else:
-                        st.error = t("transfer_fetch_failed", r="--all",
-                                     code=fetched.returncode)
+                    # Ein gescheiterter Fetch ist ein Problem EINZELNER Remotes (Repo
+                    # gelöscht, kein Netz, Login fehlt) — nicht des Repos. Deshalb die
+                    # betroffenen Namen merken und rot markieren. Bei nur einem Remote
+                    # nennt Git keinen Namen (es verhält sich dann wie ein einfaches
+                    # `fetch`), deshalb der Fallback auf alle konfigurierten.
+                    failed_remotes = set(failed_fetch_remotes(fetched)) or set(configs)
+                    names = ", ".join(sorted(failed_remotes)) or "--all"
+                    st.error = (t("transfer_auth_missing", r=names)
+                                if credentials_missing(fetched)
+                                else t("fetch_remote_failed", r=names))
                     st.remote_state = "error"
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
             # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
             configs = read_remote_configs(repo, cfg)
             st.remote = detect_sync_remote(repo, cfg, configs)
-        st.remotes = collect_remote_statuses(repo, st.branch, st.remote, cfg, configs)
+        st.remotes = collect_remote_statuses(repo, st.branch, st.remote, cfg, configs,
+                                             fetch_failed=failed_remotes)
         if st.remote is None:
             if not st.error and not detached:
                 st.remote_state = "no-remote"
@@ -1386,7 +1610,10 @@ def status_dict(st: RepoStatus) -> dict:
              "fetch_fingerprint": r.fetch_fingerprint,
              "push_fingerprints": r.push_fingerprints,
              "target_mismatch": r.target_mismatch,
-             "multiple_pushurls": r.multiple_pushurls}
+             "multiple_pushurls": r.multiple_pushurls,
+             # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
+             # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
+             "fetch_failed": r.fetch_failed}
             for r in st.remotes
         ],
         "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
@@ -1567,8 +1794,9 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
-            color = cyan if remote.public else (
-                red if remote.behind else yellow if remote.ahead else green)
+            color = red if remote.fetch_failed else (
+                cyan if remote.public else (
+                    red if remote.behind else yellow if remote.ahead else green))
             remote_bits.append(f"{color}{terminal_text(remote.badge())}{reset}")
         badge_txt = ("  " + "  ".join(remote_bits)) if remote_bits else ""
         if st.clean_and_synced:
@@ -1760,7 +1988,10 @@ class TUI:
         # rechts bleibt. Auch synchrone Remotes werden immer angezeigt.
         part(f"[{st.branch}]", C_DIM)
         for remote in st.remotes:
-            if remote.public:
+            if remote.fetch_failed:
+                # Fetch scheiterte: rot vor allem anderen, damit man es nicht übersieht.
+                pair = C_RED
+            elif remote.public:
                 pair = C_CYAN
             elif remote.behind:
                 pair = C_RED
@@ -1907,7 +2138,7 @@ class TUI:
         if not self.confirm(t("confirm_pop", rel=st.rel)):
             self.message = t("cancelled")
             return
-        r = run_git(st.path, "stash", "pop", timeout=self.cfg["git_timeout"])
+        r = run_git_logged(st.path, "stash", "pop", timeout=self.cfg["git_timeout"])
         new = self.refresh_one(st)
         if r.returncode == 0:
             self.message = t("stash_applied", rel=st.rel)
@@ -1942,8 +2173,8 @@ class TUI:
         if not self.confirm(t("confirm_drop", rel=st.rel)):
             self.message = t("drop_cancelled")
             return
-        r = run_git(st.path, "stash", "drop", "stash@{0}",
-                    timeout=self.cfg["git_timeout"])
+        r = run_git_logged(st.path, "stash", "drop", "stash@{0}",
+                           timeout=self.cfg["git_timeout"])
         if r.returncode == 0:
             self.message = t("stash_dropped", rel=st.rel)
         else:
@@ -1993,8 +2224,8 @@ class TUI:
         return next((remote for remote in st.remotes if remote.name == name), None)
 
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
-        r = run_git(st.path, "fetch", "--prune", "--quiet", "--", remote,
-                    timeout=self.cfg["fetch_timeout"])
+        r = run_git_logged(st.path, "fetch", "--prune", "--quiet", "--", remote,
+                           timeout=self.cfg["fetch_timeout"])
         if r.returncode != 0:
             self.message = (t("transfer_auth_missing", r=remote)
                             if credentials_missing(r)
@@ -2060,9 +2291,10 @@ class TUI:
         if not final.ready or final.approval_signature() != check.approval_signature():
             self.message = t("transfer_changed")
             return
-        r = run_git(newest.path, *safe_push_args(
-                        remote.name, check.branch, check.head_oid, check.target_oid),
-                    timeout=self.cfg["fetch_timeout"])
+        r = run_git_logged(newest.path, *safe_push_args(
+                               remote.name, check.branch, check.head_oid,
+                               check.target_oid),
+                           timeout=self.cfg["fetch_timeout"])
         self.refresh_one(newest)
         if r.returncode == 0:
             self.message = t("sync_pushed", r=remote.name)
@@ -2106,8 +2338,8 @@ class TUI:
         if not final.ready or final.approval_signature() != check.approval_signature():
             self.message = t("transfer_changed")
             return
-        r = run_git(newest.path, *safe_pull_args(check.target_oid),
-                    timeout=self.cfg["git_timeout"])
+        r = run_git_logged(newest.path, *safe_pull_args(check.target_oid),
+                           timeout=self.cfg["git_timeout"])
         self.refresh_one(newest)
         if r.returncode == 0:
             self.message = t("sync_pulled", r=remote.name)
@@ -2170,9 +2402,10 @@ class TUI:
                 or final.approval_signature() != check.approval_signature()):
             self.message = t("github_changed")
             return
-        r = run_git(newest.path, *safe_push_args(
-                        remote.name, check.branch, check.head_oid, check.target_oid),
-                    timeout=self.cfg["fetch_timeout"])
+        r = run_git_logged(newest.path, *safe_push_args(
+                               remote.name, check.branch, check.head_oid,
+                               check.target_oid),
+                           timeout=self.cfg["fetch_timeout"])
         self.refresh_one(newest)
         if r.returncode == 0:
             self.message = t("github_pushed", r=remote.name)
@@ -2182,18 +2415,153 @@ class TUI:
             self.message = t("push_failed", code=r.returncode)
 
     def action_git_help(self):
-        self.show_pager(t("git_help_title"), t("git_help_body").splitlines())
+        """Kurzhilfe — und darüber das Protokoll der wirklich abgesetzten Befehle."""
+        lines = [t("cmdlog_title"), ""]
+        if COMMAND_LOG:
+            lines.extend("  " + terminal_text(entry) for entry in COMMAND_LOG)
+            lines.extend(["", "  " + t("cmdlog_hint")])
+        else:
+            lines.append("  " + t("cmdlog_empty"))
+        lines.extend(["", "", *t("git_help_body").splitlines()])
+        self.show_pager(t("git_help_title"), lines)
+
+    # -- Repo-Info mit Remote-Auswahl ---------------------------------------
 
     def action_repo_info(self):
-        """Aktuelle, ausschließlich lesende Details zum ausgewählten Repo."""
+        """Repo-Details; die Remotes sind auswählbar (T prüfen, X entfernen)."""
         st = self.current()
         if not st:
             return
         fresh = self.refresh_one(st)
-        self.show_pager(
-            t("repo_info_title", rel=terminal_text(fresh.rel)),
-            repo_info_lines(fresh, self.cfg),
-        )
+        view = build_info_view(fresh, self.cfg)
+        selected = 0        # Index in view.remote_blocks
+        top = 0             # erste sichtbare Zeile
+        note = ""           # Ergebnis der letzten Prüfung
+        while True:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            title = t("repo_info_title", rel=terminal_text(fresh.rel))
+            safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
+            body_h = max(1, h - 4)
+            block = (view.remote_blocks[selected] if view.remote_blocks else None)
+            if block:
+                # Der gewählte Block soll immer komplett sichtbar sein.
+                _, first, last = block
+                if first < top:
+                    top = first
+                if last >= top + body_h:
+                    top = min(first, max(0, last - body_h + 1))
+            top = max(0, min(top, max(0, len(view.lines) - body_h)))
+            for y, index in enumerate(range(top, min(len(view.lines), top + body_h)),
+                                      start=1):
+                mark = (curses.A_REVERSE
+                        if block and block[1] <= index <= block[2] else 0)
+                safe_addstr(self.scr, y, 0, view.lines[index], mark)
+            safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
+            footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
+            safe_addstr(self.scr, h - 2, 0, t("info_footer_nav").ljust(w - 1), footer_dim)
+            safe_addstr(self.scr, h - 1, 0,
+                        t("info_footer_actions").ljust(w - 1), footer_dim)
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch in (ord("q"), ord("Q"), 27):
+                return
+            elif ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(max(0, len(view.remote_blocks) - 1), selected + 1)
+            elif ch == 9 and view.remote_blocks:      # Tab: durchzykeln
+                selected = (selected + 1) % len(view.remote_blocks)
+            elif ch == curses.KEY_BTAB and view.remote_blocks:   # Shift-Tab: zurück
+                selected = (selected - 1) % len(view.remote_blocks)
+            elif ch == curses.KEY_NPAGE:
+                top = min(max(0, len(view.lines) - body_h), top + body_h)
+            elif ch == curses.KEY_PPAGE:
+                top = max(0, top - body_h)
+            elif ch in (ord("t"), ord("T")):
+                note = self._check_selected_remote(fresh, block)
+            elif ch in (ord("x"), ord("X")):
+                if not block:
+                    note = t("info_no_remotes")
+                    continue
+                if self._remove_remote(fresh, block[0]):
+                    # Die Remote-Liste hat sich geändert: Ansicht neu aufbauen.
+                    fresh = self.refresh_one(fresh)
+                    view = build_info_view(fresh, self.cfg)
+                    selected, top = 0, 0
+                    note = self.message
+                else:
+                    note = self.message
+
+    def _check_selected_remote(self, st: RepoStatus,
+                               block: tuple[str, int, int] | None) -> str:
+        """`git ls-remote` gegen das gewählte Remote; nennt die Ursache beim Namen."""
+        if not block:
+            return t("info_no_remotes")
+        name = block[0]
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, h - 3, 1, t("check_running", r=name).ljust(w - 2),
+                    curses.color_pair(C_YELLOW))
+        self.scr.refresh()
+        timeout = self.cfg["fetch_timeout"]
+        outcome, refs, detail = check_remote(st.path, name, timeout)
+        message = remote_check_message(name, outcome, refs, detail, timeout)
+        self.message = message
+        return message
+
+    def _remove_remote(self, st: RepoStatus, name: str) -> bool:
+        """Remote nach ausführlicher Erklärung und Bestätigung aus der Config nehmen."""
+        try:
+            configs = read_remote_configs(st.path, self.cfg)
+        except Exception as exc:
+            self.message = t("info_remote_error", e=terminal_text(exc))
+            return False
+        remote = configs.get(name)
+        if remote is None:
+            self.message = t("info_no_remotes")
+            return False
+        command = format_git_command(("remote", "remove", name))
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, 0, 0, (" " + t("remove_title", r=name)).ljust(w - 1),
+                    curses.A_BOLD)
+        y = 2
+        for url in remote.fetch_urls:
+            safe_addstr(self.scr, y, 1,
+                        f"{t('info_fetch_url')}: {display_remote_url(url)}")
+            y += 1
+        y += 1
+        safe_addstr(self.scr, y, 1, t("remove_what_happens"), curses.A_BOLD)
+        y += 1
+        for key in ("remove_effect_config", "remove_effect_refs",
+                    "remove_effect_upstream", "remove_effect_safe",
+                    "remove_effect_server"):
+            safe_addstr(self.scr, y, 3, t(key, r=name))
+            y += 1
+        y += 1
+        if st.remote == name:
+            safe_addstr(self.scr, y, 1, t("remove_sync_warning", r=name),
+                        curses.color_pair(C_RED) | curses.A_BOLD)
+            y += 2
+        safe_addstr(self.scr, y, 1, t("remove_undo"), curses.color_pair(C_DIM))
+        y += 1
+        undo = format_git_command(("remote", "add", name, remote.fetch_urls[0]))
+        safe_addstr(self.scr, y, 3, terminal_text(undo), curses.color_pair(C_DIM))
+        y += 2
+        safe_addstr(self.scr, y, 1, t("remove_command"), curses.A_BOLD)
+        safe_addstr(self.scr, y, 1 + cell_width(t("remove_command")) + 1, command,
+                    curses.color_pair(C_CYAN) | curses.A_BOLD)
+        self.scr.refresh()
+        if not self.confirm(t("remove_confirm", r=name)):
+            self.message = t("remove_cancelled")
+            return False
+        r = run_git_logged(st.path, "remote", "remove", name,
+                           timeout=self.cfg["git_timeout"])
+        if r.returncode != 0:
+            self.message = t("remove_failed", r=name, code=r.returncode)
+            return False
+        self.message = t("remove_done", r=name)
+        return True
 
     # -- Commit-Hilfe --------------------------------------------------------
 
@@ -2271,32 +2639,46 @@ class TUI:
         if not to_commit and not to_ignore:
             self.message = t("nothing_selected")
             return True
+        # Stil-Vorlage: die letzten Commit-Messages dieses Repos. Wer sie beim Tippen
+        # sieht, schreibt die neue Message im gleichen Stil weiter.
+        r = run_git(st.path, "log", "-8", "--format=%s", timeout=self.cfg["git_timeout"])
+        recent = [line for line in r.stdout.splitlines() if line.strip()]
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         safe_addstr(self.scr, 0, 0, (" " + t("commit_in", rel=st.rel)).ljust(w - 1),
                     curses.A_BOLD)
+        # Layout von unten her planen: die Eingabezeile muss sichtbar bleiben. Sonst
+        # schiebt eine lange .gitignore- oder Message-Liste sie aus dem Bild und man
+        # tippt blind.
+        prompt_y = max(4, h - 2)
         y = 2
         if to_ignore:
+            shown_ignore = to_ignore[:5]
             safe_addstr(self.scr, y, 1, t("new_in_gitignore"), curses.color_pair(C_YELLOW))
             y += 1
-            for pat in to_ignore:
+            for pat in shown_ignore:
                 safe_addstr(self.scr, y, 3, pat, curses.color_pair(C_YELLOW))
+                y += 1
+            if len(to_ignore) > len(shown_ignore):
+                safe_addstr(self.scr, y, 3,
+                            t("more_entries", n=len(to_ignore) - len(shown_ignore)),
+                            curses.color_pair(C_YELLOW))
                 y += 1
             y += 1
         safe_addstr(self.scr, y, 1, t("to_commit_n", n=len(to_commit)),
                     curses.color_pair(C_GREEN))
         y += 2
-        # Stil-Vorlage: die letzten Commit-Messages des Repos
-        r = run_git(st.path, "log", "-5", "--format=%s", timeout=self.cfg["git_timeout"])
-        recent = [l for l in r.stdout.splitlines() if l.strip()]
-        if recent:
-            safe_addstr(self.scr, y, 1, t("recent_msgs"), curses.color_pair(C_DIM))
+        # Nur so viele Beispiele zeigen, wie über der Eingabezeile Platz haben.
+        room = max(0, prompt_y - y - 2)
+        shown_recent = recent[:room]
+        if shown_recent:
+            safe_addstr(self.scr, y, 1, t("recent_msgs"))
             y += 1
-            for msg in recent:
-                safe_addstr(self.scr, y, 3, f"· {msg}", curses.color_pair(C_DIM))
+            for msg in shown_recent:
+                safe_addstr(self.scr, y, 3, f"· {terminal_text(msg)}",
+                            curses.color_pair(C_DIM))
                 y += 1
-        y += 1
-        msg = self.prompt_line(y, t("commit_msg_prompt"))
+        msg = self.prompt_line(prompt_y, t("commit_msg_prompt"))
         if msg is None:
             return False  # Esc -> zurück zur Dateiauswahl
         if not msg:

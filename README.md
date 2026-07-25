@@ -64,8 +64,8 @@ memorize. Case does not matter — `f` works like `F`.
 | P | safely push the current branch to the private sync remote |
 | L | safely fast-forward the current branch from the private sync remote |
 | G | guarded GitHub push with outgoing-commit/file preview and typed confirmation |
-| H | show the Git safety rules inside the TUI |
-| I | show repository details, remote addresses, and clickable GitHub URLs |
+| H | show the command log of this session plus the Git safety rules |
+| I | repository details and remotes; there: `T` test a remote, `X` remove one |
 | U | apply the latest stash (`git stash pop`, with confirmation) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | D | drop the latest stash (`git stash drop`, with confirmation) |
@@ -77,16 +77,46 @@ first. Its preview includes untracked and binary files; a failed or unexpectedly
 empty Git preview is labelled explicitly before the destructive drop action
 remains available.
 
-## Repository info (`I`)
+## Repository info and remotes (`I`)
 
-`I` opens a read-only, scrollable overview for the selected repository. It shows
-the path, branch and full HEAD, latest commit, history size, upstream
-ahead/behind state, working-tree counts, stashes, tags at HEAD, and every remote.
+`I` opens a scrollable overview for the selected repository. It shows the path,
+branch and full HEAD, latest commit, history size, upstream ahead/behind state,
+working-tree counts, stashes, tags at HEAD, and every remote.
 Fetch and push addresses are listed separately because Git can configure them to
 different targets. GitHub remotes additionally get a credential-free
 `https://github.com/…` web URL that can be opened directly from supporting
 terminals. Embedded URL credentials, query parameters, and fragments are never
-displayed. The view does not fetch or otherwise modify the repository.
+displayed. Opening the view changes nothing.
+
+The remotes are selectable: `↑`/`↓` or `Tab` moves the highlight from one remote
+block to the next, `PgUp`/`PgDn` scrolls the text.
+
+**`T` tests the selected remote.** It runs `git ls-remote`, which only asks for
+the remote's ref list — no objects are transferred and nothing changes locally.
+The answer distinguishes the cases that otherwise look identical:
+
+| Result | Meaning |
+|---|---|
+| exists and answers (n branches) | address correct, access works |
+| answers but has no branches | reachable, repository still empty |
+| address reachable, but no repository there | deleted, renamed, or no access |
+| server wants a login | credential helper or SSH key missing |
+| host name does not resolve | no network or DNS problem |
+| no connection to the host | offline, firewall, or the server is down |
+| server replied with an error | problem on their side, not your repository |
+| no answer within n seconds | network or server too slow |
+
+**`X` removes the selected remote** after a confirmation that spells out exactly
+what happens. This is a local Git configuration change only: the
+`[remote "<name>"]` section disappears from `.git/config`, its remote-tracking
+branches `refs/remotes/<name>/*` are deleted, and a local branch that tracked it
+loses its upstream setting. Commits, files, branches and stashes stay untouched,
+and nothing is sent to or changed on the server. The dialog shows both the exact
+command it will run and the one-line `git remote add …` that undoes it.
+
+Useful together: repositories deleted on GitHub keep their now-dead remote
+locally. `R` marks such a remote red (`✘`) in the repository line, `T` confirms
+that the address is reachable but the repository is gone, and `X` cleans it up.
 
 ```text
  Repository info · api-gateway
@@ -130,13 +160,38 @@ Remotes:
    (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`, …) is proposed
    for **.gitignore**, everything else for **committing**. Both are togglable per
    file (`␣` commit on/off, `i` gitignore on/off).
-2. Before you type the commit message, the repository's last five messages are
-   shown as a style reference.
+2. Before you type the commit message, the repository's recent messages are shown
+   as a style reference — as many as fit above the input line, which always stays
+   visible.
 3. Merge conflicts block the helper completely. `.gitignore` is extended atomically
    without following symlinks. The commit is built in a temporary index containing
    only the approved paths; an existing user index, including deliberately staged
    but excluded work, stays intact. Optionally the commit is pushed through the same
    guarded private sync path as `P` afterwards.
+
+## Command log (`H`)
+
+gmf hides Git's syntax, not Git itself. Every action you trigger (`C`, `P`, `L`,
+`G`, `U`, `D`, `T`, `X`) is recorded as the real command it ran, and `H` lists the
+session's log above the safety rules. Read-only scan commands are deliberately
+left out — they would bury the interesting lines.
+
+```text
+ Safe Git actions & command log
+Commands this session ran
+
+  ✔ api-gateway: git add -- README.md server.py
+  ✔ api-gateway: git commit -m 'feat: add health endpoint'
+  ✔ api-gateway: git push --atomic --no-tags origin a1b2c3d…:refs/heads/main
+  ✘ bootcamp-exercise: git ls-remote --heads -- github   (Exit 128)
+  ✔ bootcamp-exercise: git remote remove github
+
+  Every line is a real Git command; you can run it in a terminal yourself.
+```
+
+Arguments are quoted the way a shell needs them, so a line can be typed or pasted
+as-is. Destructive dialogs additionally show the command before you confirm it —
+so you see `git remote remove github` while deciding, not afterwards.
 
 ## Safe push and pull
 

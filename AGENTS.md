@@ -44,6 +44,9 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   das curses-Bild und blockiert bis zum Timeout. Fehlende Zugangsdaten erkennt
   `credentials_missing()` an den englischen Markern (deshalb `LC_ALL=C`) und die UI
   zeigt einen Einrichtungshinweis statt nur eines Exit-Codes.
+- Zustandsändernde Aktionen laufen über `run_git_logged()`, damit sie im
+  Befehlsprotokoll (`H`) erscheinen; die Lesebefehle des Scans bleiben bei
+  `run_git()`, sonst ist das Protokoll wertlos. Neue Aktionen entsprechend anbinden.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 

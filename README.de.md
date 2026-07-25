@@ -67,8 +67,8 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
 | G | geschützter GitHub-Push mit Commit-/Dateivorschau und Texteingabe |
-| H | Git-Sicherheitsregeln direkt in der TUI anzeigen |
-| I | Repo-Details, Remote-Adressen und anklickbare GitHub-URLs anzeigen |
+| H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
+| I | Repo-Details und Remotes; dort `T` Remote prüfen, `X` Remote entfernen |
 | U | neuesten Stash anwenden (`git stash pop`, mit Rückfrage) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | D | neuesten Stash endgültig verwerfen (`git stash drop`, mit Rückfrage) |
@@ -80,17 +80,47 @@ erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und bin�
 Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
 destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
 
-## Repo-Info (`I`)
+## Repo-Info und Remotes (`I`)
 
-`I` öffnet für das ausgewählte Repo eine nur lesende, scrollbare Übersicht. Sie
+`I` öffnet für das ausgewählte Repo eine scrollbare Übersicht. Sie
 zeigt Pfad, Branch und vollständigen HEAD, letzten Commit, Größe der Historie,
 Upstream-Stand, Arbeitsbaum-Zähler, Stashes, Tags an HEAD und alle Remotes.
 Fetch- und Push-Adressen stehen getrennt da, weil Git dafür unterschiedliche
 Ziele konfigurieren kann. GitHub-Remotes erhalten zusätzlich eine
 zugangsdatenfreie Web-URL `https://github.com/…`, die sich in unterstützenden
 Terminals direkt öffnen lässt. Eingebettete URL-Zugangsdaten, Query-Parameter
-und Fragmente werden nie angezeigt. Die Ansicht fetcht nicht und verändert das
-Repo auch sonst nicht.
+und Fragmente werden nie angezeigt. Das Öffnen der Ansicht verändert nichts.
+
+Die Remotes sind auswählbar: `↑`/`↓` oder `Tab` setzt den Auswahlbalken auf den
+nächsten Remote-Block, `Bild↑`/`Bild↓` scrollt den Text.
+
+**`T` prüft das ausgewählte Remote.** Dazu läuft `git ls-remote`, das nur die
+Ref-Liste erfragt — es überträgt keine Objekte und ändert lokal nichts. Die
+Antwort trennt die Fälle, die sonst gleich aussehen:
+
+| Ergebnis | Bedeutung |
+|---|---|
+| existiert und antwortet (n Branches) | Adresse stimmt, Zugriff klappt |
+| antwortet, hat aber keine Branches | erreichbar, Repo noch leer |
+| Adresse erreichbar, aber dort ist kein Repo | gelöscht, umbenannt oder kein Zugriff |
+| Server verlangt einen Login | Credential-Helper oder SSH-Key fehlt |
+| Hostname nicht auflösbar | kein Netz oder DNS-Problem |
+| keine Verbindung zum Host | offline, Firewall oder Server aus |
+| Server antwortet mit Fehler | Problem dort, nicht am eigenen Repo |
+| keine Antwort in n Sekunden | Netz oder Server zu langsam |
+
+**`X` entfernt das ausgewählte Remote** nach einer Rückfrage, die vorher genau
+benennt, was passiert. Es ist ausschließlich eine lokale Konfigurationsänderung:
+Der Abschnitt `[remote "<Name>"]` verschwindet aus `.git/config`, die
+Remote-Tracking-Branches `refs/remotes/<Name>/*` werden gelöscht, und ein lokaler
+Branch mit Upstream dorthin verliert diese Verknüpfung. Commits, Dateien,
+Branches und Stashes bleiben unberührt, auf dem Server ändert sich nichts. Der
+Dialog zeigt sowohl den Befehl, der ausgeführt wird, als auch die Zeile
+`git remote add …`, die alles zurücknimmt.
+
+Zusammen nützlich: Auf GitHub gelöschte Repos behalten lokal ihr totes Remote.
+`R` markiert so ein Remote rot (`✘`) in der Repo-Zeile, `T` bestätigt, dass die
+Adresse erreichbar ist, das Repo aber weg ist, und `X` räumt es weg.
 
 ```text
  Repo-Info · api-gateway
@@ -135,14 +165,41 @@ Remotes:
    …) landet im Vorschlag für die **.gitignore**, alles andere im Vorschlag zum
    **Committen**. Beides ist pro Datei umschaltbar (`␣` committen an/aus,
    `i` gitignore an/aus).
-2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten fünf Messages
-   des Repos als Stil-Vorlage.
+2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten Messages des
+   Repos als Stil-Vorlage — so viele, wie über der Eingabezeile Platz haben; die
+   Eingabezeile bleibt immer sichtbar.
 3. Merge-Konflikte sperren die Hilfe vollständig. Die `.gitignore` wird atomar und
    ohne Folgen von Symlinks ergänzt. Der Commit entsteht über einen temporären Index,
    der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
    samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Danach kann der
    Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
    werden.
+
+## Befehlsprotokoll (`H`)
+
+gmf versteckt die Git-Syntax, nicht Git selbst. Jede ausgelöste Aktion (`C`, `P`,
+`L`, `G`, `U`, `D`, `T`, `X`) wird als der Befehl protokolliert, der wirklich
+gelaufen ist; `H` zeigt das Protokoll der Sitzung über den Sicherheitsregeln. Die
+reinen Lesebefehle des Repo-Scans stehen bewusst nicht drin — sie würden die
+interessanten Zeilen zumüllen.
+
+```text
+ Sichere Git-Aktionen & Befehlsprotokoll
+In dieser Sitzung ausgeführte Befehle
+
+  ✔ api-gateway: git add -- README.md server.py
+  ✔ api-gateway: git commit -m 'feat: add health endpoint'
+  ✔ api-gateway: git push --atomic --no-tags origin a1b2c3d…:refs/heads/main
+  ✘ bootcamp-uebung: git ls-remote --heads -- github   (Exit 128)
+  ✔ bootcamp-uebung: git remote remove github
+
+  Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar.
+```
+
+Argumente sind so gequotet, wie eine Shell sie braucht — eine Zeile lässt sich
+also direkt übernehmen. Destruktive Dialoge zeigen den Befehl zusätzlich vor der
+Bestätigung: Man sieht `git remote remove github` beim Entscheiden, nicht erst
+danach.
 
 ## Sicheres Push und Pull
 
