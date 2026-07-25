@@ -60,6 +60,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 ## Offene Punkte / Ideen
 
+- [ ] **Branch `feature/kompaktansicht` (Stand 2026-07-25):** funktioniert und ist
+      bei vielen Repos eine echte Verbesserung; vor der Übernahme nach `main` fehlt
+      noch die Doku-Arbeit:
+      - READMEs auf die Doppel-Ansicht umschreiben. „Was eine Zeile verrät“ erklärt
+        weiterhin nur die Detailzeile, obwohl ab 20 Repos die Kompaktansicht startet;
+        Reihenfolge und Einstiegstext gehören daran angepasst.
+      - Screenshots neu: `compact.svg` zeigt ein leeres Befehlsprotokoll („noch
+        keine“) — aussagekräftiger wäre ein Stand mit echten Einträgen, dazu ein
+        Bild mit Fokus im Protokoll (Auswahlbalken unten).
+      - Danach Version aus `0.14.0-branch` auf eine echte Nummer setzen.
+- [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
+      die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
 - [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
