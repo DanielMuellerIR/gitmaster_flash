@@ -33,6 +33,25 @@ python3 gitmaster_flash.py --demo
 `--demo` builds a throwaway sandbox of fake repositories covering every state and
 opens the UI on it. The folder lives in your temp directory; delete it when done.
 
+## First 60 seconds
+
+```sh
+git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
+cd gitmaster_flash
+./install.sh          # self-test, then registers the `gmf` shell wrapper
+gmf ~/projects        # or just `gmf` for the current directory
+```
+
+Three keys carry you through the first session:
+
+- `↑`/`↓` picks a repository; the ones needing attention are already at the top.
+- `A` shows what changed in a file, `C` commits it with a guided helper.
+- `H` lists every Git command gmf ran for you — that is how you pick up the
+  syntax without memorizing it.
+
+Nothing is ever pushed, dropped or deleted without a confirmation that names the
+exact command first. Details are further down; you do not need them to start.
+
 ## What a line tells you
 
 - **remote names are always visible** — every line ends with all configured
@@ -60,6 +79,7 @@ memorize. Case does not matter — `f` works like `F`.
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
+| A | look at the changes: pick a file, see its diff |
 | C | commit helper (see below) |
 | P | safely push the current branch to the private sync remote |
 | L | safely fast-forward the current branch from the private sync remote |
@@ -76,6 +96,25 @@ A stash is never popped onto a tree that already has conflicts — resolve those
 first. Its preview includes untracked and binary files; a failed or unexpectedly
 empty Git preview is labelled explicitly before the destructive drop action
 remains available.
+
+## Changes (`A`)
+
+`→` shows *that* a file changed; `A` shows *what* changed in it. Pick a file with
+`↑`/`↓` (or `Tab`), press `⏎`, and its diff opens in the scrollable viewer —
+including new files, which `git diff` normally ignores, and deleted ones.
+
+```text
+ Changes · api-gateway
+ M  README.md
+ M  server.py
+ U  notes.txt
+ D  old-config.yml
+
+ ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back
+```
+
+Purely read-only: neither the index nor the working tree is touched, so you can
+look before deciding what to commit or discard.
 
 ## Repository info and remotes (`I`)
 
@@ -118,30 +157,49 @@ Useful together: repositories deleted on GitHub keep their now-dead remote
 locally. `R` marks such a remote red (`✘`) in the repository line, `T` confirms
 that the address is reachable but the repository is gone, and `X` cleans it up.
 
+**Local branches are listed too** — the other state Git never transfers. Nobody
+sees them because you only ever look at the current branch, so finished features
+and old experiments pile up. Each branch shows its last commit, its upstream with
+ahead/behind, and whether it is already merged. `X` on a branch deletes it, but
+only when it is fully merged into HEAD (`git branch -d`): its commits are then
+reachable from HEAD anyway, so nothing can be lost. Unmerged branches are refused
+with the reason and the terminal command that would force it.
+
+Values line up in one column, and identical fetch/push addresses share a single
+`fetch+push` line — they are only listed separately when they really differ
+(`git remote set-url --push` allows that, and gmf then blocks transfers).
+
 ```text
  Repository info · api-gateway
-Path: ~/projects/api-gateway
-Branch: main
-HEAD: a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
-Last commit: 2026-07-25T10:30:00+02:00 · Example Author
+Path:            ~/projects/api-gateway
+Branch:          main
+HEAD:            a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
+Last commit:     2026-07-25T10:30:00+02:00 · Example Author
   feat: add health endpoint
-History: 42 commit(s) · full clone
-Upstream: origin/main (0 ahead / 0 behind)
-Working tree: clean
-Stashes: 0
-Tags at HEAD: v1.4.0
+History:         42 commit(s) · full clone
+Upstream:        origin/main (0 ahead / 0 behind)
+Working tree:    clean
+Stashes:         0
+Tags at HEAD:    v1.4.0
 
 Remotes:
   origin [sync]
-    fetch: git@example.invalid:team/api-gateway.git
-    push: git@example.invalid:team/api-gateway.git
-    branch main: 0 ahead / 0 behind
+    fetch+push:   git@example.invalid:team/api-gateway.git
+    branch main:  0 ahead / 0 behind
 
-  github [GitHub]
-    fetch: https://github.com/example/api-gateway.git
-    push: https://github.com/example/api-gateway.git
-    web: https://github.com/example/api-gateway
-    branch main: 2 ahead / 0 behind
+  github [GitHub, last fetch failed]
+    fetch+push:   https://github.com/example/api-gateway.git
+    web:          https://github.com/example/api-gateway
+    branch main:  2 ahead / 0 behind
+
+Local branches:
+  main [current]
+    commit:       a1b2c3d · 2026-07-25 · feat: add health endpoint
+    upstream:     origin/main (0 ahead / 0 behind)
+
+  spike-caching [merged]
+    commit:       9f8e7d6 · 2026-07-11 · try a simpler cache key
+    upstream:     (none)
 ```
 
 ## Commit helper (`C`)
@@ -192,36 +250,6 @@ Commands this session ran
 Arguments are quoted the way a shell needs them, so a line can be typed or pasted
 as-is. Destructive dialogs additionally show the command before you confirm it —
 so you see `git remote remove github` while deciding, not afterwards.
-
-## Safe push and pull
-
-`P` and `L` are intentionally limited to a non-public sync remote. Both fetch
-first, require a clean working tree and reject divergent history. Fetch and push
-URLs must identify one identical credential-free host/repository target; multiple
-or differing push URLs are blocked. Immediately before a confirmed mutation the
-branch, HEAD, index, worktree, remote identity and target OID are checked again.
-Pull merges only the approved immutable OID by fast-forward; push sends the approved
-commit OID through an explicit refspec. An exact target-OID lease prevents a
-remote deletion or concurrent move from turning it into an unreviewed update;
-tags are never sent.
-
-GitHub uses the separate `G` path. It works only when the same branch already
-exists on one GitHub remote and the histories are related. Before publishing it
-shows every outgoing commit and changed file name. The exact phrase
-`PUSH <remote>` must then be typed. The final command still sends only the current
-branch: approved source OID, exact target lease, no tags, no new branch. A remote
-with multiple or differing fetch/push targets is blocked entirely, even if both
-targets are on GitHub. Complex cases stay terminal-only.
-
-Git never asks for credentials here. Every Git call runs with terminal prompts and
-askpass disabled and in its own session, because Git writes such a question
-(`Username for 'https://github.com':`) straight to the terminal rather than to the
-captured output — inside the curses screen that destroys the display and then waits
-for input that never arrives. A remote that needs a login therefore fails right away
-with `<remote> needs a login (no credential helper or SSH key).` instead of asking.
-Store HTTPS credentials in a credential helper (macOS:
-`git config --global credential.helper osxkeychain`) or use SSH with a key in the
-agent; both work without any prompt.
 
 ## Installation
 
@@ -343,6 +371,36 @@ starting the UI, so a pipe does the sensible thing.
 - `skip_dirs` — directories the scan does not descend into.
 - `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
 - `git_timeout` / `fetch_timeout` — seconds per git call.
+
+## Safe push and pull
+
+`P` and `L` are intentionally limited to a non-public sync remote. Both fetch
+first, require a clean working tree and reject divergent history. Fetch and push
+URLs must identify one identical credential-free host/repository target; multiple
+or differing push URLs are blocked. Immediately before a confirmed mutation the
+branch, HEAD, index, worktree, remote identity and target OID are checked again.
+Pull merges only the approved immutable OID by fast-forward; push sends the approved
+commit OID through an explicit refspec. An exact target-OID lease prevents a
+remote deletion or concurrent move from turning it into an unreviewed update;
+tags are never sent.
+
+GitHub uses the separate `G` path. It works only when the same branch already
+exists on one GitHub remote and the histories are related. Before publishing it
+shows every outgoing commit and changed file name. The exact phrase
+`PUSH <remote>` must then be typed. The final command still sends only the current
+branch: approved source OID, exact target lease, no tags, no new branch. A remote
+with multiple or differing fetch/push targets is blocked entirely, even if both
+targets are on GitHub. Complex cases stay terminal-only.
+
+Git never asks for credentials here. Every Git call runs with terminal prompts and
+askpass disabled and in its own session, because Git writes such a question
+(`Username for 'https://github.com':`) straight to the terminal rather than to the
+captured output — inside the curses screen that destroys the display and then waits
+for input that never arrives. A remote that needs a login therefore fails right away
+with `<remote> needs a login (no credential helper or SSH key).` instead of asking.
+Store HTTPS credentials in a credential helper (macOS:
+`git config --global credential.helper osxkeychain`) or use SSH with a key in the
+agent; both work without any prompt.
 
 ## Tests
 

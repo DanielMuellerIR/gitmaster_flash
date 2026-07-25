@@ -7,6 +7,7 @@ gegen ein echtes, temporär angelegtes Git-Repo.
 import json
 import importlib.util
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -29,9 +30,9 @@ from gitmaster_flash import (  # noqa: E402
     DEFAULT_CONFIG, __version__, CommitSafetyError, RemoteStatus, RepoStatus, TUI,
     build_info_view, check_remote, classify_remote_check, collect_status, find_repos,
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
-    detect_sync_remote, display_remote_url, fetch_remote_status, inspect_transfer,
-    is_github_url, pad_cells, parse_porcelain, remote_check_message, repo_info_lines,
-    safe_pull_args, stash_preview, status_dict,
+    detect_sync_remote, display_remote_url, fetch_remote_status, file_diff,
+    inspect_transfer, is_github_url, pad_cells, parse_porcelain, read_branches,
+    remote_check_message, repo_info_lines, safe_pull_args, stash_preview, status_dict,
     safe_push_args, suggested_ignore, terminal_text, truncate_cells,
     update_gitignore_atomic, upstream_delta,
 )
@@ -243,18 +244,42 @@ class TestAgainstRealRepo(unittest.TestCase):
             "https://github.com/example/demo.git")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
 
-        text = "\n".join(repo_info_lines(st, DEFAULT_CONFIG))
+        lines = repo_info_lines(st, DEFAULT_CONFIG)
+        text = "\n".join(lines)
 
-        self.assertIn(f"Path: {self.repo}", text)
-        self.assertIn(f"Branch: {st.branch}", text)
+        self.assertRegex(text, rf"Path: +{re.escape(str(self.repo))}")
+        self.assertRegex(text, rf"Branch: +{st.branch}")
         self.assertIn("HEAD:", text)
         self.assertIn("Last commit:", text)
-        self.assertIn("Working tree: clean", text)
-        self.assertIn("Tags at HEAD: v1.0", text)
+        self.assertRegex(text, r"Working tree: +clean")
+        self.assertRegex(text, r"Tags at HEAD: +v1\.0")
         self.assertIn("origin [sync, GitHub]", text)
-        self.assertIn("fetch: https://github.com/example/demo.git", text)
-        self.assertIn("push: https://github.com/example/demo.git", text)
-        self.assertIn("web: https://github.com/example/demo", text)
+        # Identische Fetch- und Push-Adresse steht in einer Zeile, nicht zweimal.
+        self.assertRegex(text, r"fetch\+push: +https://github\.com/example/demo\.git")
+        self.assertNotIn("\n    push:", text)
+        self.assertRegex(text, r"web: +https://github\.com/example/demo")
+        # Die Commit-Betreffzeile steht direkt unter "Last commit".
+        subject_index = next(i for i, line in enumerate(lines) if "erster Commit" in line)
+        self.assertIn("Last commit:", lines[subject_index - 1])
+
+    def test_info_values_start_in_the_same_column(self):
+        git(self.repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        lines = repo_info_lines(st, DEFAULT_CONFIG)
+
+        def value_columns(candidates):
+            """Spalte, in der der Wert beginnt — für jede Label/Wert-Zeile."""
+            columns = set()
+            for line in candidates:
+                label, _, value = line.partition(":")
+                if value.strip():
+                    columns.add(len(line) - len(value.lstrip()))
+            return columns
+
+        head = [line for line in lines if not line.startswith(" ")]
+        details = [line for line in lines if line.startswith("    ")]
+        self.assertEqual(len(value_columns(head)), 1, head)
+        self.assertEqual(len(value_columns(details)), 1, details)
 
 
 class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
@@ -873,6 +898,10 @@ class RemoteCheckTests(unittest.TestCase):
             "dns": "ssh: Could not resolve hostname nirgendwo: nodename nor servname "
                    "provided, or not known",
             "unreachable": "ssh: connect to host 10.0.0.9 port 22: Connection refused",
+            # Ein unbekannter Hostschlüssel ist KEIN fehlender Login: man muss ihn
+            # einmal bestätigen, nicht Zugangsdaten einrichten.
+            "hostkey": "Host key verification failed.\n"
+                       "fatal: Could not read from remote repository.",
             "server": "fatal: unable to access 'https://x/y.git/': "
                       "The requested URL returned error: 503",
             "unknown": "fatal: something entirely new happened",
@@ -880,6 +909,34 @@ class RemoteCheckTests(unittest.TestCase):
         for expected, stderr in cases.items():
             with self.subTest(expected):
                 self.assertEqual(classify_remote_check(self._result(stderr)), expected)
+
+    def test_unknown_host_key_is_not_reported_as_a_missing_login(self):
+        result = self._result("Host key verification failed.")
+        self.assertFalse(gmf_module.credentials_missing(result))
+        message = remote_check_message("github", classify_remote_check(result), 0, "", 30)
+        self.assertIn("host key", message.lower())
+        self.assertNotIn("login", message.lower())
+
+    def test_fetch_failure_reports_the_real_cause_per_remote(self):
+        # Genau Daniels Fall: das GitHub-Repo ist weg, der Fetch soll das sagen —
+        # nicht pauschal "Login fehlt".
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q")
+            git(repo, "config", "user.email", "t@example.invalid")
+            git(repo, "config", "user.name", "T")
+            (repo / "a").write_text("a")
+            git(repo, "add", "a")
+            git(repo, "commit", "-qm", "base")
+            git(repo, "remote", "add", "github", str(root / "auf-github-geloescht.git"))
+            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+        self.assertIn("no repository", st.error)
+        self.assertNotIn("login", st.error.lower())
+        # Gits Wortlaut bleibt als Beweis erhalten und steht auf der Info-Seite.
+        self.assertTrue(st.error_detail)
+        self.assertIn("Git said", "\n".join(repo_info_lines(st, DEFAULT_CONFIG)))
 
     def test_deleted_repo_and_broken_network_do_not_look_alike(self):
         gone = remote_check_message("github", "gone", 0, "", 30)
@@ -1057,6 +1114,164 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
                                 for line in view.lines[first:last + 1]))
         # Der Textmodus bleibt unveraendert nutzbar (CLI/Tests).
         self.assertEqual(repo_info_lines(st, DEFAULT_CONFIG), view.lines)
+
+
+class BranchAndDiffTests(unittest.TestCase):
+    """Branch-Übersicht und Datei-Diffs — beides rein lesend gegen echte Repos."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.md").write_text("eins\n")
+        git(self.repo, "add", "a.md")
+        git(self.repo, "commit", "-qm", "erster Commit")
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_branches_report_head_merge_state_and_upstream(self):
+        git(self.repo, "branch", "fertig")               # gemergt (zeigt auf HEAD)
+        git(self.repo, "checkout", "-q", "-b", "offen")
+        (self.repo / "b.md").write_text("zwei\n")
+        git(self.repo, "add", "b.md")
+        git(self.repo, "commit", "-qm", "zweiter Commit")
+        git(self.repo, "checkout", "-q", "main")
+
+        branches = {b.name: b for b in read_branches(self.repo, DEFAULT_CONFIG)}
+        self.assertEqual(set(branches), {"main", "fertig", "offen"})
+        self.assertTrue(branches["main"].is_head)
+        self.assertTrue(branches["fertig"].merged)
+        self.assertFalse(branches["offen"].merged)
+        self.assertEqual(branches["main"].subject, "erster Commit")
+        self.assertEqual(branches["main"].upstream, "")
+
+    def test_branch_upstream_delta_is_read(self):
+        origin = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        (self.repo / "a.md").write_text("zwei\n")
+        git(self.repo, "commit", "-qam", "lokaler Vorsprung")
+        branch = next(b for b in read_branches(self.repo, DEFAULT_CONFIG)
+                      if b.name == "main")
+        self.assertEqual(branch.upstream, "origin/main")
+        self.assertEqual((branch.ahead, branch.behind), (1, 0))
+
+    def test_info_page_lists_branches_as_selectable_blocks(self):
+        git(self.repo, "branch", "fertig")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        view = build_info_view(st, DEFAULT_CONFIG)
+        kinds = {kind for kind, _, _, _ in view.blocks}
+        names = [name for kind, name, _, _ in view.blocks if kind == "branch"]
+        self.assertIn("branch", kinds)
+        self.assertEqual(sorted(names), ["fertig", "main"])
+        self.assertIn("Local branches:", view.lines)
+        # Auch über Remotes und Branches hinweg steht alles in einer Spalte.
+        details = [line for line in view.lines if line.startswith("    ")]
+        columns = {len(line) - len(line.partition(":")[2].lstrip()) for line in details}
+        self.assertEqual(len(columns), 1, details)
+
+    def test_merged_branch_is_deletable_and_unmerged_one_is_refused(self):
+        git(self.repo, "branch", "fertig")
+        git(self.repo, "checkout", "-q", "-b", "offen")
+        (self.repo / "b.md").write_text("zwei\n")
+        git(self.repo, "add", "b.md")
+        git(self.repo, "commit", "-qm", "zweiter Commit")
+        git(self.repo, "checkout", "-q", "main")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+        class Screen:
+            def erase(self): pass
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
+            def getch(self): return ord("q")
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            # Nicht gemergt: gar kein Dialog, sondern eine Erklärung.
+            self.assertFalse(ui._delete_branch(st, "offen"))
+            self.assertIn("not merged", ui.message)
+            # Aktueller Branch: ebenfalls tabu.
+            self.assertFalse(ui._delete_branch(st, "main"))
+            self.assertIn("current branch", ui.message)
+            # Gemergt: nur nach Bestätigung.
+            with mock.patch.object(TUI, "confirm", return_value=False):
+                self.assertFalse(ui._delete_branch(st, "fertig"))
+            self.assertIn("fertig", [b.name for b in read_branches(self.repo,
+                                                                   DEFAULT_CONFIG)])
+            with mock.patch.object(TUI, "confirm", return_value=True):
+                self.assertTrue(ui._delete_branch(st, "fertig"))
+        self.assertNotIn("fertig", [b.name for b in read_branches(self.repo,
+                                                                  DEFAULT_CONFIG)])
+        self.assertIn("git branch -d fertig", "\n".join(gmf_module.COMMAND_LOG))
+        # Der Commit ist über main weiterhin erreichbar — nichts ist verloren.
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "log", "--oneline"],
+                                        capture_output=True, text=True).returncode, 0)
+
+    def test_file_diff_covers_modified_deleted_and_untracked(self):
+        (self.repo / "a.md").write_text("geändert\n")
+        (self.repo / "neu.txt").write_text("frisch\n")
+        (self.repo / "weg.md").write_text("x\n")
+        git(self.repo, "add", "weg.md")
+        git(self.repo, "commit", "-qm", "zweite Datei")
+        (self.repo / "weg.md").unlink()
+
+        ok, diff = file_diff(self.repo, "M", "a.md", 10)
+        self.assertTrue(ok)
+        self.assertIn("-eins", diff)
+        self.assertIn("+geändert", diff)
+
+        ok, diff = file_diff(self.repo, "U", "neu.txt", 10)
+        self.assertTrue(ok, diff)
+        self.assertIn("+frisch", diff)
+
+        ok, diff = file_diff(self.repo, "D", "weg.md", 10)
+        self.assertTrue(ok)
+        self.assertIn("-x", diff)
+
+    def test_changes_view_shows_diff_for_the_selected_file(self):
+        (self.repo / "a.md").write_text("geändert\n")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        shown = {}
+
+        class Screen:
+            def __init__(self):
+                self.keys = iter([10, ord("q")])   # ⏎ Diff, dann zurück
+            def erase(self): pass
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "show_pager",
+                                  side_effect=lambda title, lines: shown.update(
+                                      title=title, lines=lines)):
+            ui.action_file_changes()
+        self.assertIn("a.md", shown["title"])
+        self.assertTrue(any(line.startswith("+geändert") for line in shown["lines"]))
+
+    def test_app_open_is_refused_over_ssh(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        cfg = {**DEFAULT_CONFIG, "apps": {"E": {"name": "Editor", "path": "/"}}}
+        ui = TUI(None, self.root, cfg, None)
+        ui.statuses = [st]
+        with mock.patch.dict(os.environ, {"SSH_CONNECTION": "1.2.3.4 1 5.6.7.8 22"}), \
+                mock.patch("gitmaster_flash.subprocess.run") as run:
+            ui.action_open_app("E")
+        run.assert_not_called()
+        self.assertIn("SSH", ui.message)
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

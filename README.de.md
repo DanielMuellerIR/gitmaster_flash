@@ -35,6 +35,26 @@ python3 gitmaster_flash.py --demo
 und startet die Oberfläche darauf. Sie liegt im Temp-Ordner und kann danach
 einfach gelöscht werden.
 
+## Die ersten 60 Sekunden
+
+```sh
+git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
+cd gitmaster_flash
+./install.sh          # Selbsttest, dann `gmf`-Shell-Wrapper registrieren
+gmf ~/projekte        # oder einfach `gmf` für den aktuellen Ordner
+```
+
+Drei Tasten tragen durch die erste Sitzung:
+
+- `↑`/`↓` wählt ein Repo; die mit offenen Punkten stehen schon oben.
+- `A` zeigt, was sich in einer Datei geändert hat, `C` committet sie geführt.
+- `H` listet jeden Git-Befehl, den gmf für dich ausgeführt hat — so lernt man
+  die Syntax nebenbei mit, ohne sie auswendig zu lernen.
+
+Nichts wird gepusht, verworfen oder gelöscht, ohne dass vorher eine Rückfrage den
+genauen Befehl nennt. Die Details stehen weiter unten; zum Loslegen braucht man
+sie nicht.
+
 ## Was eine Zeile verrät
 
 - **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
@@ -63,6 +83,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | → / ← | auf-/zuklappen (Dateien mit M/D/U/C, Stashes) |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
+| A | Änderungen ansehen: Datei wählen, Diff lesen |
 | C | Commit-Hilfe (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
@@ -79,6 +100,26 @@ Auf einen bereits konfliktbehafteten Baum wird nie ein weiterer Stash gepoppt �
 erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und binäre
 Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
 destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
+
+## Änderungen ansehen (`A`)
+
+`→` zeigt, *dass* sich eine Datei geändert hat; `A` zeigt, *was* sich darin
+geändert hat. Datei mit `↑`/`↓` (oder `Tab`) wählen, `⏎` drücken — der Diff
+öffnet sich im scrollbaren Betrachter, auch für neue Dateien, die `git diff`
+sonst ignoriert, und für gelöschte.
+
+```text
+ Änderungen · api-gateway
+ M  README.md
+ M  server.py
+ U  notizen.txt
+ D  alte-config.yml
+
+ ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück
+```
+
+Rein lesend: weder Index noch Arbeitsbaum werden angefasst. Man kann also erst
+schauen und dann entscheiden, was committet oder verworfen wird.
 
 ## Repo-Info und Remotes (`I`)
 
@@ -122,30 +163,51 @@ Zusammen nützlich: Auf GitHub gelöschte Repos behalten lokal ihr totes Remote.
 `R` markiert so ein Remote rot (`✘`) in der Repo-Zeile, `T` bestätigt, dass die
 Adresse erreichbar ist, das Repo aber weg ist, und `X` räumt es weg.
 
+**Auch die lokalen Branches stehen dort** — der zweite Zustand, den Git nie
+überträgt. Man sieht sie nie, weil man immer nur den aktuellen Branch betrachtet;
+entsprechend sammeln sich abgeschlossene Features und alte Experimente an. Je
+Branch stehen letzter Commit, Upstream mit Vorsprung/Rückstand und der
+Merge-Zustand da. `X` löscht einen Branch, aber nur, wenn er vollständig in HEAD
+gemergt ist (`git branch -d`): Seine Commits hängen dann ohnehin an HEAD, es kann
+also nichts verloren gehen. Nicht gemergte Branches lehnt gmf mit Begründung ab
+und nennt den Terminal-Befehl, der es erzwingen würde.
+
+Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
+teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie
+wirklich abweichen (`git remote set-url --push` erlaubt das, gmf sperrt dann
+Transfers).
+
 ```text
  Repo-Info · api-gateway
-Pfad: ~/projekte/api-gateway
-Branch: main
-HEAD: a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
-Letzter Commit: 2026-07-25T10:30:00+02:00 · Beispielautor
+Pfad:            ~/projekte/api-gateway
+Branch:          main
+HEAD:            a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
+Letzter Commit:  2026-07-25T10:30:00+02:00 · Beispielautor
   feat: add health endpoint
-Historie: 42 Commit(s) · vollständiger Clone
-Upstream: origin/main (0 voraus / 0 zurück)
-Arbeitsbaum: sauber
-Stashes: 0
-Tags an HEAD: v1.4.0
+Historie:        42 Commit(s) · vollständiger Clone
+Upstream:        origin/main (0 voraus / 0 zurück)
+Arbeitsbaum:     sauber
+Stashes:         0
+Tags an HEAD:    v1.4.0
 
 Remotes:
   origin [Sync]
-    Fetch: git@example.invalid:team/api-gateway.git
-    Push: git@example.invalid:team/api-gateway.git
-    Branch main: 0 voraus / 0 zurück
+    Fetch+Push:   git@example.invalid:team/api-gateway.git
+    Branch main:  0 voraus / 0 zurück
 
-  github [GitHub]
-    Fetch: https://github.com/example/api-gateway.git
-    Push: https://github.com/example/api-gateway.git
-    Web: https://github.com/example/api-gateway
-    Branch main: 2 voraus / 0 zurück
+  github [GitHub, letzter Fetch fehlgeschlagen]
+    Fetch+Push:   https://github.com/example/api-gateway.git
+    Web:          https://github.com/example/api-gateway
+    Branch main:  2 voraus / 0 zurück
+
+Lokale Branches:
+  main [aktuell]
+    Commit:       a1b2c3d · 2026-07-25 · feat: add health endpoint
+    Upstream:     origin/main (0 voraus / 0 zurück)
+
+  spike-caching [gemergt]
+    Commit:       9f8e7d6 · 2026-07-11 · einfacheren Cache-Key probiert
+    Upstream:     (keine)
 ```
 
 ## Commit-Hilfe (`C`)
@@ -200,38 +262,6 @@ Argumente sind so gequotet, wie eine Shell sie braucht — eine Zeile lässt sic
 also direkt übernehmen. Destruktive Dialoge zeigen den Befehl zusätzlich vor der
 Bestätigung: Man sieht `git remote remove github` beim Entscheiden, nicht erst
 danach.
-
-## Sicheres Push und Pull
-
-`P` und `L` sind absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt.
-Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
-divergente History. Fetch- und Push-URL müssen genau dasselbe zugangsdatenfreie
-Host-/Repo-Ziel bezeichnen; mehrere oder abweichende Push-URLs werden gesperrt.
-Unmittelbar vor der bestätigten Mutation werden Branch, HEAD, Index, Arbeitsbaum,
-Remote-Identität und Ziel-OID nochmals geprüft. Pull übernimmt nur die freigegebene
-unveränderliche OID per Fast-forward. Push überträgt die freigegebene Commit-OID mit
-einem expliziten Refspec. Eine exakte Ziel-OID-Lease verhindert, dass eine
-Remote-Löschung oder parallele Verschiebung daraus eine ungeprüfte Aktualisierung
-macht; Tags werden nie gesendet.
-
-Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
-Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
-sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
-Dateinamen. Danach muss exakt `PUSH <Remote>` eingegeben werden. Auch der letzte
-Befehl überträgt nur den aktuellen Branch: freigegebene Quell-OID, exakte
-Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
-abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide
-Ziele auf GitHub liegen. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
-
-Git fragt hier nie nach Zugangsdaten. Jeder Git-Aufruf läuft ohne Terminal-Prompt,
-ohne Askpass und in eigener Session, denn Git schreibt so eine Frage
-(`Username for 'https://github.com':`) direkt auf das Terminal statt in die
-abgefangene Ausgabe — im curses-Bild zerstört das die Anzeige und Git wartet dann
-auf eine Eingabe, die nie kommt. Ein Remote, das einen Login braucht, scheitert
-deshalb sofort mit `<Remote> braucht einen Login (kein Credential-Helper/SSH-Key).`
-statt zu fragen. HTTPS-Zugangsdaten gehören in einen
-Credential-Helper (macOS: `git config --global credential.helper osxkeychain`),
-oder man nutzt SSH mit einem Key im Agenten; beides läuft ohne Rückfrage.
 
 ## Installation
 
@@ -356,6 +386,38 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
 - `skip_dirs` — Ordner, die der Scan gar nicht erst betritt.
 - `lang` — `"en"`, `"de"` oder `null` für automatisch nach `$LANG`.
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
+
+## Sicheres Push und Pull
+
+`P` und `L` sind absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt.
+Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
+divergente History. Fetch- und Push-URL müssen genau dasselbe zugangsdatenfreie
+Host-/Repo-Ziel bezeichnen; mehrere oder abweichende Push-URLs werden gesperrt.
+Unmittelbar vor der bestätigten Mutation werden Branch, HEAD, Index, Arbeitsbaum,
+Remote-Identität und Ziel-OID nochmals geprüft. Pull übernimmt nur die freigegebene
+unveränderliche OID per Fast-forward. Push überträgt die freigegebene Commit-OID mit
+einem expliziten Refspec. Eine exakte Ziel-OID-Lease verhindert, dass eine
+Remote-Löschung oder parallele Verschiebung daraus eine ungeprüfte Aktualisierung
+macht; Tags werden nie gesendet.
+
+Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
+Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
+sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
+Dateinamen. Danach muss exakt `PUSH <Remote>` eingegeben werden. Auch der letzte
+Befehl überträgt nur den aktuellen Branch: freigegebene Quell-OID, exakte
+Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
+abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide
+Ziele auf GitHub liegen. Komplexe Fälle bleiben bewusst dem Terminal vorbehalten.
+
+Git fragt hier nie nach Zugangsdaten. Jeder Git-Aufruf läuft ohne Terminal-Prompt,
+ohne Askpass und in eigener Session, denn Git schreibt so eine Frage
+(`Username for 'https://github.com':`) direkt auf das Terminal statt in die
+abgefangene Ausgabe — im curses-Bild zerstört das die Anzeige und Git wartet dann
+auf eine Eingabe, die nie kommt. Ein Remote, das einen Login braucht, scheitert
+deshalb sofort mit `<Remote> braucht einen Login (kein Credential-Helper/SSH-Key).`
+statt zu fragen. HTTPS-Zugangsdaten gehören in einen
+Credential-Helper (macOS: `git config --global credential.helper osxkeychain`),
+oder man nutzt SSH mit einem Key im Agenten; beides läuft ohne Rückfrage.
 
 ## Tests
 

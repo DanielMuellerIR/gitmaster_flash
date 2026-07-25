@@ -50,6 +50,14 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 
+- Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
+  Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
+  Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,
+  nicht in den Aufrufern.
+- Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
+  Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
+  zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
+
 ## Offene Punkte / Ideen
 
 - [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).

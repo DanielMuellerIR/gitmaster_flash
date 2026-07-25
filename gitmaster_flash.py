@@ -52,6 +52,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shlex
 import stat
 import subprocess
@@ -62,7 +63,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -168,11 +169,23 @@ TR = {
     "stash_row_hint": {"en": "(U pop · S preview · D drop)",
                        "de": "(U anwenden · S Vorschau · D verwerfen)"},
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
+    # Änderungen ansehen (A)
+    "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
+    "changes_footer": {
+        "en": " ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back",
+        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück"},
+    "no_changes_to_show": {"en": "Nothing changed in this repository.",
+                           "de": "In diesem Repo hat sich nichts geändert."},
+    "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
+    "diff_empty": {"en": "(no textual difference — binary or mode change only)",
+                   "de": "(kein Textunterschied — nur binär oder Rechte geändert)"},
+    "diff_failed": {"en": "Diff for {p} failed: {e}",
+                    "de": "Diff für {p} fehlgeschlagen: {e}"},
     # Footer
     "f1": {"en": " ↑/↓ select · → expand · ← collapse · ⏎ cd & quit · P sync push · L sync pull",
            "de": " ↑/↓ wählen · → aufklappen · ← zuklappen · ⏎ cd & Exit · P Sync-Push · L Sync-Pull"},
-    "f2": {"en": " {apps} · C commit · U stash pop · R fetch all · G GitHub push",
-           "de": " {apps} · C Commit · U Stash pop · R fetch all · G GitHub-Push"},
+    "f2": {"en": " {apps} · A changes · C commit · U stash pop · R fetch all · G GitHub push",
+           "de": " {apps} · A Änderungen · C Commit · U Stash pop · R fetch all · G GitHub-Push"},
     "f3": {"en": " Q quit · S stash preview · D stash drop · H Git help · I repo info",
            "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen · H Git-Hilfe · I Repo-Info"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
@@ -182,6 +195,9 @@ TR = {
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
     "app_open_failed": {"en": "Failed to open {name}: {e}",
                         "de": "{name} öffnen fehlgeschlagen: {e}"},
+    "app_over_ssh": {
+        "en": "This is an SSH session — {name} can only open on the Mac you sit at.",
+        "de": "Das ist eine SSH-Sitzung — {name} öffnet nur auf dem Mac vor dir."},
     "cd_hint": {"en": "(Tip: install the `gmf` shell wrapper from gmf.zsh, "
                       "then you land there automatically.)",
                 "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
@@ -246,7 +262,10 @@ TR = {
     "commit_conflicts": {
         "en": "Commit helper is blocked while merge conflicts exist.",
         "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen."},
-    "committed_in": {"en": "Committed in {rel}.", "de": "Committet in {rel}."},
+    # Der Rückgängig-Befehl steht bewusst in der Meldung: Wer gerade committet hat,
+    # soll nicht suchen müssen, wie er es zurücknimmt.
+    "committed_in": {"en": "Committed in {rel}. Undo: git reset --soft HEAD~1",
+                     "de": "Committet in {rel}. Rückgängig: git reset --soft HEAD~1"},
     "confirm_push": {"en": "Push {n} commit(s) to {r} now?",
                      "de": "Jetzt {n} Commit(s) zu {r} pushen?"},
     "committed_pushed": {"en": "Committed & pushed ({r}).", "de": "Committet & gepusht ({r})."},
@@ -374,26 +393,67 @@ TR = {
         "de": "Fetch-/Push-Ziele weichen ab"},
     "info_fetch_url": {"en": "fetch", "de": "Fetch"},
     "info_push_url": {"en": "push", "de": "Push"},
+    "info_fetch_push_url": {"en": "fetch+push", "de": "Fetch+Push"},
     "info_web_url": {"en": "web", "de": "Web"},
-    "info_remote_branch": {
-        "en": "branch {b}: {a} ahead / {d} behind",
-        "de": "Branch {b}: {a} voraus / {d} zurück"},
-    "info_remote_branch_missing": {
-        "en": "branch {b}: not on this remote",
-        "de": "Branch {b}: nicht auf diesem Remote"},
+    "info_branch_label": {"en": "branch {b}", "de": "Branch {b}"},
+    "info_branch_missing_value": {"en": "not on this remote",
+                                  "de": "nicht auf diesem Remote"},
+    "info_last_error": {"en": "Last error", "de": "Letzter Fehler"},
+    "info_git_said": {"en": "Git said", "de": "Git sagte"},
+    # Branch-Abschnitt der Info-Seite
+    "info_branches": {"en": "Local branches", "de": "Lokale Branches"},
+    "info_branch_current": {"en": "current", "de": "aktuell"},
+    "info_branch_merged": {"en": "merged", "de": "gemergt"},
+    "info_branch_upstream_gone": {"en": "upstream gone", "de": "Upstream weg"},
+    "info_branch_commit": {"en": "commit", "de": "Commit"},
     "info_remote_error": {
         "en": "Remote details unavailable: {e}",
         "de": "Remote-Details nicht verfügbar: {e}"},
     "info_fetch_failed": {"en": "last fetch failed", "de": "letzter Fetch fehlgeschlagen"},
     # Info-Ansicht: Navigation und Remote-Aktionen
     "info_footer_nav": {
-        "en": " ↑/↓ or Tab select remote · PgUp/PgDn scroll · Q/Esc close",
-        "de": " ↑/↓ oder Tab Remote wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
+        "en": " ↑/↓ or Tab select remote/branch · PgUp/PgDn scroll · Q/Esc close",
+        "de": " ↑/↓ oder Tab Remote/Branch wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
     "info_footer_actions": {
         "en": " T test remote (does it still exist?) · X remove remote (local config only)",
         "de": " T Remote prüfen (existiert es noch?) · X Remote entfernen (nur lokale Config)"},
+    "info_footer_actions_branch": {
+        "en": " X delete branch (only if merged; commits stay reachable)",
+        "de": " X Branch löschen (nur wenn gemergt; Commits bleiben erreichbar)"},
     "info_no_remotes": {"en": "This repository has no remote.",
                         "de": "Dieses Repo hat kein Remote."},
+    "info_nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
+    "info_check_remote_only": {"en": "T tests remotes; a branch is local anyway.",
+                               "de": "T prüft Remotes; ein Branch ist ohnehin lokal."},
+    # Branch löschen (X auf einem Branch)
+    "branch_delete_title": {"en": "Delete branch · {b}", "de": "Branch löschen · {b}"},
+    "branch_is_current": {"en": "{b} is the current branch — switch branches first.",
+                          "de": "{b} ist der aktuelle Branch — erst wechseln."},
+    "branch_not_merged": {
+        "en": "{b} is not merged into HEAD; gmf deletes merged branches only "
+              "(terminal: git branch -D {b}).",
+        "de": "{b} ist nicht in HEAD gemergt; gmf löscht nur gemergte Branches "
+              "(Terminal: git branch -D {b})."},
+    "branch_effect_pointer": {
+        "en": "· only the branch pointer {b} disappears from .git/config and refs",
+        "de": "· es verschwindet nur der Branch-Zeiger {b} aus Config und Refs"},
+    "branch_effect_merged": {
+        "en": "· its commits are already in HEAD, so nothing is lost",
+        "de": "· seine Commits stecken schon in HEAD, es geht also nichts verloren"},
+    "branch_effect_remote": {
+        "en": "· a branch of the same name on a remote is NOT touched",
+        "de": "· ein gleichnamiger Branch auf einem Remote bleibt unberührt"},
+    "branch_effect_safe": {
+        "en": "· files, stashes and other branches stay untouched",
+        "de": "· Dateien, Stashes und andere Branches bleiben unberührt"},
+    "branch_delete_confirm": {"en": "Delete branch {b} now?",
+                              "de": "Branch {b} jetzt löschen?"},
+    "branch_deleted": {"en": "Deleted branch {b} (was {oid}).",
+                       "de": "Branch {b} gelöscht (war {oid})."},
+    "branch_delete_failed": {"en": "Deleting {b} failed: {e}",
+                             "de": "Löschen von {b} fehlgeschlagen: {e}"},
+    "branch_delete_cancelled": {"en": "No branch was deleted.",
+                                "de": "Es wurde kein Branch gelöscht."},
     # Remote prüfen (T)
     "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
     "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
@@ -401,18 +461,21 @@ TR = {
     "check_empty": {"en": "{r} answers but has no branches yet (empty repository).",
                     "de": "{r} antwortet, hat aber noch keine Branches (leeres Repo)."},
     "check_gone": {
-        "en": "{r}: address reachable, but no repository there (or no access).",
-        "de": "{r}: Adresse erreichbar, aber dort ist kein Repo (oder kein Zugriff)."},
+        "en": "{r}: reachable, but no repository there (or no access).",
+        "de": "{r}: erreichbar, aber dort kein Repo (oder kein Zugriff)."},
     "check_auth": {"en": "{r}: server wants a login (credential helper or SSH key missing).",
                    "de": "{r}: Server verlangt einen Login (Credential-Helper/SSH-Key fehlt)."},
-    "check_dns": {"en": "{r}: host name does not resolve — no network or DNS problem.",
-                  "de": "{r}: Hostname nicht auflösbar — kein Netz oder DNS-Problem."},
+    "check_hostkey": {
+        "en": "{r}: host key unknown or changed — connect once in a terminal.",
+        "de": "{r}: Hostschlüssel unbekannt/geändert — einmal im Terminal verbinden."},
+    "check_dns": {"en": "{r}: host name does not resolve (no network or DNS).",
+                  "de": "{r}: Hostname nicht auflösbar (kein Netz oder DNS)."},
     "check_unreachable": {
-        "en": "{r}: no connection to the host — offline, firewall, or server down.",
-        "de": "{r}: keine Verbindung zum Host — offline, Firewall oder Server aus."},
+        "en": "{r}: no connection — offline, firewall, or server down.",
+        "de": "{r}: keine Verbindung — offline, Firewall oder Server aus."},
     "check_server": {
-        "en": "{r}: server replied with an error — problem on their side, not your repo.",
-        "de": "{r}: Server antwortet mit Fehler — Problem dort, nicht an deinem Repo."},
+        "en": "{r}: server error there — their problem, not your repository.",
+        "de": "{r}: Serverfehler dort — deren Problem, nicht dein Repo."},
     "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
                       "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
     "check_unknown": {"en": "{r}: unclear result — {e}", "de": "{r}: unklares Ergebnis — {e}"},
@@ -525,6 +588,9 @@ class RepoStatus:
     files: list = field(default_factory=list)   # [(Buchstabe M/D/U/C, Pfad), ...]
     stashes: list = field(default_factory=list)  # ["stash@{0} WIP ...", ...]
     error: str = ""
+    # Gits Wortlaut zum letzten Fehler. Die Zeile in der Liste erklärt, was zu tun
+    # ist; dieser Beweis steht auf der Info-Seite, wenn man es genau wissen will.
+    error_detail: str = ""
 
     @property
     def dirty(self) -> bool:
@@ -614,6 +680,22 @@ class TransferCheck:
         return (self.branch, self.head_oid, self.index_oid, self.worktree_fingerprint,
                 self.fetch_fingerprint, self.push_fingerprint, self.target_oid,
                 tuple(self.commits), tuple(self.files), self.ahead, self.behind)
+
+
+@dataclass
+class BranchInfo:
+    """Ein lokaler Branch — der zweite Zustand, den Git nie überträgt und niemand sieht."""
+
+    name: str
+    is_head: bool = False
+    upstream: str = ""
+    ahead: int = 0
+    behind: int = 0
+    upstream_gone: bool = False   # Upstream war da, ist auf dem Remote aber weg
+    oid: str = ""
+    date: str = ""
+    subject: str = ""
+    merged: bool = False          # vollständig in HEAD enthalten
 
 
 @dataclass(frozen=True)
@@ -845,29 +927,13 @@ NONINTERACTIVE_GIT_ENV = {
     "LC_ALL": "C",                  # Meldungen bleiben stabil englisch (s.u.)
 }
 
-# Marker aus Git-/SSH-Meldungen für "es fehlen Zugangsdaten". Git übersetzt seine
-# Meldungen je nach Systemsprache, deshalb laufen die Kindprozesse mit LC_ALL=C —
-# nur so sind diese englischen Marker verlässlich.
-CREDENTIAL_ERROR_MARKERS = (
-    "terminal prompts disabled",
-    "could not read username",
-    "could not read password",
-    "authentication failed",
-    "permission denied (publickey",
-    "host key verification failed",
-)
-
-
-def credentials_missing(result: subprocess.CompletedProcess) -> bool:
-    """Ist der Aufruf an fehlenden Zugangsdaten gescheitert (statt an sonst was)?"""
-    text = (result.stderr or "").lower()
-    return any(marker in text for marker in CREDENTIAL_ERROR_MARKERS)
-
-
 # Ursachen, die ein fehlgeschlagener Remote-Zugriff haben kann — in dieser Reihenfolge
-# geprüft. Wichtig ist die Trennung von "der Server hat geantwortet, das Repo gibt es
-# nicht" und "wir sind gar nicht hingekommen": beides sieht sonst gleich aus, verlangt
-# aber völlig verschiedene Reaktionen (Remote entfernen vs. Netz reparieren/warten).
+# geprüft. Git übersetzt seine Meldungen je nach Systemsprache, deshalb laufen die
+# Kindprozesse mit LC_ALL=C; nur so sind diese englischen Marker verlässlich.
+# Entscheidend sind drei Trennungen, die sonst alle gleich aussehen und doch völlig
+# verschiedene Reaktionen verlangen: "der Server hat geantwortet, das Repo gibt es
+# nicht" (Remote entfernen), "wir kamen nicht hin" (Netz reparieren/warten) und
+# "der Hostschlüssel ist unbekannt" (einmal bestätigen — kein fehlender Login!).
 REMOTE_CHECK_CAUSES = (
     # (Ergebnis, Marker in der englischen Git-/SSH-Meldung)
     ("dns", ("could not resolve host", "could not resolve hostname",
@@ -881,7 +947,13 @@ REMOTE_CHECK_CAUSES = (
     ("server", ("the requested url returned error: 5", "http code = 5",
                 "error: 502", "error: 503", "internal server error",
                 "service unavailable", "bad gateway")),
-    ("auth", CREDENTIAL_ERROR_MARKERS),
+    ("hostkey", ("host key verification failed", "no matching host key",
+                 "remote host identification has changed",
+                 "no ed25519 host key is known", "no rsa host key is known")),
+    ("auth", ("terminal prompts disabled", "could not read username",
+              "could not read password", "authentication failed",
+              "invalid username or password", "permission denied (publickey",
+              "no supported authentication methods")),
     ("gone", ("repository not found", "not found", "does not appear to be a git repository",
               "does not exist", "access denied", "the requested url returned error: 404",
               "no such file or directory")),
@@ -891,14 +963,31 @@ REMOTE_CHECK_CAUSES = (
 def classify_remote_check(result: subprocess.CompletedProcess) -> str:
     """Warum ist der Zugriff auf das Remote gescheitert?
 
-    Liefert "dns", "unreachable", "server", "auth", "gone" oder "unknown". Reine
-    Textauswertung von Gits Meldung — deshalb laufen die Aufrufe mit LC_ALL=C.
+    Liefert "dns", "unreachable", "server", "hostkey", "auth", "gone" oder
+    "unknown". Reine Textauswertung von Gits Meldung (deshalb LC_ALL=C).
     """
     text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
     for cause, markers in REMOTE_CHECK_CAUSES:
         if any(marker in text for marker in markers):
             return cause
     return "unknown"
+
+
+def credentials_missing(result: subprocess.CompletedProcess) -> bool:
+    """Fehlen wirklich Zugangsdaten? (Ein unbekannter Hostschlüssel ist etwas anderes.)"""
+    return classify_remote_check(result) == "auth"
+
+
+def last_error_line(result: subprocess.CompletedProcess) -> str:
+    """Die aussagekräftigste Fehlerzeile von Git — der Beleg für die Ursache.
+
+    `fetch --all` schließt mit der Sammelzeile "error: could not fetch <name>" ab,
+    die nichts erklärt. Die eigentliche Ursache steht davor, deshalb werden solche
+    Sammelzeilen übersprungen.
+    """
+    lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+    detailed = [line for line in lines if "could not fetch" not in line]
+    return (detailed or lines or [""])[-1]
 
 
 def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
@@ -930,7 +1019,7 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_empty", r=name)
     if outcome == "timeout":
         return t("check_timeout", r=name, s=timeout)
-    if outcome in ("dns", "unreachable", "server", "auth", "gone"):
+    if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "gone"):
         return t("check_" + outcome, r=name)
     return t("check_unknown", r=name, e=detail or outcome)
 
@@ -1171,6 +1260,63 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     return states
 
 
+def read_branches(repo: Path, cfg: dict) -> list[BranchInfo]:
+    """Alle lokalen Branches mit Stand, Upstream und Merge-Zustand lesen.
+
+    Zwei Git-Aufrufe reichen: einer für die Daten, einer für die Frage, welche
+    Branches vollständig in HEAD stecken (nur solche darf `X` löschen).
+    """
+    t_ = cfg["git_timeout"]
+    fields = ("%(HEAD)", "%(refname:short)", "%(upstream:short)", "%(upstream:track)",
+              "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)")
+    r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_)
+    if r.returncode != 0:
+        return []
+    merged_r = run_git(repo, "branch", "--merged", "HEAD",
+                       "--format=%(refname:short)", timeout=t_)
+    merged = {line.strip() for line in merged_r.stdout.splitlines() if line.strip()}
+    branches = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\0")
+        if len(parts) < 7:
+            continue
+        head, name, upstream, track, oid, date, subject = parts[:7]
+        # `upstream:track` ist dank LC_ALL=C stabil englisch: "[ahead 2, behind 1]",
+        # "[gone]" oder leer.
+        ahead = re.search(r"ahead (\d+)", track)
+        behind = re.search(r"behind (\d+)", track)
+        branches.append(BranchInfo(
+            name=name, is_head=head.strip() == "*", upstream=upstream,
+            ahead=int(ahead.group(1)) if ahead else 0,
+            behind=int(behind.group(1)) if behind else 0,
+            upstream_gone="gone" in track,
+            oid=oid, date=date, subject=subject, merged=name in merged,
+        ))
+    return branches
+
+
+def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
+    """Diff einer einzelnen Datei, ohne Index oder Arbeitsbaum anzufassen.
+
+    Unversionierte Dateien kennt `git diff` nicht — sie werden über `--no-index`
+    gegen /dev/null gezeigt, damit auch neue Dateien sichtbar sind.
+    """
+    if code == "U":
+        r = run_git(repo, "diff", "--no-index", "--", os.devnull, path, timeout=timeout)
+    elif run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
+                 timeout=timeout).returncode == 0:
+        # Gegen HEAD, damit gestagte UND ungestagte Änderungen zusammen erscheinen.
+        r = run_git(repo, "diff", "HEAD", "--", path, timeout=timeout)
+    else:
+        r = run_git(repo, "diff", "--cached", "--", path, timeout=timeout)
+    # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist Erfolg.
+    if r.returncode in (0, 1):
+        return True, r.stdout
+    return False, (r.stderr or "").strip()[:240]
+
+
 def display_remote_url(url: str) -> str:
     """Remote-Adresse für die lokale Anzeige, aber ohne eingebettete Secrets."""
     raw = url.strip()
@@ -1231,12 +1377,30 @@ class InfoView:
     """
 
     lines: list[str] = field(default_factory=list)
-    # Name -> (erste Zeile, letzte Zeile) des Blocks in `lines`
-    remote_blocks: list[tuple[str, int, int]] = field(default_factory=list)
+    # (Art, Name, erste Zeile, letzte Zeile) — Art ist "remote" oder "branch".
+    # Beide sind auswählbar, weil beide lokal aufräumbar sind.
+    blocks: list[tuple[str, str, int, int]] = field(default_factory=list)
+
+    @property
+    def remote_blocks(self) -> list[tuple[str, int, int]]:
+        return [(name, a, b) for kind, name, a, b in self.blocks if kind == "remote"]
 
     @property
     def remote_names(self) -> list[str]:
         return [name for name, _, _ in self.remote_blocks]
+
+
+def aligned_rows(rows: list[tuple[str, str]], indent: str = "",
+                 width: int | None = None) -> list[str]:
+    """Label/Wert-Zeilen so setzen, dass alle Werte in derselben Spalte beginnen.
+
+    `width` gibt die Label-Breite vor, wenn mehrere getrennt gebaute Blöcke
+    dieselbe Spalte teilen sollen.
+    """
+    if width is None:
+        width = max((cell_width(label) for label, _ in rows), default=0)
+    return [f"{indent}{pad_cells(label + ':', width + 1)}  {value}"
+            for label, value in rows]
 
 
 def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
@@ -1257,19 +1421,22 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
 
     path = terminal_text(st.path)
     branch = terminal_text(st.branch)
-    lines = [
-        f"{t('info_path')}: {path}",
-        f"{t('info_branch')}: {branch}",
+    # Label/Wert-Paare sammeln und erst am Ende ausrichten: so stehen die Werte
+    # linksbündig untereinander, statt an unterschiedlich langen Labels zu kleben.
+    head_rows: list[tuple[str, str]] = [
+        (t("info_path"), path),
+        (t("info_branch"), branch),
     ]
 
     commit = read_git(
         "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD")
     fields = commit.stdout.rstrip("\n").split("\0", 4) if commit.returncode == 0 else []
+    subject_line = ""
     if len(fields) == 5:
         full_oid, short_oid, date, author, subject = map(terminal_text, fields)
-        lines.append(f"{t('info_head')}: {short_oid} ({full_oid})")
-        lines.append(f"{t('info_last_commit')}: {date} · {author}")
-        lines.append(f"  {subject}")
+        head_rows.append((t("info_head"), f"{short_oid} ({full_oid})"))
+        head_rows.append((t("info_last_commit"), f"{date} · {author}"))
+        subject_line = subject
 
         count = read_git("rev-list", "--count", "HEAD")
         shallow = read_git("rev-parse", "--is-shallow-repository")
@@ -1277,10 +1444,10 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             clone_kind = (t("info_shallow_clone")
                           if shallow.returncode == 0 and shallow.stdout.strip() == "true"
                           else t("info_full_clone"))
-            value = t("info_history_value", n=count.stdout.strip(), kind=clone_kind)
-            lines.append(f"{t('info_history')}: {value}")
+            head_rows.append((t("info_history"), t(
+                "info_history_value", n=count.stdout.strip(), kind=clone_kind)))
     else:
-        lines.append(f"{t('info_head')}: {t('info_no_commits')}")
+        head_rows.append((t("info_head"), t("info_no_commits")))
 
     upstream = read_git(
         "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
@@ -1296,37 +1463,48 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             upstream_value = terminal_text(upstream_name)
     else:
         upstream_value = t("none_label")
-    lines.append(f"{t('info_upstream')}: {upstream_value}")
+    head_rows.append((t("info_upstream"), upstream_value))
 
     worktree = (t("info_clean") if not st.dirty else
                 t("info_changes", m=st.modified, d=st.deleted,
                   u=st.untracked, c=st.conflicts))
-    lines.append(f"{t('info_worktree')}: {worktree}")
-    lines.append(f"{t('info_stashes')}: {len(st.stashes)}")
+    head_rows.append((t("info_worktree"), worktree))
+    head_rows.append((t("info_stashes"), str(len(st.stashes))))
 
     tags = read_git("tag", "--points-at", "HEAD")
     tag_names = [terminal_text(name) for name in tags.stdout.splitlines()
                  if name.strip()] if tags.returncode == 0 else []
-    tag_value = ", ".join(tag_names) if tag_names else t("none_label")
-    lines.append(f"{t('info_tags')}: {tag_value}")
+    head_rows.append((t("info_tags"), ", ".join(tag_names) if tag_names
+                      else t("none_label")))
+    if st.error:
+        head_rows.append((t("info_last_error"), terminal_text(st.error)))
+    if st.error_detail:
+        head_rows.append((t("info_git_said"), terminal_text(st.error_detail)))
 
+    lines = aligned_rows(head_rows)
+    if subject_line:
+        # Die Commit-Betreffzeile gehört direkt unter "Letzter Commit" und nicht in
+        # die Wertespalte — deshalb erst nach dem Ausrichten einschieben.
+        for index, (label, _) in enumerate(head_rows):
+            if label == t("info_last_commit"):
+                lines.insert(index + 1, "  " + subject_line)
+                break
     lines.extend(["", f"{t('info_remotes')}:"])
     view = InfoView(lines=lines)
+    remote_note = ""
     try:
         configs = read_remote_configs(st.path, cfg)
     # Auch malformed Fremdkonfigurationen (etwa eine ungültige URL) sollen nur
-    # diese Ansicht degradieren, nicht die komplette curses-Sitzung beenden.
+    # diesen Abschnitt degradieren — die Branches darunter bleiben nutzbar.
     except Exception as exc:
-        lines.append("  " + t("info_remote_error", e=terminal_text(exc)))
-        return view
-    if not configs:
-        lines.append("  " + t("none_label"))
-        return view
+        configs = {}
+        remote_note = t("info_remote_error", e=terminal_text(exc))
 
     states = {remote.name: remote for remote in st.remotes}
     ordered_names = [remote.name for remote in st.remotes if remote.name in configs]
     ordered_names.extend(name for name in configs if name not in ordered_names)
-    for index, name in enumerate(ordered_names):
+    specs: list[tuple[str, str, str, list[tuple[str, str]]]] = []
+    for name in ordered_names:
         remote = configs[name]
         state = states.get(name)
         web_urls = github_web_urls(remote)
@@ -1340,25 +1518,83 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
         if state and state.fetch_failed:
             labels.append(t("info_fetch_failed"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
-        if index:
-            lines.append("")
-        first = len(lines)
-        lines.append(f"  {terminal_text(name)}{suffix}")
-        for url in remote.fetch_urls:
-            lines.append(f"    {t('info_fetch_url')}: {display_remote_url(url)}")
-        for url in remote.push_urls:
-            lines.append(f"    {t('info_push_url')}: {display_remote_url(url)}")
-        for url in web_urls:
-            lines.append(f"    {t('info_web_url')}: {url}")
+        rows: list[tuple[str, str]] = []
+        fetch_shown = [display_remote_url(url) for url in remote.fetch_urls]
+        push_shown = [display_remote_url(url) for url in remote.push_urls]
+        if fetch_shown == push_shown:
+            # Der Normalfall: eine Adresse für beides. Zwei identische Zeilen sind
+            # nur Rauschen — getrennt stehen sie erst, wenn sie WIRKLICH abweichen
+            # (`git remote set-url --push` erlaubt das, gmf sperrt dann Transfers).
+            for url in fetch_shown:
+                rows.append((t("info_fetch_push_url"), url))
+        else:
+            rows.extend((t("info_fetch_url"), url) for url in fetch_shown)
+            rows.extend((t("info_push_url"), url) for url in push_shown)
+        rows.extend((t("info_web_url"), url) for url in web_urls)
         if state and st.branch not in ("?", "(detached)"):
-            if state.branch_exists:
-                lines.append("    " + t(
-                    "info_remote_branch", b=branch,
-                    a=state.ahead, d=state.behind))
-            else:
-                lines.append("    " + t("info_remote_branch_missing", b=branch))
-        view.remote_blocks.append((name, first, len(lines) - 1))
+            value = (t("info_delta", a=state.ahead, b=state.behind)
+                     if state.branch_exists else t("info_branch_missing_value"))
+            rows.append((t("info_branch_label", b=branch), value))
+        specs.append(("remote", name, f"  {terminal_text(name)}{suffix}", rows))
+
+    specs.extend(branch_block_specs(read_branches(st.path, cfg)))
+    # Eine gemeinsame Label-Breite für ALLE Detailzeilen der Seite: erst dadurch
+    # stehen die Werte über Remotes und Branches hinweg in derselben Spalte.
+    width = max((cell_width(label) for _, _, _, rows in specs for label, _ in rows),
+                default=0)
+    remote_specs = [s for s in specs if s[0] == "remote"]
+    branch_specs = [s for s in specs if s[0] == "branch"]
+    if remote_specs:
+        render_info_blocks(view, remote_specs, width)
+    else:
+        lines.append("  " + (remote_note or t("none_label")))
+    lines.extend(["", f"{t('info_branches')}:"])
+    if branch_specs:
+        render_info_blocks(view, branch_specs, width)
+    else:
+        lines.append("  " + t("none_label"))
     return view
+
+
+def branch_block_specs(branches: list[BranchInfo]) -> list:
+    """Lokale Branches als Blöcke — der zweite Zustand, den Git nie überträgt.
+
+    Genau wie bei Remotes sammeln sich hier Reste an (abgeschlossene Features, alte
+    Experimente), die niemand sieht, weil man immer nur den aktuellen Branch
+    betrachtet. Deshalb stehen sie auf der Info-Seite und sind mit `X` löschbar.
+    """
+    specs = []
+    for branch in branches:
+        labels = []
+        if branch.is_head:
+            labels.append(t("info_branch_current"))
+        if branch.merged and not branch.is_head:
+            labels.append(t("info_branch_merged"))
+        if branch.upstream_gone:
+            labels.append(t("info_branch_upstream_gone"))
+        suffix = f" [{', '.join(labels)}]" if labels else ""
+        rows = [(t("info_branch_commit"),
+                 f"{branch.oid} · {branch.date} · {terminal_text(branch.subject)}")]
+        if branch.upstream:
+            rows.append((t("info_upstream"),
+                         f"{terminal_text(branch.upstream)} "
+                         f"({t('info_delta', a=branch.ahead, b=branch.behind)})"))
+        else:
+            rows.append((t("info_upstream"), t("none_label")))
+        specs.append(("branch", branch.name,
+                      f"  {terminal_text(branch.name)}{suffix}", rows))
+    return specs
+
+
+def render_info_blocks(view: InfoView, specs: list, width: int) -> None:
+    """Blöcke ausgeben und ihre Zeilenbereiche für den Auswahlbalken merken."""
+    for index, (kind, name, header, rows) in enumerate(specs):
+        if index:
+            view.lines.append("")
+        first = len(view.lines)
+        view.lines.append(header)
+        view.lines.extend(aligned_rows(rows, indent="    ", width=width))
+        view.blocks.append((kind, name, first, len(view.lines) - 1))
 
 
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
@@ -1539,9 +1775,14 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                     # `fetch`), deshalb der Fallback auf alle konfigurierten.
                     failed_remotes = set(failed_fetch_remotes(fetched)) or set(configs)
                     names = ", ".join(sorted(failed_remotes)) or "--all"
-                    st.error = (t("transfer_auth_missing", r=names)
-                                if credentials_missing(fetched)
-                                else t("fetch_remote_failed", r=names))
+                    # Dieselbe Ursachenanalyse wie bei der T-Prüfung: die Zeile soll
+                    # sagen, was zu tun ist, statt jeden Fehler "Login" zu nennen.
+                    st.error = remote_check_message(
+                        names, classify_remote_check(fetched), 0,
+                        last_error_line(fetched), cfg["fetch_timeout"])
+                    # Gits eigenen Wortlaut behalten — er steht auf der Info-Seite und
+                    # beweist die Ursache auch auf einem fremden Rechner.
+                    st.error_detail = last_error_line(fetched)
                     st.remote_state = "error"
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
@@ -2104,6 +2345,11 @@ class TUI:
         if not Path(app["path"]).exists():
             self.message = t("app_not_found", p=app["path"])
             return
+        if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+            # Über SSH gibt es keine Fenstersitzung: `open` würde nichts Sichtbares
+            # tun. Das ehrlich sagen, statt einen kryptischen macOS-Fehler zu zeigen.
+            self.message = t("app_over_ssh", name=app["name"])
+            return
         # `open -a <App> <Ordner>` öffnet den Repo-Ordner in der App. Fehler (z.B.
         # App kann Ordner nicht öffnen) sichtbar machen, statt still zu schlucken.
         r = subprocess.run(["open", "-a", app["path"], str(st.path)],
@@ -2425,28 +2671,85 @@ class TUI:
         lines.extend(["", "", *t("git_help_body").splitlines()])
         self.show_pager(t("git_help_title"), lines)
 
-    # -- Repo-Info mit Remote-Auswahl ---------------------------------------
+    # -- Änderungen ansehen (A) ---------------------------------------------
+
+    def action_file_changes(self):
+        """Geänderte Dateien durchgehen und einzeln als Diff ansehen.
+
+        Die Liste zeigt, WAS sich geändert hat — bisher stand dort nur, DASS sich
+        etwas geändert hat. Rein lesend: `git diff` fasst weder Index noch Baum an.
+        """
+        st = self.current()
+        if not st:
+            return
+        if not st.files:
+            self.message = t("no_changes_to_show")
+            return
+        sel = 0
+        off = 0
+        while True:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            safe_addstr(self.scr, 0, 0,
+                        (" " + t("changes_title", rel=terminal_text(st.rel))).ljust(w - 1),
+                        curses.A_BOLD)
+            body_h = max(1, h - 3)
+            if sel < off:
+                off = sel
+            if sel >= off + body_h:
+                off = sel - body_h + 1
+            for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
+                                      start=1):
+                code, path = st.files[index]
+                pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[code]
+                label = t("conflict_label") if code == "C" else ""
+                safe_addstr(self.scr, y, 1, f"{code}  {label}{path}",
+                            (curses.A_REVERSE if index == sel else 0)
+                            | curses.color_pair(pair))
+            safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
+                        curses.color_pair(C_DIM) | curses.A_REVERSE)
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch in (ord("q"), ord("Q"), 27):
+                return
+            elif ch == curses.KEY_UP:
+                sel = max(0, sel - 1)
+            elif ch == curses.KEY_DOWN:
+                sel = min(len(st.files) - 1, sel + 1)
+            elif ch == 9:                      # Tab wie ↓, ohne Escape-Sequenz
+                sel = (sel + 1) % len(st.files)
+            elif ch in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT):
+                code, path = st.files[sel]
+                ok, text = file_diff(st.path, code, path, self.cfg["git_timeout"])
+                if not ok:
+                    self.message = t("diff_failed", p=path, e=text)
+                    return
+                self.show_pager(t("diff_title", p=terminal_text(path)),
+                                (text or t("diff_empty")).splitlines())
+
+    # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
     def action_repo_info(self):
-        """Repo-Details; die Remotes sind auswählbar (T prüfen, X entfernen)."""
+        """Repo-Details; Remotes und Branches sind auswählbar (T prüfen, X entfernen)."""
         st = self.current()
         if not st:
             return
         fresh = self.refresh_one(st)
         view = build_info_view(fresh, self.cfg)
-        selected = 0        # Index in view.remote_blocks
+        selected = 0        # Index in view.blocks (Remotes und Branches)
         top = 0             # erste sichtbare Zeile
-        note = ""           # Ergebnis der letzten Prüfung
+        note = ""           # Ergebnis der letzten Prüfung/Aktion
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             title = t("repo_info_title", rel=terminal_text(fresh.rel))
             safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
             body_h = max(1, h - 4)
-            block = (view.remote_blocks[selected] if view.remote_blocks else None)
+            selected = min(selected, max(0, len(view.blocks) - 1))
+            block = view.blocks[selected] if view.blocks else None
             if block:
                 # Der gewählte Block soll immer komplett sichtbar sein.
-                _, first, last = block
+                _, _, first, last = block
                 if first < top:
                     top = first
                 if last >= top + body_h:
@@ -2455,13 +2758,16 @@ class TUI:
             for y, index in enumerate(range(top, min(len(view.lines), top + body_h)),
                                       start=1):
                 mark = (curses.A_REVERSE
-                        if block and block[1] <= index <= block[2] else 0)
+                        if block and block[2] <= index <= block[3] else 0)
                 safe_addstr(self.scr, y, 0, view.lines[index], mark)
             safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
             footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
             safe_addstr(self.scr, h - 2, 0, t("info_footer_nav").ljust(w - 1), footer_dim)
-            safe_addstr(self.scr, h - 1, 0,
-                        t("info_footer_actions").ljust(w - 1), footer_dim)
+            # Die Aktionszeile richtet sich nach dem gewählten Block: ein Branch
+            # kennt kein "prüfen", ein Remote kein "gemergt".
+            actions = t("info_footer_actions_branch" if block and block[0] == "branch"
+                        else "info_footer_actions")
+            safe_addstr(self.scr, h - 1, 0, actions.ljust(w - 1), footer_dim)
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
@@ -2469,36 +2775,40 @@ class TUI:
             elif ch == curses.KEY_UP:
                 selected = max(0, selected - 1)
             elif ch == curses.KEY_DOWN:
-                selected = min(max(0, len(view.remote_blocks) - 1), selected + 1)
-            elif ch == 9 and view.remote_blocks:      # Tab: durchzykeln
-                selected = (selected + 1) % len(view.remote_blocks)
-            elif ch == curses.KEY_BTAB and view.remote_blocks:   # Shift-Tab: zurück
-                selected = (selected - 1) % len(view.remote_blocks)
+                selected = min(max(0, len(view.blocks) - 1), selected + 1)
+            elif ch == 9 and view.blocks:      # Tab: durchzykeln
+                selected = (selected + 1) % len(view.blocks)
+            elif ch == curses.KEY_BTAB and view.blocks:   # Shift-Tab: zurück
+                selected = (selected - 1) % len(view.blocks)
             elif ch == curses.KEY_NPAGE:
                 top = min(max(0, len(view.lines) - body_h), top + body_h)
             elif ch == curses.KEY_PPAGE:
                 top = max(0, top - body_h)
             elif ch in (ord("t"), ord("T")):
-                note = self._check_selected_remote(fresh, block)
+                if block and block[0] == "branch":
+                    note = t("info_check_remote_only")
+                else:
+                    note = self._check_selected_remote(fresh, block)
             elif ch in (ord("x"), ord("X")):
                 if not block:
-                    note = t("info_no_remotes")
+                    note = t("info_nothing_selected")
                     continue
-                if self._remove_remote(fresh, block[0]):
-                    # Die Remote-Liste hat sich geändert: Ansicht neu aufbauen.
+                kind, name = block[0], block[1]
+                removed = (self._remove_remote(fresh, name) if kind == "remote"
+                           else self._delete_branch(fresh, name))
+                if removed:
+                    # Die Liste hat sich geändert: Ansicht neu aufbauen.
                     fresh = self.refresh_one(fresh)
                     view = build_info_view(fresh, self.cfg)
                     selected, top = 0, 0
-                    note = self.message
-                else:
-                    note = self.message
+                note = self.message
 
     def _check_selected_remote(self, st: RepoStatus,
-                               block: tuple[str, int, int] | None) -> str:
+                               block: tuple[str, str, int, int] | None) -> str:
         """`git ls-remote` gegen das gewählte Remote; nennt die Ursache beim Namen."""
         if not block:
             return t("info_no_remotes")
-        name = block[0]
+        name = block[1]
         h, w = self.scr.getmaxyx()
         safe_addstr(self.scr, h - 3, 1, t("check_running", r=name).ljust(w - 2),
                     curses.color_pair(C_YELLOW))
@@ -2561,6 +2871,63 @@ class TUI:
             self.message = t("remove_failed", r=name, code=r.returncode)
             return False
         self.message = t("remove_done", r=name)
+        return True
+
+    def _delete_branch(self, st: RepoStatus, name: str) -> bool:
+        """Lokalen Branch löschen — nur gemergte, und nur nach Erklärung."""
+        branch = next((b for b in read_branches(st.path, self.cfg) if b.name == name),
+                      None)
+        if branch is None:
+            self.message = t("info_nothing_selected")
+            return False
+        if branch.is_head:
+            self.message = t("branch_is_current", b=name)
+            return False
+        if not branch.merged:
+            # `git branch -d` würde das ohnehin verweigern. Lieber vorher ehrlich
+            # sagen, warum — und wie es im Terminal bewusst doch geht.
+            self.message = t("branch_not_merged", b=name)
+            return False
+        command = format_git_command(("branch", "-d", name))
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, 0, 0, (" " + t("branch_delete_title", b=name)).ljust(w - 1),
+                    curses.A_BOLD)
+        y = 2
+        for line in aligned_rows([
+                (t("info_branch_commit"),
+                 f"{branch.oid} · {branch.date} · {terminal_text(branch.subject)}"),
+                (t("info_upstream"), terminal_text(branch.upstream) or t("none_label")),
+        ], indent=" "):
+            safe_addstr(self.scr, y, 0, line)
+            y += 1
+        y += 1
+        safe_addstr(self.scr, y, 1, t("remove_what_happens"), curses.A_BOLD)
+        y += 1
+        for key in ("branch_effect_pointer", "branch_effect_merged",
+                    "branch_effect_remote", "branch_effect_safe"):
+            safe_addstr(self.scr, y, 3, t(key, b=name))
+            y += 1
+        y += 2
+        safe_addstr(self.scr, y, 1, t("remove_undo"), curses.color_pair(C_DIM))
+        y += 1
+        undo = format_git_command(("branch", name, branch.oid))
+        safe_addstr(self.scr, y, 3, terminal_text(undo), curses.color_pair(C_DIM))
+        y += 2
+        safe_addstr(self.scr, y, 1, t("remove_command"), curses.A_BOLD)
+        safe_addstr(self.scr, y, 1 + cell_width(t("remove_command")) + 1, command,
+                    curses.color_pair(C_CYAN) | curses.A_BOLD)
+        self.scr.refresh()
+        if not self.confirm(t("branch_delete_confirm", b=name)):
+            self.message = t("branch_delete_cancelled")
+            return False
+        r = run_git_logged(st.path, "branch", "-d", name,
+                           timeout=self.cfg["git_timeout"])
+        if r.returncode != 0:
+            self.message = t("branch_delete_failed", b=name,
+                             e=last_error_line(r)[:100])
+            return False
+        self.message = t("branch_deleted", b=name, oid=branch.oid)
         return True
 
     # -- Commit-Hilfe --------------------------------------------------------
@@ -2762,6 +3129,8 @@ class TUI:
                 self.action_git_help()
             elif key == "I":
                 self.action_repo_info()
+            elif key == "A":
+                self.action_file_changes()
             elif key == "S":
                 self.action_stash_show()
             elif key == "D":
