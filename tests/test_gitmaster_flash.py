@@ -1632,14 +1632,39 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "255"):
                 fetch_remote_status("example", "~/git", fetch=False)
 
-    def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
+    @staticmethod
+    def _make_screens_module():
         source = Path(__file__).resolve().parents[1] / "docs" / "make-screens.py"
         spec = importlib.util.spec_from_file_location("gmf_make_screens_test", source)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module, source
+
+    def test_screen_replay_understands_the_sequences_curses_emits(self):
+        """Der Bildnachbau muss dieselben Zeilen treffen wie das echte Terminal.
+
+        Die absolute Zeilenwahl (ESC[<n>d) fehlte lange: ncurses setzt damit den
+        Cursor auf die Fußzeile, der Nachbau ließ ihn stehen und zeichnete sie
+        direkt unter die Liste. Die Bilder sahen plausibel aus, zeigten aber eine
+        Aufteilung, die es so nie gab — deshalb hier festgenagelt.
+        """
+        module, _ = self._make_screens_module()
+        grid = module.replay("\x1b[H\x1b[2Jlist\x1b[4dfooter"      # ESC[4d: 4. Zeile
+                             "\x1b[?25l"                            # privater Modus
+                             "\x1b[2;1Hab\x08X",                    # Backspace
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines[0], "list")
+        # ESC[<n>d wechselt nur die Zeile, die Spalte bleibt hinter "list" stehen.
+        self.assertEqual(lines[3], "    footer")
+        self.assertEqual(lines[1], "aX")
+        self.assertNotIn("25l", "".join(lines))
+
+    def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
+        module, source = self._make_screens_module()
         owned = []
 
-        def fake_render(args, keys, settle, tmpdir):
+        def fake_render(args, keys, settle, tmpdir, cols, rows):
             self.assertEqual(settle, 0.123)
             self.assertTrue(Path(tmpdir).is_dir())
             owned.append(Path(tmpdir))

@@ -39,10 +39,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 GMF = HERE.parent / "gitmaster_flash.py"
 
-# Tall enough for the whole demo sandbox (header + 27 repos + help bar) without the
-# TUI having to scroll. Empty rows below the help bar are cropped again in `_trim`,
-# so a generous height costs nothing in the finished SVG.
-COLS, ROWS = 100, 34
+# Default terminal for a capture. Every screen may ask for its own size (see SCREENS):
+# the window height decides how the TUI divides list, command log and footer, so a
+# picture only looks like everyday use if the window fits its contents.
+# 110 columns and not 100, because the header carries version, path, count and summary:
+# at 100 the sandbox path pushed the last word out of the window ("21 to r").
+COLS, ROWS = 110, 34
+
+# The escape sequences ncurses emits. The "?" belongs into the parameter part so that
+# private modes (ESC[?25l) are swallowed instead of being printed as text.
+CSI = re.compile(r"\x1b\[([?0-9;]*)([A-Za-z`@])")
 
 # xterm-ish palette. Only what the TUI actually uses.
 FG = "#d8d8d8"
@@ -55,8 +61,16 @@ ANSI = {
 }
 
 
+# Cursor keys as the TUI expects them. ncurses puts the terminal into "application
+# cursor" mode (ESC[?1h), and from then on it only recognises ESC O A/B/C/D. Sending
+# the ESC [ A/B/C/D form instead delivered a bare ESC — which the TUI reads as "quit",
+# so the capture died with "[Errno 5] Input/output error" halfway through the keys.
+UP, DOWN, RIGHT, LEFT = b"\x1bOA", b"\x1bOB", b"\x1bOC", b"\x1bOD"
+TAB = b"\t"
+
+
 def _split_keys(keys: bytes) -> list:
-    """Split a key string into single keypresses: b"\x1b[B\x1b[Bc" -> [down, down, c].
+    """Split a key string into single keypresses: DOWN + DOWN + b"c" -> [down, down, c].
 
     Each has to arrive as its own read() — curses assembles an escape sequence into one
     KEY_DOWN, but only if it is not glued to the next keypress."""
@@ -68,6 +82,9 @@ def _split_keys(keys: bytes) -> list:
                 j += 1
             out.append(keys[i:j + 1])
             i = j + 1
+        elif keys[i:i + 2] == b"\x1bO":              # application cursor keys
+            out.append(keys[i:i + 3])
+            i += 3
         else:
             out.append(keys[i:i + 1])
             i += 1
@@ -91,26 +108,18 @@ def _cell_width(ch: str) -> int:
                  or unicodedata.east_asian_width(ch) in ("W", "F")) else 1
 
 
-def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> list:
-    """Run the program in a pty, feed `keys`, return the final screen as a Cell grid.
-
-    We parse only the escape sequences curses actually emits here (absolute cursor
-    moves, SGR colours, erase). That is far less than a full terminal emulator, but it
-    is exactly what we need — and it keeps this script readable.
-    """
-    grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
-    cy = cx = 0
-    cur_fg, cur_bold, cur_rev = FG, False, False
-
+def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
+                   cols: int = COLS, rows: int = ROWS) -> list:
+    """Run the program in a pty, feed `keys`, return the final screen as a Cell grid."""
     pid, fd = pty.fork()
     if pid == 0:                                    # child
-        os.environ.update(TERM="xterm-256color", LINES=str(ROWS), COLUMNS=str(COLS),
+        os.environ.update(TERM="xterm-256color", LINES=str(rows), COLUMNS=str(cols),
                           LANG="en_US.UTF-8", TMPDIR=owned_tmp)
         os.execvp(sys.executable, [sys.executable, str(GMF)] + args)
 
     # Window size on the pty master. curses also honours LINES/COLUMNS (set in the
     # child env above) — belt and braces, because initscr() may run before we get here.
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     def read_until_quiet(quiet: float = 0.5, cap: float = 90.0,
                          first_wait: float = 60.0) -> bytes:
         """Read until the program stops drawing for `quiet` seconds.
@@ -170,16 +179,59 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> li
             os.waitpid(pid, 0)
         except ChildProcessError:
             pass
-    text = buf.decode("utf-8", "replace")
+    return replay(buf.decode("utf-8", "replace"), cols, rows)
+
+
+def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
+    """Terminal output -> Cell grid, i.e. the screen the program would have painted.
+
+    We handle only the escape sequences ncurses actually emits (cursor moves, SGR
+    colours, erase). That is far less than a full terminal emulator, but it is exactly
+    what we need — and it keeps this script readable. Everything the loop does not
+    understand has to be *swallowed* rather than ignored, otherwise it lands on the
+    screen as text or, worse, the following line is drawn in the wrong row.
+
+    Kept separate from the pty plumbing on purpose: this way the replay is testable
+    without a child process (see tests/test_gitmaster_flash.py).
+    """
+    grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
+    cy = cx = 0
+    cur_fg, cur_bold, cur_rev = FG, False, False
     i = 0
     while i < len(text):
-        m = re.compile(r"\x1b\[([0-9;]*)([A-Za-z])").match(text, i)
+        m = CSI.match(text, i)
         if m:
             params, cmd = m.group(1), m.group(2)
+            # Private sequences (ESC[?1049h, ESC[?25l …) only switch terminal modes we
+            # do not model. They must still be *consumed*: the older regex did not match
+            # the "?", so the ESC was skipped and "[?1049h" landed on the screen as text.
+            if params.startswith("?"):
+                i = m.end()
+                continue
             nums = [int(x) for x in params.split(";") if x.isdigit()]
-            if cmd == "H":                          # cursor home / absolute
+            first = nums[0] if nums else 1           # most commands default to 1
+            if cmd in ("H", "f"):                   # cursor home / absolute row;col
                 cy = (nums[0] - 1) if nums else 0
                 cx = (nums[1] - 1) if len(nums) > 1 else 0
+            elif cmd == "d":                        # absolute row, column unchanged
+                # ncurses reaches for this one a lot (ESC[34d for the footer). Without
+                # it the cursor stayed put and whole lines were drawn over each other —
+                # the footer used to end up right below the list instead of at the
+                # bottom of the window.
+                cy = first - 1
+            elif cmd in ("G", "`"):                 # absolute column, row unchanged
+                cx = first - 1
+            elif cmd == "A":                        # cursor up / down / right / left
+                cy -= first
+            elif cmd == "B":
+                cy += first
+            elif cmd == "C":
+                cx += first
+            elif cmd == "D":
+                cx -= first
+            elif cmd == "X":                        # erase n cells, cursor stays
+                for x in range(cx, min(cols, cx + first)):
+                    grid[cy][x] = Cell()
             elif cmd == "m":                        # colours / attributes
                 for n in (nums or [0]):
                     if n == 0:
@@ -193,26 +245,30 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> li
             elif cmd == "J":                        # erase display
                 mode = nums[0] if nums else 0
                 if mode == 2:                       # whole screen
-                    grid = [[Cell() for _ in range(COLS)] for _ in range(ROWS)]
+                    grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
                 elif mode == 0:                     # cursor -> end of screen
                     # curses sends the parameterless ESC[J when a new view (commit
                     # helper, pager) replaces the list. Ignoring it left the old
                     # overview bleeding through the new screen.
-                    for x in range(cx, COLS):
+                    for x in range(cx, cols):
                         grid[cy][x] = Cell()
-                    for y in range(cy + 1, ROWS):
-                        grid[y] = [Cell() for _ in range(COLS)]
+                    for y in range(cy + 1, rows):
+                        grid[y] = [Cell() for _ in range(cols)]
                 elif mode == 1:                     # start of screen -> cursor
                     for y in range(0, cy):
-                        grid[y] = [Cell() for _ in range(COLS)]
+                        grid[y] = [Cell() for _ in range(cols)]
                     for x in range(0, cx + 1):
                         grid[cy][x] = Cell()
             elif cmd == "K":                        # erase line
                 mode = nums[0] if nums else 0
-                rng = (range(cx, COLS) if mode == 0 else
-                       range(0, cx + 1) if mode == 1 else range(COLS))
+                rng = (range(cx, cols) if mode == 0 else
+                       range(0, cx + 1) if mode == 1 else range(cols))
                 for x in rng:
                     grid[cy][x] = Cell()
+            # A terminal parks the cursor at the edge instead of leaving the screen;
+            # without this, a move beyond the last row would index past the grid.
+            cy = max(0, min(rows - 1, cy))
+            cx = max(0, min(cols - 1, cx))
             i = m.end()
             continue
         # ESC ( B / ESC ) 0 etc.: charset selection, 3 bytes. Skipping only two left
@@ -224,10 +280,12 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> li
         if ch == "\r":
             cx = 0
         elif ch == "\n":
-            cy, cx = min(cy + 1, ROWS - 1), 0
+            cy, cx = min(cy + 1, rows - 1), 0
+        elif ch == "\x08":                          # backspace: one cell to the left
+            cx = max(0, cx - 1)
         elif ch == "\x1b":
             i += 1                                  # unknown escape: skip the byte
-        elif ch >= " " and 0 <= cy < ROWS and 0 <= cx < COLS:
+        elif ch >= " " and 0 <= cy < rows and 0 <= cx < cols:
             width = _cell_width(ch)
             if width == 0 and cx > 0:
                 grid[cy][cx - 1].ch += ch
@@ -236,7 +294,7 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> li
                 c.ch, c.fg, c.bold, c.rev = ch, cur_fg, cur_bold, cur_rev
                 # SVG monospace text does not reliably reserve the second terminal
                 # cell of emoji-style symbols, so represent continuation cells.
-                for extra in range(1, min(width, COLS - cx)):
+                for extra in range(1, min(width, cols - cx)):
                     c = grid[cy][cx + extra]
                     c.ch, c.fg, c.bold, c.rev = " ", cur_fg, cur_bold, cur_rev
                 cx += width
@@ -244,12 +302,13 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str) -> li
     return grid
 
 
-def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8) -> list:
+def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8,
+                  cols: int = COLS, rows: int = ROWS) -> list:
     """Render inside one owned TMPDIR and clean exactly that directory in all cases."""
     # Keep the securely created unique path short enough that the complete demo
     # root and status summary both fit into the captured header before _tidy().
     with tempfile.TemporaryDirectory(prefix="gmfs-", dir="/tmp") as owned_tmp:
-        return _render_in_pty(args, keys, settle, owned_tmp)
+        return _render_in_pty(args, keys, settle, owned_tmp, cols, rows)
 
 
 def _set_line(row: list, text: str) -> None:
@@ -297,8 +356,8 @@ def _trim(grid: list) -> list:
 def to_svg(grid: list, title: str) -> str:
     """Cell grid -> SVG with selectable text."""
     cw, ch, pad = 8.4, 17.0, 12
-    rows = len(grid)
-    w, h = int(COLS * cw + 2 * pad), int(rows * ch + 2 * pad)
+    rows, cols = len(grid), len(grid[0])
+    w, h = int(cols * cw + 2 * pad), int(rows * ch + 2 * pad)
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" '
         f'height="{h}" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" '
@@ -310,10 +369,10 @@ def to_svg(grid: list, title: str) -> str:
         # selected line (curses A_REVERSE) -> draw the highlight bar
         runs = []
         x = 0
-        while x < COLS:
+        while x < cols:
             c = row[x]
             x2 = x
-            while x2 < COLS and row[x2].rev == c.rev and row[x2].fg == c.fg \
+            while x2 < cols and row[x2].rev == c.rev and row[x2].fg == c.fg \
                     and row[x2].bold == c.bold:
                 x2 += 1
             runs.append((x, x2, c))
@@ -335,22 +394,35 @@ def to_svg(grid: list, title: str) -> str:
     return "\n".join(out) + "\n"
 
 
-# Only the first screen is captured. The commit helper is shown as a plain code block
-# in the README instead — deliberately:
+# Only list screens are captured. The commit helper, the pager and the info view are
+# shown as plain code blocks in the README instead — deliberately:
 #
 # The list view is drawn onto a freshly cleared screen, so replaying the escape codes
-# reproduces it exactly. Any view opened LATER (commit helper, pager) is painted OVER
-# the list, and curses only sends the cells it believes changed. Reconstructing that
-# needs far more terminal-state reconstruction than the overview. The renderer does
+# reproduces it exactly. Any view opened LATER (commit helper, pager, info) is painted
+# OVER the list, and curses only sends the cells it believes changed. Reconstructing
+# that needs far more terminal-state reconstruction than the overview — going through
+# the info view left stray lines of it behind on the list underneath. The renderer does
 # account for the wide symbols used here, but deliberately remains a small replay tool
 # rather than a complete terminal emulator.
+
+# Two real actions before every capture, so the command log shows what it is for
+# instead of "(none yet)": pop the stash of the third repo, then pull the one that is
+# a commit behind. Both are plain list-view keys — no overlay view involved. `L` and
+# not `P` on purpose: the fast-forward merge fits into the pane in full, while the
+# leased push line would be cut off mid-hash at the right edge.
+ACTIONS = DOWN + DOWN + b"Uy" + RIGHT + RIGHT + UP + b"Ly"
+
 # Die Demo-Sandbox hat mehr Repos als `compact_from`, startet also kompakt. Für das
-# Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein.
+# Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein. Die
+# Höhe je Bild ist bewusst knapp gewählt: das Fenster soll gefüllt aussehen, nicht
+# halb leer.
 SCREENS = [
-    ("compact.svg", [], b"",
-     "gitmaster_flash compact view — the whole collection at a glance"),
-    ("overview.svg", [], b"m",
-     "gitmaster_flash detail view — problem repos sorted to the top"),
+    ("compact.svg", [], ACTIONS,
+     "gitmaster_flash compact view — the whole collection at a glance", COLS, 20),
+    ("command-log.svg", [], ACTIONS + TAB,
+     "gitmaster_flash — the command log with the focus on it", COLS, 20),
+    ("overview.svg", [], ACTIONS + b"m",
+     "gitmaster_flash detail view — problem repos sorted to the top", COLS, 35),
 ]
 
 
@@ -361,8 +433,9 @@ def main() -> int:
     args = ap.parse_args()
 
     rc = 0
-    for name, extra, keys, title in SCREENS:
-        grid = render_in_pty(["--demo", "--lang", "en"] + extra, keys=keys)
+    for name, extra, keys, title, cols, rows in SCREENS:
+        grid = render_in_pty(["--demo", "--lang", "en"] + extra, keys=keys,
+                             cols=cols, rows=rows)
         _tidy(grid)
         svg = to_svg(_trim(grid), title)
         if len([1 for row in grid for c in row if c.ch.strip()]) < 50:

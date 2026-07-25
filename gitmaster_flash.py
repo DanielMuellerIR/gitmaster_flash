@@ -64,7 +64,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.14.0-branch"   # Experiment; main steht bei 0.13.2
+__version__ = "0.14.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -3482,10 +3482,19 @@ def init_colors():
 # Demo-Sandbox (für `--demo`, Screenshots und risikofreies Ausprobieren)
 # ---------------------------------------------------------------------------
 
+# Feste Zeitstempel für alle Demo-Commits. Erst dadurch sind die Commit-IDs auf jedem
+# Rechner und in jedem Lauf dieselben — und damit auch die Befehle, die die Sandbox in
+# das Protokoll schreibt (`git merge --ff-only -- <id>`). Ohne das wäre der Bild-Check
+# `docs/make-screens.py --check` nicht zu gewinnen: jede Sekunde eine andere ID.
+DEMO_DATE = "2026-01-02T10:00:00+00:00"
+
+
 def _dgit(repo: Path, *args: str) -> None:
     """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen)."""
     subprocess.run(["git", "-C", str(repo), *args], check=True,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True,
+                   env={**os.environ, "GIT_AUTHOR_DATE": DEMO_DATE,
+                        "GIT_COMMITTER_DATE": DEMO_DATE})
 
 
 def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]:
