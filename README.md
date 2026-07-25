@@ -271,6 +271,10 @@ with spaces or shell metacharacters):
 gitmaster_flash/install.sh
 ```
 
+A line that already sources the same wrapper is accepted in any spelling
+(`~/…`, `$HOME/…`, quoted or not); only a genuinely different path stops the
+installer and asks you to sort it out by hand.
+
 Or add the line manually:
 
 ```sh

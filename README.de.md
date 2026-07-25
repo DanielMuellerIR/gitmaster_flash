@@ -283,6 +283,10 @@ nichts, auch bei Clone-Pfaden mit Leerzeichen oder Shell-Metazeichen):
 gitmaster_flash/install.sh
 ```
 
+Eine bereits vorhandene Zeile auf denselben Wrapper wird in jeder Schreibweise
+erkannt (`~/…`, `$HOME/…`, mit oder ohne Quotes); nur ein wirklich anderer Pfad
+hält die Installation an und verlangt Handarbeit.
+
 Oder die Zeile von Hand eintragen:
 
 ```sh

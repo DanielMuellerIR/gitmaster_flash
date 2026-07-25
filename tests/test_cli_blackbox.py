@@ -7,6 +7,8 @@ nicht sehen: Remote-JSON, Remote-Exit-Code und lokale Diff-Auswertung gemeinsam.
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -181,6 +183,70 @@ exit "$rc"
                 result = self._run_gmf(mode)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("unreadable JSON", result.stderr)
+
+
+class InstallScriptTests(unittest.TestCase):
+    """install.sh gegen eine echte ~/.zshrc — Idempotenz ist hier das Thema."""
+
+    #: Der Selbsttest in install.sh startet diese Suite erneut. Die Marke bricht
+    #: die Rekursion nach genau einer Ebene ab.
+    GUARD = "GMF_INSTALL_TEST_RUNNING"
+
+    def setUp(self):
+        if os.environ.get(self.GUARD):
+            self.skipTest("läuft bereits im Selbsttest von install.sh")
+        if not shutil.which("zsh"):
+            self.skipTest("zsh nicht vorhanden")
+        self.repo = Path(__file__).resolve().parent.parent
+        self.tmp = tempfile.TemporaryDirectory()
+        # macOS: /var ist ein Symlink auf /private/var — beide Seiten auflösen.
+        self.home = Path(self.tmp.name).resolve()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _install(self):
+        env = dict(os.environ, HOME=str(self.home), ZDOTDIR=str(self.home))
+        env[self.GUARD] = "1"
+        return subprocess.run([str(self.repo / "install.sh")],
+                              capture_output=True, text=True, env=env, timeout=300)
+
+    def test_tilde_form_counts_as_already_installed(self):
+        # Genau der gemeldete Fall: die Zeile meint dasselbe, steht nur anders da.
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text(f"source ~/{self.repo.name}/gmf.zsh\n")
+        # Der Pfad muss unter dem Test-HOME auch wirklich dorthin zeigen.
+        (self.home / self.repo.name).symlink_to(self.repo)
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Already installed", result.stdout)
+        self.assertEqual(zshrc.read_text(), f"source ~/{self.repo.name}/gmf.zsh\n")
+
+    def _resolve(self, line: str) -> str:
+        """Nur die Pfadauflösung aus install.sh laden — ohne den langen Selbsttest."""
+        script = (
+            'source <(sed -n "/^resolve_sourced_path()/,/^}/p" %s)\n'
+            'resolve_sourced_path "$1"\n' % shlex.quote(str(self.repo / "install.sh"))
+        )
+        result = subprocess.run(["zsh", "-c", script, "zsh", line],
+                                capture_output=True, text=True,
+                                env=dict(os.environ, HOME=str(self.home)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_the_same_path_is_recognized_in_every_spelling(self):
+        target = f"{self.home}/git/gitmaster_flash/gmf.zsh"
+        for line in (f"source {target}",
+                     "source ~/git/gitmaster_flash/gmf.zsh",
+                     "source $HOME/git/gitmaster_flash/gmf.zsh",
+                     f'source -- "{target}"',
+                     f"source '{target}'",
+                     "[[ -f ~/git/gitmaster_flash/gmf.zsh ]] && "
+                     "source ~/git/gitmaster_flash/gmf.zsh"):
+            with self.subTest(line):
+                self.assertEqual(self._resolve(line), target)
+        # Ein wirklich anderes Repo bleibt unterscheidbar.
+        self.assertNotEqual(self._resolve("source ~/git/woanders/gmf.zsh"), target)
 
 
 if __name__ == "__main__":
