@@ -6,6 +6,8 @@ gegen ein echtes, temporär angelegtes Git-Repo.
 
 import json
 import importlib.util
+import curses
+import math
 import os
 import re
 import shlex
@@ -1323,6 +1325,188 @@ class BranchAndDiffTests(unittest.TestCase):
             ui.action_open_app("E")
         run.assert_not_called()
         self.assertIn("SSH", ui.message)
+
+
+class CompactViewTests(unittest.TestCase):
+    """Kompakte Übersicht: Layout, Marken und Navigation — alles headless."""
+
+    @staticmethod
+    def _status(rel, **kw):
+        kw.setdefault("remote_state", "ok")
+        return RepoStatus(path=Path("/tmp") / rel, rel=rel, **kw)
+
+    def test_marks_show_the_most_urgent_state(self):
+        cases = [
+            (self._status("a", error="kaputt"), "✘"),
+            (self._status("b", conflicts=1), "⚠"),
+            (self._status("c", modified=2), "●"),
+            (self._status("d", stashes=["stash@{0} x"]), "⚑"),
+            (self._status("e", ahead=2), "↑2"),
+            (self._status("f", behind=1), "↓1"),
+            (self._status("g", remote_state="no-remote"), "?"),
+            (self._status("h"), "✔"),
+        ]
+        for st, expected in cases:
+            with self.subTest(expected):
+                self.assertEqual(gmf_module.compact_mark(st)[0], expected)
+        # Ein toter Remote schlägt auch ohne st.error durch.
+        st = self._status("i", remotes=[RemoteStatus(name="github", fetch_failed=True)])
+        self.assertEqual(gmf_module.compact_mark(st)[0], "✘")
+
+    def test_layout_keeps_three_columns_despite_one_long_name(self):
+        rows, columns, width = gmf_module.compact_layout(24, 110, 20, 40)
+        self.assertGreaterEqual(columns, 3)
+        self.assertLessEqual(width * columns, 110)
+        self.assertEqual(rows, math.ceil(24 / columns))
+        # Schmales Fenster: lieber weniger Spalten als unlesbare Namen.
+        _, narrow_columns, narrow_width = gmf_module.compact_layout(24, 40, 20, 40)
+        self.assertGreaterEqual(narrow_width, gmf_module.COMPACT_MIN_WIDTH)
+        self.assertLessEqual(narrow_columns, 3)
+
+    def test_layout_fills_columns_like_ls(self):
+        rows, columns, _ = gmf_module.compact_layout(9, 68, 10, 20)
+        self.assertEqual((rows, columns), (3, 3))
+        # Erste Spalte = erste drei Einträge (spaltenweise gefüllt).
+        self.assertEqual(gmf_module.compact_position(0, rows), (0, 0))
+        self.assertEqual(gmf_module.compact_position(2, rows), (2, 0))
+        self.assertEqual(gmf_module.compact_position(3, rows), (0, 1))
+        self.assertEqual(gmf_module.compact_position(8, rows), (2, 2))
+
+    def test_long_names_are_shortened_visibly(self):
+        self.assertEqual(gmf_module.ellipsize("kurz", 10), "kurz")
+        shortened = gmf_module.ellipsize("firefox-tabs-save-and-restore", 12)
+        self.assertEqual(cell_width(shortened), 12)
+        self.assertTrue(shortened.endswith("…"))
+
+    def _ui(self, count, keys=(), width=100, height=30):
+        class Screen:
+            def __init__(self):
+                self.keys = iter(list(keys) + [ord("q")])
+                self.lines = []
+
+            def erase(self): pass
+            def clear(self): self.lines.clear()
+            def getmaxyx(self): return (height, width)
+            def addstr(self, y, x, text, *rest): self.lines.append((y, x, text))
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+
+        ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.statuses = [self._status(f"repo-{i:02d}") for i in range(count)]
+        return ui
+
+    def test_view_switch_keeps_the_selected_repository(self):
+        ui = self._ui(24)
+        ui.view_mode = "compact"
+        ui.selected = 17
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.scr.keys = iter([ord("m"), ord("q")])
+            ui.run()
+        self.assertEqual(ui.view_mode, "detail")
+        self.assertEqual(ui.selected, 17)
+        self.assertEqual(ui.current().rel, "repo-17")
+
+    def test_left_right_move_by_one_column(self):
+        ui = self._ui(24)
+        ui.view_mode = "compact"
+        ui.selected = 0
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.scr.keys = iter([curses.KEY_RIGHT, ord("q")])
+            ui.run()
+        rows, _, _ = ui.compact_geometry(max(1, 30 - 5 - ui.log_height(30)), 100)
+        self.assertEqual(ui.selected, rows)
+        # Und zurück.
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.scr.keys = iter([curses.KEY_LEFT, ord("q")])
+            ui.run()
+        self.assertEqual(ui.selected, 0)
+
+    def test_many_repositories_start_compact(self):
+        for count, expected in ((25, "compact"), (5, "detail")):
+            with self.subTest(count=count):
+                ui = self._ui(0)
+                ui.statuses = []
+                with mock.patch("gitmaster_flash.collect_all",
+                                return_value=[self._status(f"r{i}")
+                                              for i in range(count)]), \
+                        mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                        mock.patch("gitmaster_flash.safe_addstr"):
+                    ui.reload()
+                self.assertEqual(ui.view_mode, expected)
+
+    def test_tab_moves_focus_to_the_log_and_arrows_then_scroll(self):
+        ui = self._ui(5)
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        for i in range(30):
+            gmf_module.log_command(Path("/tmp/repo"), ("status", str(i)), 0)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.scr.keys = iter([9, curses.KEY_UP, curses.KEY_UP, ord("q")])
+            ui.run()
+        self.assertEqual(ui.focus, "log")
+        self.assertEqual(ui.selected, 0)      # Auswahl blieb unberührt
+        self.assertGreater(ui.log_height(30), 3)   # im Fokus größer
+
+    def test_layout_does_not_overlap_and_fits_the_window(self):
+        """Kein Bereich darf in einen anderen hineinzeichnen (h=26, w=100)."""
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        for i in range(5):
+            gmf_module.log_command(Path("/tmp/repo"), ("status", str(i)), 0)
+        for mode in ("compact", "detail"):
+            with self.subTest(mode):
+                ui = self._ui(24, height=26, width=100)
+                ui.view_mode = mode
+                with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+                    ui.draw()
+                calls = ui.scr.lines
+                self.assertTrue(all(0 <= y < 26 for y, _, _ in calls), calls)
+                repo_ys = {y for y, _, text in calls
+                           if any(name in text for name in ("repo-0", "repo-1"))}
+                log_ys = {y for y, _, text in calls
+                          if "Befehle" in text or "Commands" in text
+                          or "git status" in text}
+                footer_ys = {y for y, _, text in calls
+                             if any(marker in text for marker in
+                                    ("M view", "M Ansicht", "A changes",
+                                     "A Änderungen", "Q quit", "Q Beenden"))}
+                self.assertTrue(repo_ys and log_ys and footer_ys, calls)
+                self.assertLess(max(repo_ys), min(log_ys))
+                self.assertLess(max(log_ys), min(footer_ys))
+                # Die drei Fußzeilen stehen ganz unten und nirgends sonst.
+                self.assertEqual(sorted(footer_ys), [23, 24, 25])
+
+    def test_compact_uses_the_leftover_height_for_the_log(self):
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        ui = self._ui(6, height=30, width=100)      # 6 Repos = 2 Zeilen bei 3 Spalten
+        ui.view_mode = "compact"
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        log_header = next(y for y, _, text in ui.scr.lines
+                          if "Befehle" in text or "Commands" in text)
+        # Der Protokollkopf rückt direkt unter die kurze Liste, statt unten zu kleben.
+        self.assertLessEqual(log_header, 5)
+
+    def test_log_pane_is_always_drawn_with_at_least_three_lines(self):
+        ui = self._ui(3)
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        gmf_module.log_command(Path("/tmp/repo"), ("remote", "remove", "github"), 0)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        drawn = "\n".join(text for _, _, text in ui.scr.lines)
+        self.assertIn("git remote remove github", drawn)
+        self.assertEqual(ui.log_height(30), 3)
+        self.assertEqual(ui.log_height(12), 0)     # winziges Fenster: Repos gehen vor
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

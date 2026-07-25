@@ -50,6 +50,7 @@ import concurrent.futures
 import curses
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -63,7 +64,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.13.1"
+__version__ = "0.14.0-branch"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -83,6 +84,8 @@ DEFAULT_CONFIG = {
     "skip_dirs": ["node_modules", "Library", ".Trash", "venv", ".venv", "__pycache__"],
     # UI-Sprache: "en", "de" oder null = automatisch aus $LANG (Fallback en).
     "lang": None,
+    # Ab so vielen Repos startet die kompakte, mehrspaltige Ansicht (M schaltet um).
+    "compact_from": 20,
     # Timeout in Sekunden für einzelne git-Aufrufe (fetch darf länger).
     "git_timeout": 10,
     "fetch_timeout": 30,
@@ -182,12 +185,18 @@ TR = {
     "diff_failed": {"en": "Diff for {p} failed: {e}",
                     "de": "Diff für {p} fehlgeschlagen: {e}"},
     # Footer
-    "f1": {"en": " ↑/↓ select · → expand · ← collapse · ⏎ cd & quit · P sync push · L sync pull",
-           "de": " ↑/↓ wählen · → aufklappen · ← zuklappen · ⏎ cd & Exit · P Sync-Push · L Sync-Pull"},
-    "f2": {"en": " {apps} · A changes · C commit · U stash pop · R fetch all · G GitHub push",
-           "de": " {apps} · A Änderungen · C Commit · U Stash pop · R fetch all · G GitHub-Push"},
-    "f3": {"en": " Q quit · S stash preview · D stash drop · H Git help · I repo info",
-           "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen · H Git-Hilfe · I Repo-Info"},
+    "f1": {"en": " ↑/↓/←/→ select · ⏎ cd & quit · M view · Tab log · I info · H help",
+           "de": " ↑/↓/←/→ wählen · ⏎ cd & Exit · M Ansicht · Tab Log · I Info · H Hilfe"},
+    "f2": {"en": " {apps} · A changes · C commit · U stash pop · S stash view · D stash drop",
+           "de": " {apps} · A Änderungen · C Commit · U Stash pop · S Stash-Blick · D Stash weg"},
+    "f3": {"en": " R fetch all · P sync push · L sync pull · G GitHub push · Q quit",
+           "de": " R fetch all · P Sync-Push · L Sync-Pull · G GitHub-Push · Q Beenden"},
+    # Kompakte Ansicht und Protokollbereich
+    "compact_more": {"en": "columns {a}-{b}/{n}", "de": "Spalten {a}-{b}/{n}"},
+    "log_pane_title": {"en": " Commands", "de": " Befehle"},
+    "log_pane_hint": {"en": "  (Tab to scroll)", "de": "  (Tab zum Scrollen)"},
+    "log_pane_focus": {"en": "  ↑/↓ scroll · Tab back to the list",
+                       "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
@@ -2084,6 +2093,86 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool) ->
     return 1 if lines else 0
 
 
+# ---------------------------------------------------------------------------
+# Kompakte Übersicht (mehrspaltig, wie `ls`)
+# ---------------------------------------------------------------------------
+# Bei 60+ Repos ist die einzeilige Detailansicht vor allem eines: lang. Die
+# kompakte Ansicht nutzt die Breite statt der Höhe — pro Repo nur Name und ein
+# Symbol, dafür drei bis vier Spalten nebeneinander und der ganze Bestand auf
+# einen Blick. Die Details holt man sich mit M (umschalten) oder I zurück.
+
+def compact_mark(st: RepoStatus) -> tuple[str, int]:
+    """Kürzestmögliche Zustandsmarke eines Repos plus ihre Farbe.
+
+    Reihenfolge nach Dringlichkeit: kaputter Zugriff, Konflikt, offene Änderungen,
+    Stash, Abstand zum Sync-Remote — und ✔, wenn nichts davon zutrifft.
+    """
+    if st.error or any(remote.fetch_failed for remote in st.remotes):
+        return "✘", C_RED
+    if st.conflicts:
+        return "⚠", C_RED
+    if st.modified or st.deleted or st.untracked:
+        return "●", C_RED
+    if st.stashes:
+        return "⚑", C_YELLOW
+    if st.ahead and st.behind:
+        # Divergenz bekommt EIN Zeichen: die genauen Zahlen stehen im Detail und
+        # würden die Markenspalte für alle anderen unnötig verbreitern.
+        return "⇅", C_RED
+    if st.ahead or st.behind:
+        return (f"↑{st.ahead}" if st.ahead else f"↓{st.behind}"), (
+            C_RED if st.behind else C_YELLOW)
+    if st.remote_state in ("no-remote", "no-branch", "detached"):
+        return "?", C_YELLOW
+    return "✔", C_GREEN
+
+
+def compact_cells(statuses: list[RepoStatus]) -> list[tuple[str, str, int]]:
+    """Je Repo (Marke, Name, Farbe) für die kompakte Ansicht."""
+    cells = []
+    for st in statuses:
+        mark, pair = compact_mark(st)
+        cells.append((mark, st.rel, pair))
+    return cells
+
+
+COMPACT_TARGET_COLUMNS = 3      # so viele Spalten sollen mindestens entstehen
+COMPACT_MIN_WIDTH = 14          # darunter wird ein Name unlesbar
+COMPACT_MARK_WIDTH = 3          # Platz für "↑12"; Divergenz ist ⇅ (ein Zeichen)
+
+
+def compact_layout(count: int, width: int, height: int,
+                   cell_width_hint: int) -> tuple[int, int, int]:
+    """Spaltenaufteilung für `count` Einträge: (Zeilen, Spalten, Spaltenbreite).
+
+    Gefüllt wird spaltenweise wie bei `ls`: die ersten `rows` Einträge stehen
+    untereinander in der ersten Spalte. Dadurch bleibt die Sortierung (dringend
+    zuerst) beim Lesen von oben links erhalten. Ein einzelner sehr langer
+    Repo-Name darf die Spalten nicht auf zwei zusammenschrumpfen — deshalb ist die
+    Breite gedeckelt und lange Namen werden gekürzt.
+    """
+    height = max(1, height)
+    budget = max(COMPACT_MIN_WIDTH, (width - 1) // COMPACT_TARGET_COLUMNS - 2)
+    column_width = max(COMPACT_MIN_WIDTH, min(cell_width_hint, budget))
+    columns = max(1, (width - 1) // (column_width + 2))
+    rows = max(1, math.ceil(count / columns)) if count else 1
+    # Passt nicht alles auf den Schirm, bleibt die Höhe der Anschlag und es wird
+    # seitlich gescrollt — deshalb hier bewusst nicht die Zeilen aufblähen.
+    return min(rows, height), columns, column_width
+
+
+def ellipsize(text: str, width: int) -> str:
+    """Text auf `width` Zellen kürzen und die Kürzung mit „…" sichtbar machen."""
+    if cell_width(text) <= width or width <= 1:
+        return truncate_cells(text, width)
+    return truncate_cells(text, width - 1) + "…"
+
+
+def compact_position(index: int, rows: int) -> tuple[int, int]:
+    """Zeile und Spalte eines Eintrags in der spaltenweise gefüllten Anordnung."""
+    return index % rows, index // rows
+
+
 def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
@@ -2210,6 +2299,12 @@ class TUI:
         self.offset = 0            # Scroll-Position
         self.expanded: set[str] = set()   # rel-Pfade der aufgeklappten Repos
         self.message = ""          # Feedback-Zeile über dem Footer
+        # "detail" = eine Zeile je Repo mit allem; "compact" = mehrspaltige
+        # Kurzfassung. Der Startmodus richtet sich nach der Repo-Zahl (s. reload).
+        self.view_mode = "detail"
+        self.focus = "repos"       # "repos" oder "log" (Tab wechselt)
+        self.log_top = 0           # Scroll-Position im Befehlsprotokoll
+        self.compact_col = 0       # erste sichtbare Spalte der Kompaktansicht
 
     # -- Datenbeschaffung ---------------------------------------------------
 
@@ -2223,8 +2318,16 @@ class TUI:
             self.scr.refresh()
 
         progress(0, 0)
+        first_load = not self.statuses
+        # Die Ladeanzeige ist breiter als eine kurze Kompaktzeile. curses schickt
+        # nur Differenzen, deshalb hier ein vollständiges Neuzeichnen erzwingen.
+        self.scr.clear()
         self.statuses = collect_all(self.root, self.cfg, fetch, progress)
         self.selected = min(self.selected, max(0, len(self.statuses) - 1))
+        # Viele Repos: kompakt starten, weil die Detailansicht dann seitenweise
+        # gescrollt werden müsste. Eine spätere Umschaltung bleibt erhalten.
+        if first_load and len(self.statuses) > self.cfg["compact_from"]:
+            self.view_mode = "compact"
 
     def refresh_one(self, st: RepoStatus):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten."""
@@ -2320,17 +2423,66 @@ class TUI:
                 f"{len(self.statuses)} {t('hdr_repos')} · {tail}")
         safe_addstr(self.scr, 0, 0, head.ljust(w - 1), curses.A_BOLD)
 
+        # Höhe aufteilen: Kopf, Repo-Bereich, Protokoll, Meldung, 3 Footerzeilen.
+        available = max(1, h - 5)
+        log_h = self.log_height(h)
+        body_h = max(1, available - log_h)
+        if self.view_mode == "compact":
+            # Die kompakte Liste braucht nur so viele Zeilen, wie ihre Spalten hoch
+            # sind — der frei bleibende Platz darunter gehört dem Protokoll.
+            rows, _, _ = self.compact_geometry(body_h, w)
+            body_h = min(body_h, rows)
+            log_h = max(log_h, available - body_h) if log_h else 0
+            self.draw_compact(1, body_h, w)
+        else:
+            self.draw_detail(1, body_h, w)
+        if log_h:
+            self.draw_log(1 + body_h, min(log_h, available - body_h), w)
+
+        safe_addstr(self.scr, h - 4, 1, self.message, curses.color_pair(C_YELLOW))
+        # Footer dreizeilig, damit auch in schmalen Fenstern nichts abgeschnitten wird.
+        # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
+        app_hints = " · ".join(f"{key.upper()} {app['name']}"
+                               for key, app in self.cfg["apps"].items())
+        footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
+        safe_addstr(self.scr, h - 3, 0, t("f1").ljust(w - 1), footer_dim)
+        safe_addstr(self.scr, h - 2, 0, t("f2", apps=app_hints).ljust(w - 1), footer_dim)
+        safe_addstr(self.scr, h - 1, 0, t("f3").ljust(w - 1), footer_dim)
+        self.scr.refresh()
+
+    def compact_step(self, direction: int) -> int:
+        """Auswahl in der kompakten Ansicht um eine Spalte verschieben."""
+        h, w = self.scr.getmaxyx()
+        body_h = max(1, h - 5 - self.log_height(h))
+        rows, _, _ = self.compact_geometry(body_h, w)
+        target = self.selected + direction * rows
+        if 0 <= target < len(self.statuses):
+            return target
+        # Am Rand: auf den ersten/letzten Eintrag springen statt stecken zu bleiben.
+        return 0 if direction < 0 else len(self.statuses) - 1
+
+    def log_height(self, h: int) -> int:
+        """Wie viele Zeilen das Protokoll bekommt.
+
+        Drei Zeilen sind das Minimum, damit man die letzten Befehle immer im Blick
+        hat; im Fokus (Tab) wächst der Bereich auf ein Drittel des Fensters, um
+        darin lesen und scrollen zu können.
+        """
+        if h < 14:      # sehr kleines Fenster: Repos gehen vor
+            return 0
+        return max(3, h // 3) if self.focus == "log" else 3
+
+    def draw_detail(self, top: int, body_h: int, w: int) -> None:
+        """Ausführliche Ansicht: eine Zeile je Repo, aufklappbar."""
         rows = self.build_rows()
         # Zeile des ausgewählten Repos finden, damit sie sichtbar bleibt
         sel_row = next((i for i, r in enumerate(rows)
                         if r[0] == "repo" and r[1] == self.selected), 0)
-        body_h = h - 5  # Kopf + Feedback + 3 Footerzeilen
         if sel_row < self.offset:
             self.offset = sel_row
         if sel_row >= self.offset + body_h:
             self.offset = sel_row - body_h + 1
-
-        y = 1
+        y = top
         for row in rows[self.offset:self.offset + body_h]:
             kind = row[0]
             if kind == "repo":
@@ -2348,16 +2500,71 @@ class TUI:
                 safe_addstr(self.scr, y, 5, t("no_changes"), curses.color_pair(C_DIM))
             y += 1
 
-        safe_addstr(self.scr, h - 4, 1, self.message, curses.color_pair(C_YELLOW))
-        # Footer dreizeilig, damit auch in schmalen Fenstern nichts abgeschnitten wird.
-        # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
-        app_hints = " · ".join(f"{key.upper()} {app['name']}"
-                               for key, app in self.cfg["apps"].items())
-        footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
-        safe_addstr(self.scr, h - 3, 0, t("f1").ljust(w - 1), footer_dim)
-        safe_addstr(self.scr, h - 2, 0, t("f2", apps=app_hints).ljust(w - 1), footer_dim)
-        safe_addstr(self.scr, h - 1, 0, t("f3").ljust(w - 1), footer_dim)
-        self.scr.refresh()
+    def compact_geometry(self, body_h: int, w: int) -> tuple[int, int, int]:
+        """Zeilen, Spalten und Spaltenbreite der kompakten Ansicht."""
+        cells = compact_cells(self.statuses)
+        longest = max((COMPACT_MARK_WIDTH + 1 + cell_width(name)
+                       for _, name, _ in cells), default=12)
+        return compact_layout(len(cells), w, body_h, longest + 1)
+
+    def draw_compact(self, top: int, body_h: int, w: int) -> None:
+        """Kompakte Ansicht: Marke + Name, spaltenweise wie `ls`."""
+        cells = compact_cells(self.statuses)
+        rows, columns, column_width = self.compact_geometry(body_h, w)
+        # Zeilen zuerst leeren: sonst bleiben rechts Reste des vorigen Bildes
+        # stehen (die Ladeanzeige ist breiter als eine kurze Repo-Spalte).
+        for row in range(rows):
+            safe_addstr(self.scr, top + row, 0, " " * max(0, w - 1))
+        sel_row, sel_col = compact_position(self.selected, rows)
+        # Immer so scrollen, dass die Auswahl sichtbar bleibt.
+        if sel_col < self.compact_col:
+            self.compact_col = sel_col
+        if sel_col >= self.compact_col + columns:
+            self.compact_col = sel_col - columns + 1
+        total_columns = max(1, math.ceil(len(cells) / rows)) if cells else 1
+        self.compact_col = max(0, min(self.compact_col, max(0, total_columns - columns)))
+        for index, (mark, name, pair) in enumerate(cells):
+            row, column = compact_position(index, rows)
+            if not (self.compact_col <= column < self.compact_col + columns):
+                continue
+            x = 1 + (column - self.compact_col) * (column_width + 2)
+            # Feste Markenspalte, damit die Namen aller Zeilen fluchten — ✔ und ⚑
+            # belegen zwei Zellen, ● nur eine, "↑2↓1" gleich vier.
+            name_width = max(1, column_width - COMPACT_MARK_WIDTH - 1)
+            text = (pad_cells(mark, COMPACT_MARK_WIDTH) + " "
+                    + pad_cells(ellipsize(name, name_width), name_width))
+            attr = curses.color_pair(pair)
+            if index == self.selected:
+                attr |= curses.A_REVERSE
+            safe_addstr(self.scr, top + row, x, text, attr)
+        if total_columns > columns:
+            # Ohne diesen Hinweis wirkt die Liste abgeschnitten statt scrollbar.
+            safe_addstr(self.scr, top + body_h - 1, max(1, w - 22),
+                        t("compact_more", a=self.compact_col + 1,
+                          b=min(total_columns, self.compact_col + columns),
+                          n=total_columns),
+                        curses.color_pair(C_DIM))
+
+    def draw_log(self, top: int, log_h: int, w: int) -> None:
+        """Befehlsprotokoll unter der Liste — immer sichtbar, mit Tab scrollbar."""
+        focused = self.focus == "log"
+        title = t("log_pane_title") + (t("log_pane_focus") if focused
+                                       else t("log_pane_hint"))
+        safe_addstr(self.scr, top, 0, pad_cells(title, w - 1),
+                    curses.color_pair(C_DIM)
+                    | (curses.A_REVERSE if focused else curses.A_BOLD))
+        visible = log_h - 1
+        entries = COMMAND_LOG or [t("cmdlog_empty")]
+        max_top = max(0, len(entries) - visible)
+        # Ohne Fokus immer am Ende bleiben: die letzte Aktion ist die interessante.
+        self.log_top = max_top if not focused else max(0, min(self.log_top, max_top))
+        for offset, entry in enumerate(entries[self.log_top:self.log_top + visible]):
+            pair = C_DIM
+            if entry.startswith("✘"):
+                pair = C_RED
+            elif entry.startswith("⊘"):
+                pair = C_YELLOW
+            safe_addstr(self.scr, top + 1 + offset, 1, entry, curses.color_pair(pair))
 
     # -- Dialog-Helfer ------------------------------------------------------
 
@@ -3150,6 +3357,26 @@ class TUI:
             ch = self.scr.getch()
             self.message = ""
             st = self.current()
+            # Tab schaltet den Fokus zwischen Repo-Liste und Protokoll um; im
+            # Protokoll bedeuten die Cursortasten dann scrollen statt auswählen.
+            if ch == 9:
+                self.focus = "log" if self.focus == "repos" else "repos"
+                continue
+            if self.focus == "log":
+                if ch == curses.KEY_UP:
+                    self.log_top = max(0, self.log_top - 1)
+                    continue
+                if ch == curses.KEY_DOWN:
+                    self.log_top += 1
+                    continue
+                if ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+                    step = max(1, self.log_height(self.scr.getmaxyx()[0]) - 1)
+                    self.log_top = max(0, self.log_top
+                                       + (step if ch == curses.KEY_NPAGE else -step))
+                    continue
+                if ch == 27:
+                    self.focus = "repos"
+                    continue
             # Cursor-/Sondertasten zuerst; Buchstaben danach case-insensitiv.
             if ch == curses.KEY_UP:
                 self.selected = max(0, self.selected - 1)
@@ -3158,10 +3385,17 @@ class TUI:
                 self.selected = min(len(self.statuses) - 1, self.selected + 1)
                 continue
             elif ch == curses.KEY_RIGHT and st:
-                self.expanded.add(st.rel)
+                if self.view_mode == "compact":
+                    # Kompakt: eine Spalte weiter statt aufklappen.
+                    self.selected = self.compact_step(+1)
+                else:
+                    self.expanded.add(st.rel)
                 continue
             elif ch == curses.KEY_LEFT and st:
-                self.expanded.discard(st.rel)
+                if self.view_mode == "compact":
+                    self.selected = self.compact_step(-1)
+                else:
+                    self.expanded.discard(st.rel)
                 continue
             elif ch in (10, 13, curses.KEY_ENTER):
                 if self.action_cd_and_quit():
@@ -3195,6 +3429,10 @@ class TUI:
                 self.action_repo_info()
             elif key == "A":
                 self.action_file_changes()
+            elif key == "M":
+                # Ansicht wechseln — die Auswahl bleibt auf demselben Repo, damit
+                # man in der Übersicht suchen und im Detail weiterarbeiten kann.
+                self.view_mode = "detail" if self.view_mode == "compact" else "compact"
             elif key == "S":
                 self.action_stash_show()
             elif key == "D":

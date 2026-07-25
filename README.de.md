@@ -55,6 +55,47 @@ Nichts wird gepusht, verworfen oder gelöscht, ohne dass vorher eine Rückfrage 
 genauen Befehl nennt. Die Details stehen weiter unten; zum Loslegen braucht man
 sie nicht.
 
+## Zwei Ansichten (`M`)
+
+Ab gut 20 Repos wird die Detailansicht zur langen Scrollstrecke, deshalb startet
+gmf in der **Kompaktansicht**: pro Repo eine Marke und der Name, spaltenweise
+gefüllt wie bei `ls` — sie nutzt die Breite des Fensters statt seiner Höhe.
+
+![Kompaktansicht: jedes Repo als Marke und Name, mehrspaltig](docs/compact.svg)
+
+| Marke | Bedeutung |
+|---|---|
+| ✔ | sauber und synchron |
+| ● | geänderte, gelöschte oder unversionierte Dateien |
+| ⚠ | Merge-Konflikt |
+| ⚑ | Stash vorhanden |
+| ↑n / ↓n | vor/zurück gegenüber dem Sync-Remote |
+| ⇅ | divergiert (gleichzeitig vor und zurück) |
+| ✘ | letzter Fetch eines Remotes fehlgeschlagen |
+| ? | kein Sync-Remote, kein Remote-Branch oder detached HEAD |
+
+`M` schaltet zwischen kompakt und Detail um und behält das gewählte Repo — man
+sucht es also in der breiten Übersicht und arbeitet dann im Detail daran weiter.
+`←`/`→` springen eine Spalte weiter, womit 60 Repos in wenigen Tastendrücken
+durchquert sind. Aufklappen von Dateien und Stashes bleibt der Detailansicht
+vorbehalten.
+
+## Befehlsprotokoll, immer sichtbar
+
+Die letzten Befehle stehen unter der Liste — normal drei Zeilen. `Tab` setzt den
+Fokus dorthin, der Bereich wächst auf ein Drittel des Fensters und `↑`/`↓`
+scrollen durch die Sitzung; `Tab` führt zurück zur Liste. Abgebrochene Dialoge
+erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit das Protokoll nie
+etwas als gelaufen ausweist, das gar nicht lief.
+
+`H` zeigt dasselbe Protokoll vollständig, über den Sicherheitsregeln. Die reinen
+Lesebefehle des Scans stehen bewusst nicht drin — sie würden die interessanten
+Zeilen zumüllen. Argumente sind so gequotet, wie eine Shell sie braucht, eine
+Zeile lässt sich also direkt übernehmen. Und destruktive Dialoge zeigen den
+Befehl vor der Bestätigung: Man sieht `git remote remove github` beim
+Entscheiden, nicht erst danach.
+
+
 ## Was eine Zeile verrät
 
 - **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
@@ -81,6 +122,8 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 |---|---|
 | ↑ / ↓ | Repo auswählen |
 | → / ← | auf-/zuklappen (Dateien mit M/D/U/C, Stashes) |
+| M | zwischen Kompakt- und Detailansicht umschalten |
+| Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
 | A | Änderungen ansehen: Datei wählen, Diff lesen |
@@ -237,32 +280,6 @@ Lokale Branches:
    Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
    werden.
 
-## Befehlsprotokoll (`H`)
-
-gmf versteckt die Git-Syntax, nicht Git selbst. Jede ausgelöste Aktion (`C`, `P`,
-`L`, `G`, `U`, `D`, `T`, `X`) wird als der Befehl protokolliert, der wirklich
-gelaufen ist; `H` zeigt das Protokoll der Sitzung über den Sicherheitsregeln. Die
-reinen Lesebefehle des Repo-Scans stehen bewusst nicht drin — sie würden die
-interessanten Zeilen zumüllen.
-
-```text
- Sichere Git-Aktionen & Befehlsprotokoll
-In dieser Sitzung ausgeführte Befehle
-
-  ✔ api-gateway: git add -- README.md server.py
-  ✔ api-gateway: git commit -m 'feat: add health endpoint'
-  ✔ api-gateway: git push --atomic --no-tags origin a1b2c3d…:refs/heads/main
-  ✘ bootcamp-uebung: git ls-remote --heads -- github   (Exit 128)
-  ✔ bootcamp-uebung: git remote remove github
-
-  Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar.
-```
-
-Argumente sind so gequotet, wie eine Shell sie braucht — eine Zeile lässt sich
-also direkt übernehmen. Destruktive Dialoge zeigen den Befehl zusätzlich vor der
-Bestätigung: Man sieht `git remote remove github` beim Entscheiden, nicht erst
-danach.
-
 ## Installation
 
 Vorausgesetzt werden Python 3 und ein Terminal. Sonst nichts.
@@ -385,6 +402,8 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   einsortiert.
 - `skip_dirs` — Ordner, die der Scan gar nicht erst betritt.
 - `lang` — `"en"`, `"de"` oder `null` für automatisch nach `$LANG`.
+- `compact_from` — ab so vielen Repos startet gmf in der Kompaktansicht
+  (Standard 20; `M` schaltet jederzeit um).
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
 
 ## Sicheres Push und Pull

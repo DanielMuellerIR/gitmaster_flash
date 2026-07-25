@@ -52,6 +52,44 @@ Three keys carry you through the first session:
 Nothing is ever pushed, dropped or deleted without a confirmation that names the
 exact command first. Details are further down; you do not need them to start.
 
+## Two views (`M`)
+
+With more than 20 repositories the detail view becomes a long scroll, so gmf
+starts in the **compact view**: one mark plus the name per repository, filled
+column by column like `ls`, using the width of the window instead of its height.
+
+![Compact view: every repository as a mark plus its name, in columns](docs/compact.svg)
+
+| Mark | Meaning |
+|---|---|
+| ✔ | clean and in sync |
+| ● | modified, deleted or untracked files |
+| ⚠ | merge conflict |
+| ⚑ | stash present |
+| ↑n / ↓n | ahead of / behind the sync remote |
+| ⇅ | diverged (both ahead and behind) |
+| ✘ | last fetch failed for a remote |
+| ? | no sync remote, no remote branch, or detached HEAD |
+
+`M` switches between compact and detail view and keeps the selected repository,
+so you can find a repository in the wide overview and then work on it in detail.
+`←`/`→` move one column at a time, which crosses 60 repositories in a few
+keystrokes. Expanding files and stashes stays in the detail view.
+
+## Command log, always visible
+
+The last commands stay below the list — three lines by default. `Tab` moves the
+focus there, the pane grows to a third of the window, and `↑`/`↓` scroll through
+the session. `Tab` again returns to the list. Cancelled dialogs appear as
+`⊘ … (not run — cancelled)`, so the log never suggests something ran that did not.
+
+`H` shows the same log in full, above the safety rules. Read-only scan commands
+are deliberately left out — they would bury the interesting lines. Arguments are
+quoted the way a shell needs them, so a line can be typed or pasted as-is, and
+destructive dialogs show the command before you confirm it: you see
+`git remote remove github` while deciding, not afterwards.
+
+
 ## What a line tells you
 
 - **remote names are always visible** — every line ends with all configured
@@ -77,6 +115,8 @@ memorize. Case does not matter — `f` works like `F`.
 |---|---|
 | ↑ / ↓ | select a repository |
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
+| M | switch between compact and detail view |
+| Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
 | A | look at the changes: pick a file, see its diff |
@@ -227,30 +267,6 @@ Local branches:
    but excluded work, stays intact. Optionally the commit is pushed through the same
    guarded private sync path as `P` afterwards.
 
-## Command log (`H`)
-
-gmf hides Git's syntax, not Git itself. Every action you trigger (`C`, `P`, `L`,
-`G`, `U`, `D`, `T`, `X`) is recorded as the real command it ran, and `H` lists the
-session's log above the safety rules. Read-only scan commands are deliberately
-left out — they would bury the interesting lines.
-
-```text
- Safe Git actions & command log
-Commands this session ran
-
-  ✔ api-gateway: git add -- README.md server.py
-  ✔ api-gateway: git commit -m 'feat: add health endpoint'
-  ✔ api-gateway: git push --atomic --no-tags origin a1b2c3d…:refs/heads/main
-  ✘ bootcamp-exercise: git ls-remote --heads -- github   (Exit 128)
-  ✔ bootcamp-exercise: git remote remove github
-
-  Every line is a real Git command; you can run it in a terminal yourself.
-```
-
-Arguments are quoted the way a shell needs them, so a line can be typed or pasted
-as-is. Destructive dialogs additionally show the command before you confirm it —
-so you see `git remote remove github` while deciding, not afterwards.
-
 ## Installation
 
 Requires Python 3 and a terminal. Nothing else.
@@ -370,6 +386,8 @@ starting the UI, so a pipe does the sensible thing.
   recognized from its URL and sorted last.
 - `skip_dirs` — directories the scan does not descend into.
 - `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
+- `compact_from` — from this many repositories on, gmf starts in the compact
+  view (default 20; `M` switches at any time).
 - `git_timeout` / `fetch_timeout` — seconds per git call.
 
 ## Safe push and pull

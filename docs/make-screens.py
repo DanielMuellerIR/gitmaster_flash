@@ -344,8 +344,13 @@ def to_svg(grid: list, title: str) -> str:
 # needs far more terminal-state reconstruction than the overview. The renderer does
 # account for the wide symbols used here, but deliberately remains a small replay tool
 # rather than a complete terminal emulator.
+# Die Demo-Sandbox hat mehr Repos als `compact_from`, startet also kompakt. Für das
+# Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein.
 SCREENS = [
-    ("overview.svg", [], b"", "gitmaster_flash overview — problem repos sorted to the top"),
+    ("compact.svg", [], b"",
+     "gitmaster_flash compact view — the whole collection at a glance"),
+    ("overview.svg", [], b"m",
+     "gitmaster_flash detail view — problem repos sorted to the top"),
 ]
 
 
