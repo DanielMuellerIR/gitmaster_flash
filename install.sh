@@ -34,10 +34,34 @@ wrapper_path="$repo_dir/gmf.zsh"
 quoted_wrapper="${(qqq)wrapper_path}"
 source_line="source -- $quoted_wrapper"
 
+# Denselben Pfad kann man verschieden schreiben: `~/git/...`, `$HOME/git/...`,
+# mit oder ohne Quotes. Ein reiner Textvergleich hielte das für ein anderes Repo
+# und verlangte grundlos Handarbeit — deshalb wird der Pfad aus der bestehenden
+# Zeile herausgelöst und aufgelöst verglichen. Bewusst OHNE eval: die .zshrc ist
+# hier Datei-Inhalt, kein Code, den dieses Skript ausführen darf.
+resolve_sourced_path() {
+  # extended_glob nur hier: `##` steht dann für "ein oder mehr" (Leerzeichen).
+  setopt local_options extended_glob
+  local line="$1" path
+  path="${line#*source}"           # alles nach dem ersten "source"
+  path="${path##[[:space:]]##}"
+  path="${path#-- }"
+  path="${path##[[:space:]]##}"
+  path="${path%%[[:space:]]##}"
+  path="${path#[\"\']}"            # umschließende Quotes weg
+  path="${path%[\"\']}"
+  path="${path//\$HOME/$HOME}"
+  path="${path//\$\{HOME\}/$HOME}"
+  [[ "$path" == "~"* ]] && path="$HOME${path#\~}"
+  print -r -- "${path:A}"
+}
+
 if [[ -f "$zshrc" ]] && grep -qF "gmf.zsh" -- "$zshrc"; then
   existing="$(grep -F "gmf.zsh" -- "$zshrc" | head -1)"
   if [[ "$existing" == "$source_line" ]]; then
     print "Already installed: $zshrc sources gmf.zsh — nothing to do."
+  elif [[ "$(resolve_sourced_path "$existing")" == "${wrapper_path:A}" ]]; then
+    print "Already installed: $zshrc sources this wrapper (written as '$existing')."
   else
     # Es gibt schon eine gmf-Zeile, aber mit anderem Pfad (Repo umgezogen?).
     # Nicht blind doppelt eintragen, sondern dem Menschen überlassen.

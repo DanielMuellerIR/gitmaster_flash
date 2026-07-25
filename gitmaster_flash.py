@@ -64,7 +64,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.14.0-branch"
+__version__ = "0.14.0-branch"   # Experiment; main steht bei 0.13.2
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
