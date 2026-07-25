@@ -26,8 +26,9 @@ from gitmaster_flash import (  # noqa: E402
     DEFAULT_CONFIG, __version__, CommitSafetyError, RemoteStatus, RepoStatus, TUI,
     collect_status, find_repos,
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
-    detect_sync_remote, fetch_remote_status, inspect_transfer, is_github_url, pad_cells,
-    parse_porcelain, safe_pull_args, stash_preview, status_dict,
+    detect_sync_remote, display_remote_url, fetch_remote_status, inspect_transfer,
+    is_github_url, pad_cells, parse_porcelain, repo_info_lines, safe_pull_args,
+    stash_preview, status_dict,
     safe_push_args, suggested_ignore, terminal_text, truncate_cells,
     update_gitignore_atomic, upstream_delta,
 )
@@ -108,6 +109,25 @@ class TestRemoteBadges(unittest.TestCase):
         self.assertTrue(is_github_url("git@github.com:example/demo.git"))
         self.assertTrue(is_github_url("https://github.com/example/demo.git"))
         self.assertFalse(is_github_url("ssh://internal.example/demo.git"))
+
+
+class TestRemoteUrlDisplay(unittest.TestCase):
+    def test_query_and_fragment_are_not_shown(self):
+        separator = chr(58) + chr(47) * 2
+        base = "https" + separator + "github.com/example/demo.git"
+        shown = display_remote_url(base + "?redacted=true#private")
+        self.assertEqual(shown, base)
+        self.assertNotIn("redacted", shown)
+
+    def test_ssh_user_is_preserved(self):
+        separator = chr(58) + chr(47) * 2
+        address = "ssh" + separator + "git@github.com/example/demo.git"
+        self.assertEqual(display_remote_url(address), address)
+
+    def test_local_file_url_remains_visible(self):
+        separator = chr(58) + chr(47) * 2
+        address = "file" + separator + "/tmp/example.git"
+        self.assertEqual(display_remote_url(address), address)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -213,6 +233,25 @@ class TestAgainstRealRepo(unittest.TestCase):
         # sauber, aber ohne Sync-Remote -> nicht "synchron"
         self.assertFalse(st.clean_and_synced)
         self.assertEqual(st.branch, "main" if st.branch == "main" else st.branch)
+
+    def test_repo_info_contains_clickable_github_url_and_useful_details(self):
+        git(self.repo, "tag", "v1.0")
+        git(self.repo, "remote", "add", "origin",
+            "https://github.com/example/demo.git")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+        text = "\n".join(repo_info_lines(st, DEFAULT_CONFIG))
+
+        self.assertIn(f"Path: {self.repo}", text)
+        self.assertIn(f"Branch: {st.branch}", text)
+        self.assertIn("HEAD:", text)
+        self.assertIn("Last commit:", text)
+        self.assertIn("Working tree: clean", text)
+        self.assertIn("Tags at HEAD: v1.0", text)
+        self.assertIn("origin [sync, GitHub]", text)
+        self.assertIn("fetch: https://github.com/example/demo.git", text)
+        self.assertIn("push: https://github.com/example/demo.git", text)
+        self.assertIn("web: https://github.com/example/demo", text)
 
 
 class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
@@ -672,6 +711,22 @@ class StashAndReadFailureTests(unittest.TestCase):
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):
+    def test_i_key_opens_repo_info_case_insensitively(self):
+        class Screen:
+            def __init__(self):
+                self.keys = iter((ord("i"), ord("Q")))
+
+            def getch(self):
+                return next(self.keys)
+
+        ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
+        with mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(ui, "reload"), \
+                mock.patch.object(ui, "draw"), \
+                mock.patch.object(ui, "action_repo_info") as action:
+            ui.run()
+        action.assert_called_once_with()
+
     def test_terminal_controls_are_visible_and_width_is_cell_aware(self):
         escaped = terminal_text("name\n\x1b[31m\x85")
         self.assertNotIn("\n", escaped)

@@ -19,6 +19,7 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
   L     safely fast-forward the current branch from the private sync remote
   G     guarded GitHub push (preview + typed confirmation; branch only, no tags)
   H     explain the Git safety rules
+  I     show repository details, remote addresses, and clickable GitHub URLs
   U     apply the latest stash (git stash pop, with confirmation)
   S     view the latest stash as a diff (read-only, scrollable)
   D     drop the latest stash (git stash drop, with confirmation)
@@ -61,7 +62,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.9.4"
+__version__ = "0.10.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -172,8 +173,8 @@ TR = {
            "de": " ↑/↓ wählen · → aufklappen · ← zuklappen · ⏎ cd & Exit · P Sync-Push · L Sync-Pull"},
     "f2": {"en": " {apps} · C commit · U stash pop · R fetch all · G GitHub push",
            "de": " {apps} · C Commit · U Stash pop · R fetch all · G GitHub-Push"},
-    "f3": {"en": " Q quit · S stash preview · D stash drop · H Git help",
-           "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen · H Git-Hilfe"},
+    "f3": {"en": " Q quit · S stash preview · D stash drop · H Git help · I repo info",
+           "de": " Q Beenden · S Stash-Vorschau · D Stash verwerfen · H Git-Hilfe · I Repo-Info"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
@@ -332,6 +333,47 @@ TR = {
               "   Verlangt PUSH <Remote>; pinnt Quell-/Ziel-OID und sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
               "R  Fetcht alle Remotes aller Repos; Working Trees bleiben unverändert."},
+    # Repo-Info
+    "repo_info_title": {"en": "Repository info · {rel}", "de": "Repo-Info · {rel}"},
+    "info_path": {"en": "Path", "de": "Pfad"},
+    "info_branch": {"en": "Branch", "de": "Branch"},
+    "info_head": {"en": "HEAD", "de": "HEAD"},
+    "info_last_commit": {"en": "Last commit", "de": "Letzter Commit"},
+    "info_history": {"en": "History", "de": "Historie"},
+    "info_history_value": {
+        "en": "{n} commit(s) · {kind}",
+        "de": "{n} Commit(s) · {kind}"},
+    "info_full_clone": {"en": "full clone", "de": "vollständiger Clone"},
+    "info_shallow_clone": {"en": "shallow clone", "de": "flacher Clone"},
+    "info_no_commits": {"en": "(no commits)", "de": "(keine Commits)"},
+    "info_upstream": {"en": "Upstream", "de": "Upstream"},
+    "info_delta": {"en": "{a} ahead / {b} behind",
+                   "de": "{a} voraus / {b} zurück"},
+    "info_worktree": {"en": "Working tree", "de": "Arbeitsbaum"},
+    "info_clean": {"en": "clean", "de": "sauber"},
+    "info_changes": {
+        "en": "M:{m} · D:{d} · U:{u} · conflicts:{c}",
+        "de": "M:{m} · D:{d} · U:{u} · Konflikte:{c}"},
+    "info_stashes": {"en": "Stashes", "de": "Stashes"},
+    "info_tags": {"en": "Tags at HEAD", "de": "Tags an HEAD"},
+    "info_remotes": {"en": "Remotes", "de": "Remotes"},
+    "info_sync": {"en": "sync", "de": "Sync"},
+    "info_github": {"en": "GitHub", "de": "GitHub"},
+    "info_unsafe_remote": {
+        "en": "fetch/push targets differ",
+        "de": "Fetch-/Push-Ziele weichen ab"},
+    "info_fetch_url": {"en": "fetch", "de": "Fetch"},
+    "info_push_url": {"en": "push", "de": "Push"},
+    "info_web_url": {"en": "web", "de": "Web"},
+    "info_remote_branch": {
+        "en": "branch {b}: {a} ahead / {d} behind",
+        "de": "Branch {b}: {a} voraus / {d} zurück"},
+    "info_remote_branch_missing": {
+        "en": "branch {b}: not on this remote",
+        "de": "Branch {b}: nicht auf diesem Remote"},
+    "info_remote_error": {
+        "en": "Remote details unavailable: {e}",
+        "de": "Remote-Details nicht verfügbar: {e}"},
     # main
     "not_a_dir": {"en": "Not a directory: {p}", "de": "Kein Ordner: {p}"},
     "git_timeout": {"en": "git timeout", "de": "git-Timeout"},
@@ -872,6 +914,169 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     # Sync-Remote zuerst; GitHub unabhängig vom tatsächlichen Namen ganz rechts.
     states.sort(key=lambda r: (r.public, not r.is_sync, r.name.lower()))
     return states
+
+
+def display_remote_url(url: str) -> str:
+    """Remote-Adresse für die lokale Anzeige, aber ohne eingebettete Secrets."""
+    raw = url.strip()
+    if "://" not in raw:
+        # SCP-Syntax (git@host:org/repo.git) enthält normalerweise keine Query.
+        if ":" in raw and "/" not in raw.split(":", 1)[0]:
+            raw = raw.split("?", 1)[0].split("#", 1)[0]
+        return terminal_text(raw)
+
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        if parsed.scheme.lower() == "file":
+            clean = urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.hostname or "", parsed.path, "", ""))
+            return terminal_text(clean)
+        hostname = parsed.hostname
+        if not hostname:
+            return terminal_text(f"{parsed.scheme}://(invalid target)")
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is not None:
+            host += f":{port}"
+        # Bei SSH ist der Benutzer (meist "git") Teil der hilfreichen Adresse.
+        # Bei HTTP(S) kann genau dieses Feld dagegen ein Personal Access Token sein.
+        user = ""
+        if parsed.scheme.lower() not in ("http", "https") and parsed.username:
+            user = urllib.parse.quote(
+                urllib.parse.unquote(parsed.username), safe="") + "@"
+        clean = urllib.parse.urlunsplit(
+            (parsed.scheme, user + host, parsed.path, "", ""))
+        return terminal_text(clean)
+    except (UnicodeError, ValueError):
+        return terminal_text("(invalid remote target)")
+
+
+def github_web_urls(remote: RemoteConfig) -> list[str]:
+    """Anklickbare, zugangsdatenfreie Web-URLs für alle GitHub-Ziele."""
+    urls = []
+    for target in remote.fetch_targets + remote.push_targets:
+        if target.host != "github.com":
+            continue
+        path = urllib.parse.quote(target.repo_id, safe="/-._~")
+        url = "https://github.com" + path
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
+    """Read-only Repo-Details als Textzeilen; keinerlei curses-Abhängigkeit."""
+    t_ = cfg["git_timeout"]
+
+    def read_git(*args: str) -> subprocess.CompletedProcess:
+        """Optionale Info darf bei einem kaputten/langsamen Repo nie die TUI beenden."""
+        try:
+            return run_git(st.path, *args, timeout=t_)
+        except (OSError, subprocess.SubprocessError):
+            return subprocess.CompletedProcess(args, 1, "", "")
+
+    path = terminal_text(st.path)
+    branch = terminal_text(st.branch)
+    lines = [
+        f"{t('info_path')}: {path}",
+        f"{t('info_branch')}: {branch}",
+    ]
+
+    commit = read_git(
+        "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD")
+    fields = commit.stdout.rstrip("\n").split("\0", 4) if commit.returncode == 0 else []
+    if len(fields) == 5:
+        full_oid, short_oid, date, author, subject = map(terminal_text, fields)
+        lines.append(f"{t('info_head')}: {short_oid} ({full_oid})")
+        lines.append(f"{t('info_last_commit')}: {date} · {author}")
+        lines.append(f"  {subject}")
+
+        count = read_git("rev-list", "--count", "HEAD")
+        shallow = read_git("rev-parse", "--is-shallow-repository")
+        if count.returncode == 0:
+            clone_kind = (t("info_shallow_clone")
+                          if shallow.returncode == 0 and shallow.stdout.strip() == "true"
+                          else t("info_full_clone"))
+            value = t("info_history_value", n=count.stdout.strip(), kind=clone_kind)
+            lines.append(f"{t('info_history')}: {value}")
+    else:
+        lines.append(f"{t('info_head')}: {t('info_no_commits')}")
+
+    upstream = read_git(
+        "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        upstream_name = upstream.stdout.strip()
+        delta = read_git(
+            "rev-list", "--left-right", "--count", f"HEAD...{upstream_name}")
+        delta_fields = delta.stdout.split()
+        if delta.returncode == 0 and len(delta_fields) == 2:
+            upstream_value = (f"{terminal_text(upstream_name)} "
+                              f"({t('info_delta', a=delta_fields[0], b=delta_fields[1])})")
+        else:
+            upstream_value = terminal_text(upstream_name)
+    else:
+        upstream_value = t("none_label")
+    lines.append(f"{t('info_upstream')}: {upstream_value}")
+
+    worktree = (t("info_clean") if not st.dirty else
+                t("info_changes", m=st.modified, d=st.deleted,
+                  u=st.untracked, c=st.conflicts))
+    lines.append(f"{t('info_worktree')}: {worktree}")
+    lines.append(f"{t('info_stashes')}: {len(st.stashes)}")
+
+    tags = read_git("tag", "--points-at", "HEAD")
+    tag_names = [terminal_text(name) for name in tags.stdout.splitlines()
+                 if name.strip()] if tags.returncode == 0 else []
+    tag_value = ", ".join(tag_names) if tag_names else t("none_label")
+    lines.append(f"{t('info_tags')}: {tag_value}")
+
+    lines.extend(["", f"{t('info_remotes')}:"])
+    try:
+        configs = read_remote_configs(st.path, cfg)
+    # Auch malformed Fremdkonfigurationen (etwa eine ungültige URL) sollen nur
+    # diese Ansicht degradieren, nicht die komplette curses-Sitzung beenden.
+    except Exception as exc:
+        lines.append("  " + t("info_remote_error", e=terminal_text(exc)))
+        return lines
+    if not configs:
+        lines.append("  " + t("none_label"))
+        return lines
+
+    states = {remote.name: remote for remote in st.remotes}
+    ordered_names = [remote.name for remote in st.remotes if remote.name in configs]
+    ordered_names.extend(name for name in configs if name not in ordered_names)
+    for index, name in enumerate(ordered_names):
+        remote = configs[name]
+        state = states.get(name)
+        web_urls = github_web_urls(remote)
+        labels = []
+        if state and state.is_sync:
+            labels.append(t("info_sync"))
+        if web_urls:
+            labels.append(t("info_github"))
+        if not remote.transfer_safe:
+            labels.append(t("info_unsafe_remote"))
+        suffix = f" [{', '.join(labels)}]" if labels else ""
+        if index:
+            lines.append("")
+        lines.append(f"  {terminal_text(name)}{suffix}")
+        for url in remote.fetch_urls:
+            lines.append(f"    {t('info_fetch_url')}: {display_remote_url(url)}")
+        for url in remote.push_urls:
+            lines.append(f"    {t('info_push_url')}: {display_remote_url(url)}")
+        for url in web_urls:
+            lines.append(f"    {t('info_web_url')}: {url}")
+        if state and st.branch not in ("?", "(detached)"):
+            if state.branch_exists:
+                lines.append("    " + t(
+                    "info_remote_branch", b=branch,
+                    a=state.ahead, d=state.behind))
+            else:
+                lines.append("    " + t("info_remote_branch_missing", b=branch))
+    return lines
 
 
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
@@ -1904,6 +2109,17 @@ class TUI:
     def action_git_help(self):
         self.show_pager(t("git_help_title"), t("git_help_body").splitlines())
 
+    def action_repo_info(self):
+        """Aktuelle, ausschließlich lesende Details zum ausgewählten Repo."""
+        st = self.current()
+        if not st:
+            return
+        fresh = self.refresh_one(st)
+        self.show_pager(
+            t("repo_info_title", rel=terminal_text(fresh.rel)),
+            repo_info_lines(fresh, self.cfg),
+        )
+
     # -- Commit-Hilfe --------------------------------------------------------
 
     def action_commit_wizard(self):
@@ -2087,6 +2303,8 @@ class TUI:
                 self.action_github_push()
             elif key == "H":
                 self.action_git_help()
+            elif key == "I":
+                self.action_repo_info()
             elif key == "S":
                 self.action_stash_show()
             elif key == "D":

@@ -68,6 +68,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
 | G | geschützter GitHub-Push mit Commit-/Dateivorschau und Texteingabe |
 | H | Git-Sicherheitsregeln direkt in der TUI anzeigen |
+| I | Repo-Details, Remote-Adressen und anklickbare GitHub-URLs anzeigen |
 | U | neuesten Stash anwenden (`git stash pop`, mit Rückfrage) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | D | neuesten Stash endgültig verwerfen (`git stash drop`, mit Rückfrage) |
@@ -78,6 +79,44 @@ Auf einen bereits konfliktbehafteten Baum wird nie ein weiterer Stash gepoppt �
 erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und binäre
 Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
 destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
+
+## Repo-Info (`I`)
+
+`I` öffnet für das ausgewählte Repo eine nur lesende, scrollbare Übersicht. Sie
+zeigt Pfad, Branch und vollständigen HEAD, letzten Commit, Größe der Historie,
+Upstream-Stand, Arbeitsbaum-Zähler, Stashes, Tags an HEAD und alle Remotes.
+Fetch- und Push-Adressen stehen getrennt da, weil Git dafür unterschiedliche
+Ziele konfigurieren kann. GitHub-Remotes erhalten zusätzlich eine
+zugangsdatenfreie Web-URL `https://github.com/…`, die sich in unterstützenden
+Terminals direkt öffnen lässt. Eingebettete URL-Zugangsdaten, Query-Parameter
+und Fragmente werden nie angezeigt. Die Ansicht fetcht nicht und verändert das
+Repo auch sonst nicht.
+
+```text
+ Repo-Info · api-gateway
+Pfad: ~/projekte/api-gateway
+Branch: main
+HEAD: a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
+Letzter Commit: 2026-07-25T10:30:00+02:00 · Beispielautor
+  feat: add health endpoint
+Historie: 42 Commit(s) · vollständiger Clone
+Upstream: origin/main (0 voraus / 0 zurück)
+Arbeitsbaum: sauber
+Stashes: 0
+Tags an HEAD: v1.4.0
+
+Remotes:
+  origin [Sync]
+    Fetch: git@example.invalid:team/api-gateway.git
+    Push: git@example.invalid:team/api-gateway.git
+    Branch main: 0 voraus / 0 zurück
+
+  github [GitHub]
+    Fetch: https://github.com/example/api-gateway.git
+    Push: https://github.com/example/api-gateway.git
+    Web: https://github.com/example/api-gateway
+    Branch main: 2 voraus / 0 zurück
+```
 
 ## Commit-Hilfe (`C`)
 

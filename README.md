@@ -65,6 +65,7 @@ memorize. Case does not matter — `f` works like `F`.
 | L | safely fast-forward the current branch from the private sync remote |
 | G | guarded GitHub push with outgoing-commit/file preview and typed confirmation |
 | H | show the Git safety rules inside the TUI |
+| I | show repository details, remote addresses, and clickable GitHub URLs |
 | U | apply the latest stash (`git stash pop`, with confirmation) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | D | drop the latest stash (`git stash drop`, with confirmation) |
@@ -75,6 +76,43 @@ A stash is never popped onto a tree that already has conflicts — resolve those
 first. Its preview includes untracked and binary files; a failed or unexpectedly
 empty Git preview is labelled explicitly before the destructive drop action
 remains available.
+
+## Repository info (`I`)
+
+`I` opens a read-only, scrollable overview for the selected repository. It shows
+the path, branch and full HEAD, latest commit, history size, upstream
+ahead/behind state, working-tree counts, stashes, tags at HEAD, and every remote.
+Fetch and push addresses are listed separately because Git can configure them to
+different targets. GitHub remotes additionally get a credential-free
+`https://github.com/…` web URL that can be opened directly from supporting
+terminals. Embedded URL credentials, query parameters, and fragments are never
+displayed. The view does not fetch or otherwise modify the repository.
+
+```text
+ Repository info · api-gateway
+Path: ~/projects/api-gateway
+Branch: main
+HEAD: a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
+Last commit: 2026-07-25T10:30:00+02:00 · Example Author
+  feat: add health endpoint
+History: 42 commit(s) · full clone
+Upstream: origin/main (0 ahead / 0 behind)
+Working tree: clean
+Stashes: 0
+Tags at HEAD: v1.4.0
+
+Remotes:
+  origin [sync]
+    fetch: git@example.invalid:team/api-gateway.git
+    push: git@example.invalid:team/api-gateway.git
+    branch main: 0 ahead / 0 behind
+
+  github [GitHub]
+    fetch: https://github.com/example/api-gateway.git
+    push: https://github.com/example/api-gateway.git
+    web: https://github.com/example/api-gateway
+    branch main: 2 ahead / 0 behind
+```
 
 ## Commit helper (`C`)
 
