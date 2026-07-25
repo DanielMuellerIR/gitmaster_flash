@@ -20,7 +20,9 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   [README.de.md](README.de.md) inhaltlich synchron.
 - Der Demo-Modus (`--demo`) ist die Referenz für Screenshots und muss ohne Netz
   und unabhängig von der Maschine gleich aussehen (deshalb `core.excludesFile`
-  und `core.hooksPath` in den Demo-Repos abschalten).
+  und `core.hooksPath` in den Demo-Repos abschalten). Alle Demo-Commits tragen den
+  festen Zeitstempel `DEMO_DATE`; nur dadurch sind die Commit-IDs überall gleich —
+  und damit auch Protokollzeilen wie `git merge --ff-only -- <id>` im Bild.
 - Die Bilder in `docs/` sind **generiert, keine Screenshots** (seit 2026-07-17):
   `python3 docs/make-screens.py` fährt das echte Programm in einem **Pseudo-Terminal**
   auf der `--demo`-Sandbox und baut daraus SVG. Damit entfällt das frühere Gefummel
@@ -30,11 +32,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `make-screens.py` laufen lassen und das Ergebnis mitcommitten).
   **Weiterhin gilt:** keine globalen synthetischen Tastendrücke — die Eingaben gehen
   ausschließlich in den eigenen pty-Kindprozess, nie an das Fenstersystem.
+  Cursortasten nur als `\x1bO…` schicken (Konstanten `UP`/`DOWN`/… in `make-screens.py`):
+  ncurses schaltet den Application-Cursor-Modus ein, die `\x1b[…`-Form käme als nacktes
+  Esc an — und Esc beendet die TUI mitten in der Aufnahme.
   Grenze des Generators: Nur der **Listen-Screen** ist reproduzierbar. Views, die
-  darüber gezeichnet werden (Commit-Hilfe, Pager), bräuchten echte Zellbreiten-Logik
-  (`⏎`/`⚑`/`✔` belegen zwei Spalten, ein String-Index eine) — dafür wäre ein voller
-  Terminal-Emulator nötig. Solche Ansichten gehören als vorformatierter Textblock ins
-  README, nicht als Bild.
+  darüber gezeichnet werden (Commit-Hilfe, Pager, Info-Ansicht), bräuchten echte
+  Zellbreiten-Logik (`⏎`/`⚑`/`✔` belegen zwei Spalten, ein String-Index eine) — dafür
+  wäre ein voller Terminal-Emulator nötig; ein Abstecher durch die Info-Ansicht ließ
+  prompt Reste von ihr auf der Liste darunter stehen. Solche Ansichten gehören als
+  vorformatierter Textblock ins README, nicht als Bild.
+  Der Bildnachbau (`replay()`) ist bewusst von der pty-Mechanik getrennt und ohne
+  Kindprozess getestet — ein fehlendes Steuerzeichen verschiebt sonst still ganze
+  Zeilen, und das Bild sieht trotzdem plausibel aus.
 - Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
   Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
   fremde Python-Dienste und Automationen unangetastet lassen.
@@ -60,18 +69,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 ## Offene Punkte / Ideen
 
-- [ ] **Branch `feature/kompaktansicht` (Stand 2026-07-25):** funktioniert und ist
-      bei vielen Repos eine echte Verbesserung; vor der Übernahme nach `main` fehlt
-      noch die Doku-Arbeit:
-      - READMEs auf die Doppel-Ansicht umschreiben. „Was eine Zeile verrät“ erklärt
-        weiterhin nur die Detailzeile, obwohl ab 20 Repos die Kompaktansicht startet;
-        Reihenfolge und Einstiegstext gehören daran angepasst.
-      - Screenshots neu: `compact.svg` zeigt ein leeres Befehlsprotokoll („noch
-        keine“) — aussagekräftiger wäre ein Stand mit echten Einträgen, dazu ein
-        Bild mit Fokus im Protokoll (Auswahlbalken unten).
-      - Danach Version aus `0.14.0-branch` auf eine echte Nummer setzen.
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
+- [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
+      einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
+      sauber trifft (siehe Grenze des Generators oben).
 - [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).

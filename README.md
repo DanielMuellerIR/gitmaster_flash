@@ -19,9 +19,9 @@ left over. One Python file, standard library only — no `pip install`, no daemo
 no registration of repositories. It scans whatever is below the directory you
 start it in.
 
-![Overview of several repositories, problem repos sorted to the top](docs/overview.svg)
+![Compact view: every repository as a mark plus its name, the command log underneath](docs/compact.svg)
 
-<sub>The screen above is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes.</sub>
+<sub>Every screen in this README is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes. The commands in the log below the list were really run on the sandbox: a stash pop and a pull.</sub>
 
 
 Try it without touching your own repositories:
@@ -44,7 +44,8 @@ gmf ~/projects        # or just `gmf` for the current directory
 
 Three keys carry you through the first session:
 
-- `↑`/`↓` picks a repository; the ones needing attention are already at the top.
+- `↑`/`↓` picks a repository (`←`/`→` jump a whole column in the compact view);
+  the ones needing attention are already at the top.
 - `A` shows what changed in a file, `C` commits it with a guided helper.
 - `H` lists every Git command gmf ran for you — that is how you pick up the
   syntax without memorizing it.
@@ -54,11 +55,14 @@ exact command first. Details are further down; you do not need them to start.
 
 ## Two views (`M`)
 
-With more than 20 repositories the detail view becomes a long scroll, so gmf
-starts in the **compact view**: one mark plus the name per repository, filled
-column by column like `ls`, using the width of the window instead of its height.
+With up to 20 repositories gmf opens in the **detail view**: one full line each,
+with counts, branch and remotes. Above that the same list turns into a long
+scroll, so it starts in the **compact view** instead — one mark plus the name per
+repository, filled column by column like `ls`, using the width of the window
+rather than its height. That is the screen at the top of this page; the threshold
+is `compact_from` in `config.json`.
 
-![Compact view: every repository as a mark plus its name, in columns](docs/compact.svg)
+The mark is the whole status, condensed into one field:
 
 | Mark | Meaning |
 |---|---|
@@ -76,24 +80,9 @@ so you can find a repository in the wide overview and then work on it in detail.
 `←`/`→` move one column at a time, which crosses 60 repositories in a few
 keystrokes. Expanding files and stashes stays in the detail view.
 
-## Command log, always visible
+## What a detail line tells you
 
-The last commands stay below the list — three lines by default. `Tab` moves the
-focus there and the pane grows to a third of the window. The selection bar moves
-with the focus: while you are in the log, the repository list has none, so it is
-always obvious which pane the arrow keys belong to. `↑`/`↓` walk through the
-commands, `Tab` returns to the list — both sides remember where you were.
-Cancelled dialogs appear as `⊘ … (not run — cancelled)`, so the log never
-suggests something ran that did not.
-
-`H` shows the same log in full, above the safety rules. Read-only scan commands
-are deliberately left out — they would bury the interesting lines. Arguments are
-quoted the way a shell needs them, so a line can be typed or pasted as-is, and
-destructive dialogs show the command before you confirm it: you see
-`git remote remove github` while deciding, not afterwards.
-
-
-## What a line tells you
+![Detail view: one line per repository, problem repos sorted to the top](docs/overview.svg)
 
 - **remote names are always visible** — every line ends with all configured
   remotes, even when everything is synchronized. Their order is the private sync
@@ -107,7 +96,31 @@ destructive dialogs show the command before you confirm it: you see
   apply cleanly. Kept separate from "modified", because it needs different work.
 - Warnings such as "no sync remote" or "branch not on remote".
 
-Repositories that need attention sort to the top, clean ones to the bottom.
+Repositories that need attention sort to the top, clean ones to the bottom. Both
+views use that same order, so in the compact view the leftmost column is the one
+worth reading.
+
+## Command log, always visible
+
+The last commands stay below the list: three lines in the detail view, and in the
+compact view everything the columns leave over. `Tab` moves the focus there — in
+the detail view the pane grows to a third of the window for it. The selection bar
+moves with the focus: while you are in the log, the repository list has none, so
+it is always obvious which pane the arrow keys belong to. `↑`/`↓` walk through the
+commands, `Tab` returns to the list — both sides remember where you were.
+
+![The focus in the command log: the selection bar sits there, the repository list has none](docs/command-log.svg)
+
+Cancelled dialogs appear as `⊘ … (not run — cancelled)`, so the log never
+suggests something ran that did not. Two identical `fetch` lines are no glitch
+either: gmf fetches once before it asks and once after you confirm, and only acts
+if nothing moved in between (see "Safe push and pull").
+
+`H` shows the same log in full, above the safety rules. Read-only scan commands
+are deliberately left out — they would bury the interesting lines. Arguments are
+quoted the way a shell needs them, so a line can be typed or pasted as-is, and
+destructive dialogs show the command before you confirm it: you see
+`git remote remove github` while deciding, not afterwards.
 
 ## Keys
 
@@ -435,6 +448,13 @@ python3 -m unittest discover -s tests
 
 The logic (status parsing, heuristics, repo scan) is separated from the curses UI
 and tested headlessly against real temporary repositories.
+
+```sh
+python3 docs/make-screens.py --check   # do the pictures still match the UI?
+```
+
+`--check` fails when the screens in `docs/` would come out different — after a UI
+change, run `docs/make-screens.py` and commit the result.
 
 ## Name
 

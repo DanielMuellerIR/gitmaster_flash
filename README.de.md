@@ -20,9 +20,9 @@ was. Eine einzige Python-Datei, nur Standardbibliothek — kein `pip install`, k
 Hintergrunddienst, keine Repo-Registrierung. Gescannt wird schlicht alles
 unterhalb des Ordners, in dem man es startet.
 
-![Übersicht mehrerer Repos, problematische zuerst](docs/overview.svg)
+![Kompaktansicht: jedes Repo als Marke und Name, darunter das Befehlsprotokoll](docs/compact.svg)
 
-<sub>Das Bild oben wird aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen.</sub>
+<sub>Alle Bilder in dieser README werden aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen. Die Befehle im Protokoll unter der Liste liefen wirklich auf der Sandbox: ein Stash-Pop und ein Pull.</sub>
 
 
 Zum gefahrlosen Ausprobieren, ohne die eigenen Repos anzufassen:
@@ -46,7 +46,8 @@ gmf ~/projekte        # oder einfach `gmf` für den aktuellen Ordner
 
 Drei Tasten tragen durch die erste Sitzung:
 
-- `↑`/`↓` wählt ein Repo; die mit offenen Punkten stehen schon oben.
+- `↑`/`↓` wählt ein Repo (`←`/`→` springen in der Kompaktansicht eine ganze
+  Spalte weiter); die mit offenen Punkten stehen schon oben.
 - `A` zeigt, was sich in einer Datei geändert hat, `C` committet sie geführt.
 - `H` listet jeden Git-Befehl, den gmf für dich ausgeführt hat — so lernt man
   die Syntax nebenbei mit, ohne sie auswendig zu lernen.
@@ -57,11 +58,14 @@ sie nicht.
 
 ## Zwei Ansichten (`M`)
 
-Ab gut 20 Repos wird die Detailansicht zur langen Scrollstrecke, deshalb startet
-gmf in der **Kompaktansicht**: pro Repo eine Marke und der Name, spaltenweise
-gefüllt wie bei `ls` — sie nutzt die Breite des Fensters statt seiner Höhe.
+Bis 20 Repos startet gmf in der **Detailansicht**: pro Repo eine volle Zeile mit
+Zählern, Branch und Remotes. Darüber wird dieselbe Liste zur langen Scrollstrecke,
+deshalb startet dann die **Kompaktansicht** — pro Repo eine Marke und der Name,
+spaltenweise gefüllt wie bei `ls`, also über die Breite des Fensters statt über
+seine Höhe. Das ist das Bild ganz oben. Die Schwelle steht als `compact_from` in
+der `config.json`.
 
-![Kompaktansicht: jedes Repo als Marke und Name, mehrspaltig](docs/compact.svg)
+Die Marke ist der ganze Status, auf ein Feld eingedampft:
 
 | Marke | Bedeutung |
 |---|---|
@@ -80,25 +84,9 @@ sucht es also in der breiten Übersicht und arbeitet dann im Detail daran weiter
 durchquert sind. Aufklappen von Dateien und Stashes bleibt der Detailansicht
 vorbehalten.
 
-## Befehlsprotokoll, immer sichtbar
+## Was eine Detailzeile verrät
 
-Die letzten Befehle stehen unter der Liste — normal drei Zeilen. `Tab` setzt den
-Fokus dorthin, der Bereich wächst auf ein Drittel des Fensters. Der Auswahlbalken
-wandert mit dem Fokus: Solange man im Protokoll ist, hat die Repo-Liste keinen —
-so ist immer klar, wem die Pfeiltasten gerade gehören. `↑`/`↓` gehen durch die
-Befehle, `Tab` führt zurück zur Liste; beide Seiten merken sich, wo man war.
-Abgebrochene Dialoge erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit
-das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief.
-
-`H` zeigt dasselbe Protokoll vollständig, über den Sicherheitsregeln. Die reinen
-Lesebefehle des Scans stehen bewusst nicht drin — sie würden die interessanten
-Zeilen zumüllen. Argumente sind so gequotet, wie eine Shell sie braucht, eine
-Zeile lässt sich also direkt übernehmen. Und destruktive Dialoge zeigen den
-Befehl vor der Bestätigung: Man sieht `git remote remove github` beim
-Entscheiden, nicht erst danach.
-
-
-## Was eine Zeile verrät
+![Detailansicht: eine Zeile je Repo, problematische zuerst](docs/overview.svg)
 
 - **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
   Remotes, auch wenn alles synchron ist. Reihenfolge: privater Sync-Remote zuerst,
@@ -113,7 +101,34 @@ Entscheiden, nicht erst danach.
   Arbeit steckt.
 - Warnungen wie „kein Sync-Remote" oder „Branch nicht auf dem Remote".
 
-Repos mit offenen Punkten stehen oben, saubere unten.
+Repos mit offenen Punkten stehen oben, saubere unten. Beide Ansichten benutzen
+dieselbe Reihenfolge, in der Kompaktansicht ist also die linke Spalte die
+interessante.
+
+## Befehlsprotokoll, immer sichtbar
+
+Die letzten Befehle stehen unter der Liste: in der Detailansicht drei Zeilen, in
+der Kompaktansicht alles, was die Spalten übrig lassen. `Tab` setzt den Fokus
+dorthin — in der Detailansicht wächst der Bereich dafür auf ein Drittel des
+Fensters. Der Auswahlbalken wandert mit dem Fokus: Solange man im Protokoll ist,
+hat die Repo-Liste keinen — so ist immer klar, wem die Pfeiltasten gerade
+gehören. `↑`/`↓` gehen durch die Befehle, `Tab` führt zurück zur Liste; beide
+Seiten merken sich, wo man war.
+
+![Fokus im Befehlsprotokoll: der Auswahlbalken steht dort, die Repo-Liste hat keinen](docs/command-log.svg)
+
+Abgebrochene Dialoge erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit
+das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief. Zwei gleiche
+`fetch`-Zeilen sind ebenfalls kein Fehler: gmf holt einmal vor der Rückfrage und
+einmal nach der Bestätigung und handelt nur, wenn sich dazwischen nichts bewegt
+hat (siehe „Sicheres Push und Pull").
+
+`H` zeigt dasselbe Protokoll vollständig, über den Sicherheitsregeln. Die reinen
+Lesebefehle des Scans stehen bewusst nicht drin — sie würden die interessanten
+Zeilen zumüllen. Argumente sind so gequotet, wie eine Shell sie braucht, eine
+Zeile lässt sich also direkt übernehmen. Und destruktive Dialoge zeigen den
+Befehl vor der Bestätigung: Man sieht `git remote remove github` beim
+Entscheiden, nicht erst danach.
 
 ## Bedienung
 
@@ -452,6 +467,13 @@ python3 -m unittest discover -s tests
 
 Die Logik (Status-Parsing, Heuristiken, Repo-Scan) ist von der curses-Oberfläche
 getrennt und wird headless gegen echte, temporär angelegte Repos getestet.
+
+```sh
+python3 docs/make-screens.py --check   # passen die Bilder noch zur Oberfläche?
+```
+
+`--check` schlägt fehl, wenn die Bilder in `docs/` anders herauskämen — nach einer
+UI-Änderung also `docs/make-screens.py` laufen lassen und das Ergebnis mitcommitten.
 
 ## Name
 
