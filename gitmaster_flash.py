@@ -63,7 +63,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -479,6 +479,15 @@ TR = {
     "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
                       "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
     "check_unknown": {"en": "{r}: unclear result — {e}", "de": "{r}: unklares Ergebnis — {e}"},
+    # Stichworte für die Repo-Zeile (der ganze Satz steht auf der Info-Seite)
+    "short_gone": {"en": "repository gone", "de": "Repo weg"},
+    "short_auth": {"en": "login missing", "de": "Login fehlt"},
+    "short_hostkey": {"en": "host key unknown", "de": "Hostschlüssel unbekannt"},
+    "short_dns": {"en": "host not found", "de": "Host nicht gefunden"},
+    "short_unreachable": {"en": "no connection", "de": "keine Verbindung"},
+    "short_server": {"en": "server error", "de": "Serverfehler"},
+    "short_timeout": {"en": "no answer", "de": "keine Antwort"},
+    "short_unknown": {"en": "fetch failed", "de": "Fetch fehlgeschlagen"},
     # Remote entfernen (X)
     "remove_title": {"en": "Remove remote · {r}", "de": "Remote entfernen · {r}"},
     "remove_what_happens": {"en": "What this does:", "de": "Was dabei passiert:"},
@@ -510,6 +519,7 @@ TR = {
     # Befehlsprotokoll
     "cmdlog_title": {"en": "Commands this session ran",
                      "de": "In dieser Sitzung ausgeführte Befehle"},
+    "cmdlog_cancelled": {"en": "not run — cancelled", "de": "nicht ausgeführt — abgebrochen"},
     "cmdlog_empty": {
         "en": "(none yet — actions like C, P, L, G, U, D and X are listed here)",
         "de": "(noch keine — Aktionen wie C, P, L, G, U, D und X stehen hier)"},
@@ -588,8 +598,9 @@ class RepoStatus:
     files: list = field(default_factory=list)   # [(Buchstabe M/D/U/C, Pfad), ...]
     stashes: list = field(default_factory=list)  # ["stash@{0} WIP ...", ...]
     error: str = ""
-    # Gits Wortlaut zum letzten Fehler. Die Zeile in der Liste erklärt, was zu tun
-    # ist; dieser Beweis steht auf der Info-Seite, wenn man es genau wissen will.
+    # Die Repo-Zeile bekommt das Stichwort (`error`), die Info-Seite den ganzen
+    # Satz (`error_long`) und Gits eigenen Wortlaut als Beweis (`error_detail`).
+    error_long: str = ""
     error_detail: str = ""
 
     @property
@@ -1010,6 +1021,17 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     return classify_remote_check(r), 0, detail[:160]
 
 
+def remote_failure_short(name: str, outcome: str) -> str:
+    """Ganz knappe Fassung für die Repo-Zeile.
+
+    Dort teilt sich die Meldung den Platz mit den Remote-Badges. Ein langer Satz
+    schiebt genau die Marke aus dem Bild, die den kaputten Remote zeigt — deshalb
+    steht hier nur das Stichwort, der ganze Satz auf der Info-Seite.
+    """
+    key = "short_" + outcome
+    return f"{name}: {t(key)}" if key in TR else f"{name}: {outcome}"
+
+
 def remote_check_message(name: str, outcome: str, refs: int, detail: str,
                          timeout: int) -> str:
     """Prüfergebnis als fertiger, erklärender Satz für die Meldungszeile."""
@@ -1073,6 +1095,18 @@ def log_command(repo: Path, args: tuple[str, ...] | list[str],
     line = f"{mark} {repo.name}: {format_git_command(args)}"
     if returncode not in (None, 0):
         line += f"   (Exit {returncode})"
+    COMMAND_LOG.append(line)
+    del COMMAND_LOG[:-COMMAND_LOG_MAX]
+    return line
+
+
+def log_cancelled(repo: Path, args: tuple[str, ...] | list[str]) -> str:
+    """Eine abgebrochene Aktion vermerken.
+
+    Ohne diesen Eintrag bliebe im Protokoll offen, ob der eben gezeigte Befehl nun
+    gelaufen ist oder nicht — "⊘ nicht ausgeführt" beantwortet das eindeutig.
+    """
+    line = f"⊘ {repo.name}: {format_git_command(args)}   ({t('cmdlog_cancelled')})"
     COMMAND_LOG.append(line)
     del COMMAND_LOG[:-COMMAND_LOG_MAX]
     return line
@@ -1477,7 +1511,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     head_rows.append((t("info_tags"), ", ".join(tag_names) if tag_names
                       else t("none_label")))
     if st.error:
-        head_rows.append((t("info_last_error"), terminal_text(st.error)))
+        head_rows.append((t("info_last_error"),
+                          terminal_text(st.error_long or st.error)))
     if st.error_detail:
         head_rows.append((t("info_git_said"), terminal_text(st.error_detail)))
 
@@ -1777,11 +1812,13 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                     names = ", ".join(sorted(failed_remotes)) or "--all"
                     # Dieselbe Ursachenanalyse wie bei der T-Prüfung: die Zeile soll
                     # sagen, was zu tun ist, statt jeden Fehler "Login" zu nennen.
-                    st.error = remote_check_message(
-                        names, classify_remote_check(fetched), 0,
-                        last_error_line(fetched), cfg["fetch_timeout"])
-                    # Gits eigenen Wortlaut behalten — er steht auf der Info-Seite und
-                    # beweist die Ursache auch auf einem fremden Rechner.
+                    cause = classify_remote_check(fetched)
+                    st.error = remote_failure_short(names, cause)
+                    # Der ganze Satz und Gits eigener Wortlaut stehen auf der
+                    # Info-Seite; sie beweisen die Ursache auch auf fremden Rechnern.
+                    st.error_long = remote_check_message(
+                        names, cause, 0, last_error_line(fetched),
+                        cfg["fetch_timeout"])
                     st.error_detail = last_error_line(fetched)
                     st.remote_state = "error"
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
@@ -1816,6 +1853,29 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         st.error = str(exc)
         st.remote_state = "error"
     return st
+
+
+def carry_fetch_failure(old: RepoStatus, new: RepoStatus) -> None:
+    """Einen bekannten Fetch-Fehler in den frisch gelesenen Zustand übernehmen.
+
+    `collect_status` ohne `fetch` geht nur über lokale Daten und weiß deshalb
+    nichts von einem toten Remote. Ohne diese Übernahme sähe ein Repo nach jeder
+    Aktion (Commit, Stash, abgebrochener Dialog) plötzlich sauber aus, obwohl der
+    letzte Fetch gescheitert ist — der Fehler verschwände scheinbar von selbst.
+    Ein neuer Fetch überschreibt das ordnungsgemäß.
+    """
+    failed = {remote.name for remote in old.remotes if remote.fetch_failed}
+    if not failed and not old.error:
+        return
+    for remote in new.remotes:
+        if remote.name in failed:
+            remote.fetch_failed = True
+    if old.error and not new.error:
+        new.error = old.error
+        new.error_long = old.error_long
+        new.error_detail = old.error_detail
+        if new.remote_state == "ok":
+            new.remote_state = "error"
 
 
 def collect_all(root: Path, cfg: dict, fetch: bool = False,
@@ -1861,6 +1921,7 @@ def status_dict(st: RepoStatus) -> dict:
         "conflicts": st.conflicts,
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
         "error": st.error,
+        "error_long": st.error_long,
     }
 
 
@@ -2168,6 +2229,7 @@ class TUI:
     def refresh_one(self, st: RepoStatus):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten."""
         new = collect_status(st.path, self.root, self.cfg)
+        carry_fetch_failure(st, new)
         idx = self.statuses.index(st)
         self.statuses[idx] = new
         return new
@@ -2863,6 +2925,7 @@ class TUI:
                     curses.color_pair(C_CYAN) | curses.A_BOLD)
         self.scr.refresh()
         if not self.confirm(t("remove_confirm", r=name)):
+            log_cancelled(st.path, ("remote", "remove", name))
             self.message = t("remove_cancelled")
             return False
         r = run_git_logged(st.path, "remote", "remove", name,
@@ -2919,6 +2982,7 @@ class TUI:
                     curses.color_pair(C_CYAN) | curses.A_BOLD)
         self.scr.refresh()
         if not self.confirm(t("branch_delete_confirm", b=name)):
+            log_cancelled(st.path, ("branch", "-d", name))
             self.message = t("branch_delete_cancelled")
             return False
         r = run_git_logged(st.path, "branch", "-d", name,

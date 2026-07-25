@@ -932,11 +932,15 @@ class RemoteCheckTests(unittest.TestCase):
             git(repo, "commit", "-qm", "base")
             git(repo, "remote", "add", "github", str(root / "auf-github-geloescht.git"))
             st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
-        self.assertIn("no repository", st.error)
+        # In der Repo-Zeile nur das Stichwort — sonst verdrängt der Satz die Badges.
+        self.assertEqual(st.error, "github: repository gone")
         self.assertNotIn("login", st.error.lower())
-        # Gits Wortlaut bleibt als Beweis erhalten und steht auf der Info-Seite.
+        # Ganzer Satz und Gits Wortlaut stehen auf der Info-Seite.
+        self.assertIn("no repository", st.error_long)
+        info = "\n".join(repo_info_lines(st, DEFAULT_CONFIG))
+        self.assertIn("no repository", info)
         self.assertTrue(st.error_detail)
-        self.assertIn("Git said", "\n".join(repo_info_lines(st, DEFAULT_CONFIG)))
+        self.assertIn("Git said", info)
 
     def test_deleted_repo_and_broken_network_do_not_look_alike(self):
         gone = remote_check_message("github", "gone", 0, "", 30)
@@ -1034,6 +1038,53 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         entry = gmf_module.COMMAND_LOG[0]
         self.assertTrue(entry.startswith("✘"), entry)
         self.assertIn("Exit", entry)
+
+    def test_known_fetch_failure_survives_a_local_refresh(self):
+        # Nach einer Aktion (oder einem abgebrochenen Dialog) wird nur lokal neu
+        # gelesen. Der tote Remote darf dabei nicht scheinbar heil werden.
+        git(self.repo, "remote", "add", "github", str(self.root / "geloescht.git"))
+        broken = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertTrue(broken.error)
+
+        class Screen:
+            def getmaxyx(self): return (30, 100)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [broken]
+        fresh = ui.refresh_one(broken)
+        self.assertEqual(fresh.error, broken.error)
+        self.assertEqual(fresh.error_detail, broken.error_detail)
+        self.assertTrue(any(r.fetch_failed for r in fresh.remotes if r.name == "github"))
+        self.assertFalse(fresh.clean_and_synced)
+
+    def test_cancelled_action_is_logged_as_not_run(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+        class Screen:
+            def erase(self): pass
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm", return_value=False):
+            self.assertFalse(ui._remove_remote(st, "origin"))
+        entry = gmf_module.COMMAND_LOG[-1]
+        self.assertTrue(entry.startswith("⊘"), entry)
+        self.assertIn("git remote remove origin", entry)
+        self.assertIn("cancelled", entry)
+        # Und der Remote ist wirklich noch da.
+        self.assertIn('[remote "origin"]', (self.repo / ".git" / "config").read_text())
+
+    def test_repo_line_keeps_the_remote_badges_visible(self):
+        # Die Fehlermeldung teilt sich die Zeile mit den Badges: bleibt sie kurz,
+        # ist das ✘ am Remote noch zu sehen.
+        git(self.repo, "remote", "add", "github", str(self.root / "geloescht.git"))
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertLess(len(st.error), 40, st.error)
+        self.assertIn("✘", "".join(r.badge() for r in st.remotes))
 
     def test_log_quotes_arguments_so_the_line_can_be_pasted(self):
         self.assertEqual(
