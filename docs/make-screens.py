@@ -99,14 +99,10 @@ class Cell:
         self.ch, self.fg, self.bold, self.rev = " ", FG, False, False
 
 
-WIDE_TERMINAL_SYMBOLS = {"⏎", "⚑", "✔", "⚠"}
-
-
 def _cell_width(ch: str) -> int:
     if unicodedata.combining(ch) or ch in ("\ufe0e", "\ufe0f"):
         return 0
-    return 2 if (ch in WIDE_TERMINAL_SYMBOLS
-                 or unicodedata.east_asian_width(ch) in ("W", "F")) else 1
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
 def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
@@ -293,8 +289,8 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
             else:
                 c = grid[cy][cx]
                 c.ch, c.fg, c.bold, c.rev = ch, cur_fg, cur_bold, cur_rev
-                # SVG monospace text does not reliably reserve the second terminal
-                # cell of emoji-style symbols, so represent continuation cells.
+                # Breite Zeichen brauchen im SVG eine explizite Fortsetzungszelle;
+                # sonst driftet der Nachbau gegenüber dem curses-Raster.
                 for extra in range(1, min(width, cols - cx)):
                     c = grid[cy][cx + extra]
                     c.ch, c.fg, c.bold, c.rev = " ", cur_fg, cur_bold, cur_rev
@@ -403,7 +399,7 @@ def to_svg(grid: list, title: str) -> str:
 # OVER the list, and curses only sends the cells it believes changed. Reconstructing
 # that needs far more terminal-state reconstruction than the overview — going through
 # the info view left stray lines of it behind on the list underneath. The renderer does
-# account for the wide symbols used here, but deliberately remains a small replay tool
+# account for terminal cell widths, but deliberately remains a small replay tool
 # rather than a complete terminal emulator.
 
 # Two real actions before every capture, so the command log shows what it is for

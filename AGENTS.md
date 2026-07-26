@@ -39,10 +39,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Esc an — und Esc beendet die TUI mitten in der Aufnahme.
   Grenze des Generators: Nur der **Listen-Screen** ist reproduzierbar. Views, die
   darüber gezeichnet werden (Commit-Hilfe, Pager, Info-Ansicht), bräuchten echte
-  Zellbreiten-Logik (`⏎`/`⚑`/`✔` belegen zwei Spalten, ein String-Index eine) — dafür
-  wäre ein voller Terminal-Emulator nötig; ein Abstecher durch die Info-Ansicht ließ
-  prompt Reste von ihr auf der Liste darunter stehen. Solche Ansichten gehören als
-  vorformatierter Textblock ins README, nicht als Bild.
+  Terminal-Zustandslogik — dafür wäre ein voller Terminal-Emulator nötig; ein
+  Abstecher durch die Info-Ansicht ließ prompt Reste von ihr auf der Liste darunter
+  stehen. Solche Ansichten gehören als vorformatierter Textblock ins README, nicht
+  als Bild.
   Der Bildnachbau (`replay()`) ist bewusst von der pty-Mechanik getrennt und ohne
   Kindprozess getestet — ein fehlendes Steuerzeichen verschiebt sonst still ganze
   Zeilen, und das Bild sieht trotzdem plausibel aus.

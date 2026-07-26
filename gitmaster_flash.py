@@ -64,7 +64,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.14.0"
+__version__ = "0.14.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -2242,15 +2242,12 @@ def terminal_text(value) -> str:
     return "".join(out)
 
 
-WIDE_TERMINAL_SYMBOLS = {"⏎", "⚑", "✔", "⚠"}
-
-
 def cell_width(text: str) -> int:
     width = 0
     for ch in text:
         if unicodedata.combining(ch) or ch in ("\ufe0e", "\ufe0f"):
             continue
-        if ch in WIDE_TERMINAL_SYMBOLS or unicodedata.east_asian_width(ch) in ("W", "F"):
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
             width += 2
         else:
             width += 1
@@ -2530,8 +2527,9 @@ class TUI:
             if not (self.compact_col <= column < self.compact_col + columns):
                 continue
             x = 1 + (column - self.compact_col) * (column_width + 2)
-            # Feste Markenspalte, damit die Namen aller Zeilen fluchten — ✔ und ⚑
-            # belegen zwei Zellen, ● nur eine, "↑2↓1" gleich vier.
+            # Feste Markenspalte, damit die Namen aller Zeilen auch bei Marken mit
+            # Zähler fluchten. Die Breitenberechnung muss dabei dieselbe sein wie
+            # die von curses; sonst verschieben ↑2/↓3 die Namen um eine Zelle.
             name_width = max(1, column_width - COMPACT_MARK_WIDTH - 1)
             text = (pad_cells(mark, COMPACT_MARK_WIDTH) + " "
                     + pad_cells(ellipsize(name, name_width), name_width))

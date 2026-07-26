@@ -1378,6 +1378,15 @@ class CompactViewTests(unittest.TestCase):
         self.assertEqual(cell_width(shortened), 12)
         self.assertTrue(shortened.endswith("…"))
 
+    def test_counted_and_symbol_marks_align_repository_names(self):
+        marks = ("●", "⚑", "✔", "⚠", "↑2", "↓3", "⇅", "?")
+        prefixes = [pad_cells(mark, gmf_module.COMPACT_MARK_WIDTH) + " "
+                    for mark in marks]
+        # macOS curses führt diese Statuszeichen einzellig. Jede Marke muss daher
+        # im ausgegebenen Text exakt dieselbe Namensspalte ergeben.
+        self.assertEqual({len(prefix) for prefix in prefixes},
+                         {gmf_module.COMPACT_MARK_WIDTH + 1})
+
     def _ui(self, count, keys=(), width=100, height=30):
         class Screen:
             def __init__(self):
@@ -1590,7 +1599,7 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertNotIn("\x1b", escaped)
         self.assertIn("\\n", escaped)
         self.assertIn("\\x1b", escaped)
-        self.assertEqual(cell_width("a\u0308界✔"), 5)
+        self.assertEqual(cell_width("a\u0308界✔"), 4)
         self.assertEqual(truncate_cells("界x", 2), "界")
         self.assertEqual(cell_width(pad_cells("界", 4)), 4)
 
@@ -1659,6 +1668,10 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertEqual(lines[3], "    footer")
         self.assertEqual(lines[1], "aX")
         self.assertNotIn("25l", "".join(lines))
+        # Diese Symbole sind für macOS-curses einzellig. Würde der Nachbau sie
+        # breiter zählen, wanderten spätere ↑n-/↓n-Zeilen im SVG seitlich.
+        self.assertEqual(module._cell_width("✔"), 1)
+        self.assertEqual(module._cell_width("⚑"), 1)
 
     def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
         module, source = self._make_screens_module()
