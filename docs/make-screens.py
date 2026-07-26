@@ -16,7 +16,8 @@ Usage:
     python3 docs/make-screens.py --check   # fail if they would change (CI/pre-release)
 
 Requires a Unix pty (macOS/Linux). Deterministic: the demo sandbox is built fresh and
-uses generic app names + English, exactly like `--demo`.
+uses generic app names; every README screen is captured once in English and once in
+German.
 """
 
 from __future__ import annotations
@@ -417,12 +418,18 @@ ACTIONS = DOWN + DOWN + b"Uy" + RIGHT + RIGHT + UP + b"Ly"
 # Höhe je Bild ist bewusst knapp gewählt: das Fenster soll gefüllt aussehen, nicht
 # halb leer.
 SCREENS = [
-    ("compact.svg", [], ACTIONS,
+    ("compact.svg", "en", [], ACTIONS,
      "gitmaster_flash compact view — the whole collection at a glance", COLS, 20),
-    ("command-log.svg", [], ACTIONS + TAB,
+    ("command-log.svg", "en", [], ACTIONS + TAB,
      "gitmaster_flash — the command log with the focus on it", COLS, 20),
-    ("overview.svg", [], ACTIONS + b"m",
+    ("overview.svg", "en", [], ACTIONS + b"m",
      "gitmaster_flash detail view — problem repos sorted to the top", COLS, 35),
+    ("compact.de.svg", "de", [], ACTIONS,
+     "gitmaster_flash Kompaktansicht — alle Repos auf einen Blick", COLS, 20),
+    ("command-log.de.svg", "de", [], ACTIONS + TAB,
+     "gitmaster_flash — das Befehlsprotokoll mit Fokus", COLS, 20),
+    ("overview.de.svg", "de", [], ACTIONS + b"m",
+     "gitmaster_flash Detailansicht — problematische Repos zuerst", COLS, 35),
 ]
 
 
@@ -433,8 +440,8 @@ def main() -> int:
     args = ap.parse_args()
 
     rc = 0
-    for name, extra, keys, title, cols, rows in SCREENS:
-        grid = render_in_pty(["--demo", "--lang", "en"] + extra, keys=keys,
+    for name, lang, extra, keys, title, cols, rows in SCREENS:
+        grid = render_in_pty(["--demo", "--lang", lang] + extra, keys=keys,
                              cols=cols, rows=rows)
         _tidy(grid)
         svg = to_svg(_trim(grid), title)

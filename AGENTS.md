@@ -32,6 +32,8 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `make-screens.py` laufen lassen und das Ergebnis mitcommitten).
   **Weiterhin gilt:** keine globalen synthetischen Tastendrücke — die Eingaben gehen
   ausschließlich in den eigenen pty-Kindprozess, nie an das Fenstersystem.
+  Der Generator erzeugt jedes Bild als Sprachpaar: die Dateien ohne Sprachsuffix
+  sind Englisch, `.de.svg` ist Deutsch; beide READMEs verlinken ihre passende Fassung.
   Cursortasten nur als `\x1bO…` schicken (Konstanten `UP`/`DOWN`/… in `make-screens.py`):
   ncurses schaltet den Application-Cursor-Modus ein, die `\x1b[…`-Form käme als nacktes
   Esc an — und Esc beendet die TUI mitten in der Aufnahme.

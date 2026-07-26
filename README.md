@@ -62,6 +62,12 @@ repository, filled column by column like `ls`, using the width of the window
 rather than its height. That is the screen at the top of this page; the threshold
 is `compact_from` in `config.json`.
 
+The detail view deliberately remains the default for 20 repositories or fewer:
+at that size, having every count, branch and remote directly on screen is still
+the clearest overview. The compact view is its natural evolution as the
+collection grows, not a replacement. It gets you to a repository in a few
+keystrokes; press `M` there to see all of that repository's details.
+
 The mark is the whole status, condensed into one field:
 
 | Mark | Meaning |
@@ -72,8 +78,14 @@ The mark is the whole status, condensed into one field:
 | ⚑ | stash present |
 | ↑n / ↓n | ahead of / behind the sync remote |
 | ⇅ | diverged (both ahead and behind) |
-| ✘ | last fetch failed for a remote |
+| ✘ | repository scan error or last fetch failed for a remote |
 | ? | no sync remote, no remote branch, or detached HEAD |
+
+When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
+`●`, `⚑`, the sync distance, and finally `?`. Red means an error, conflict,
+local change, missing incoming commits or divergence; yellow marks a stash,
+outgoing commits or missing sync relationship; green `✔` means clean and
+synchronized. `M` or `I` reveals the details behind the condensed mark.
 
 `M` switches between compact and detail view and keeps the selected repository,
 so you can find a repository in the wide overview and then work on it in detail.
@@ -196,10 +208,14 @@ The answer distinguishes the cases that otherwise look identical:
 | answers but has no branches | reachable, repository still empty |
 | address reachable, but no repository there | deleted, renamed, or no access |
 | server wants a login | credential helper or SSH key missing |
+| SSH host key unknown or changed | connect once in a terminal and verify it |
 | host name does not resolve | no network or DNS problem |
 | no connection to the host | offline, firewall, or the server is down |
 | server replied with an error | problem on their side, not your repository |
 | no answer within n seconds | network or server too slow |
+
+The info view also keeps Git's own error message as evidence, underneath the
+plain-language classification.
 
 **`X` removes the selected remote** after a confirmation that spells out exactly
 what happens. This is a local Git configuration change only: the
@@ -219,7 +235,9 @@ and old experiments pile up. Each branch shows its last commit, its upstream wit
 ahead/behind, and whether it is already merged. `X` on a branch deletes it, but
 only when it is fully merged into HEAD (`git branch -d`): its commits are then
 reachable from HEAD anyway, so nothing can be lost. Unmerged branches are refused
-with the reason and the terminal command that would force it.
+with the reason and the terminal command that would force it. The confirmation
+shows both the exact delete command and the `git branch <name> <oid>` command
+that restores the branch.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ
@@ -281,7 +299,8 @@ Local branches:
    without following symlinks. The commit is built in a temporary index containing
    only the approved paths; an existing user index, including deliberately staged
    but excluded work, stays intact. Optionally the commit is pushed through the same
-   guarded private sync path as `P` afterwards.
+   guarded private sync path as `P` afterwards. After a local commit, the result
+   line includes `git reset --soft HEAD~1` as the undo command.
 
 ## Installation
 
@@ -398,7 +417,9 @@ starting the UI, so a pipe does the sensible thing.
 - `apps` — key → application used to open a repository (macOS `open -a`). The key
   shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
-  taken by the table above.
+  taken by the table above. Inside an SSH session gmf refuses this action with a
+  clear explanation: an app can only open on the Mac where you are working
+  directly.
 - `sync_remote_names` / `sync_remote_hosts` — how the private sync remote is
   recognized: by remote name, or by an exact normalized host in the remote URL
   (substring matches are never accepted). Defaults to `origin`
@@ -406,8 +427,9 @@ starting the UI, so a pipe does the sensible thing.
   recognized from its URL and sorted last.
 - `skip_dirs` — directories the scan does not descend into.
 - `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
-- `compact_from` — from this many repositories on, gmf starts in the compact
-  view (default 20; `M` switches at any time).
+- `compact_from` — when the repository count exceeds this number, gmf starts in
+  the compact view (default 20: up to 20 use the detail view; `M` switches at any
+  time).
 - `git_timeout` / `fetch_timeout` — seconds per git call.
 
 ## Safe push and pull

@@ -20,7 +20,7 @@ was. Eine einzige Python-Datei, nur Standardbibliothek — kein `pip install`, k
 Hintergrunddienst, keine Repo-Registrierung. Gescannt wird schlicht alles
 unterhalb des Ordners, in dem man es startet.
 
-![Kompaktansicht: jedes Repo als Marke und Name, darunter das Befehlsprotokoll](docs/compact.svg)
+![Kompaktansicht: jedes Repo als Marke und Name, darunter das Befehlsprotokoll](docs/compact.de.svg)
 
 <sub>Alle Bilder in dieser README werden aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen. Die Befehle im Protokoll unter der Liste liefen wirklich auf der Sandbox: ein Stash-Pop und ein Pull.</sub>
 
@@ -65,6 +65,13 @@ spaltenweise gefüllt wie bei `ls`, also über die Breite des Fensters statt üb
 seine Höhe. Das ist das Bild ganz oben. Die Schwelle steht als `compact_from` in
 der `config.json`.
 
+Die Detailansicht bleibt bis einschließlich 20 Repos bewusst Standard: Bei
+dieser Größe ist die direkte Anzeige aller Zähler, des Branches und der Remotes
+weiterhin die klarste Übersicht. Die Kompaktansicht ersetzt sie nicht, sondern
+ist ihre natürliche Weiterentwicklung für eine wachsende Repo-Sammlung. In
+wenigen Tastendrücken ist das gesuchte Repo erreicht; `M` zeigt dort anschließend
+alle Details.
+
 Die Marke ist der ganze Status, auf ein Feld eingedampft:
 
 | Marke | Bedeutung |
@@ -75,8 +82,15 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 | ⚑ | Stash vorhanden |
 | ↑n / ↓n | vor/zurück gegenüber dem Sync-Remote |
 | ⇅ | divergiert (gleichzeitig vor und zurück) |
-| ✘ | letzter Fetch eines Remotes fehlgeschlagen |
+| ✘ | Fehler beim Repo-Scan oder letzter Fetch eines Remotes fehlgeschlagen |
 | ? | kein Sync-Remote, kein Remote-Branch oder detached HEAD |
+
+Treffen mehrere Zustände zu, zeigt die Marke den dringendsten: zuerst `✘`, dann
+`⚠`, `●`, `⚑`, den Abstand zum Sync-Remote und schließlich `?`. Rot steht für
+Fehler, Konflikt, lokale Änderung, fehlende eingehende Commits oder Divergenz;
+Gelb für Stash, ausgehende Commits oder eine fehlende Sync-Beziehung; das grüne
+`✔` bedeutet sauber und synchron. `M` oder `I` zeigt die Details hinter der
+verdichteten Marke.
 
 `M` schaltet zwischen kompakt und Detail um und behält das gewählte Repo — man
 sucht es also in der breiten Übersicht und arbeitet dann im Detail daran weiter.
@@ -86,7 +100,7 @@ vorbehalten.
 
 ## Was eine Detailzeile verrät
 
-![Detailansicht: eine Zeile je Repo, problematische zuerst](docs/overview.svg)
+![Detailansicht: eine Zeile je Repo, problematische zuerst](docs/overview.de.svg)
 
 - **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
   Remotes, auch wenn alles synchron ist. Reihenfolge: privater Sync-Remote zuerst,
@@ -115,7 +129,7 @@ hat die Repo-Liste keinen — so ist immer klar, wem die Pfeiltasten gerade
 gehören. `↑`/`↓` gehen durch die Befehle, `Tab` führt zurück zur Liste; beide
 Seiten merken sich, wo man war.
 
-![Fokus im Befehlsprotokoll: der Auswahlbalken steht dort, die Repo-Liste hat keinen](docs/command-log.svg)
+![Fokus im Befehlsprotokoll: der Auswahlbalken steht dort, die Repo-Liste hat keinen](docs/command-log.de.svg)
 
 Abgebrochene Dialoge erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit
 das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief. Zwei gleiche
@@ -205,10 +219,14 @@ Antwort trennt die Fälle, die sonst gleich aussehen:
 | antwortet, hat aber keine Branches | erreichbar, Repo noch leer |
 | Adresse erreichbar, aber dort ist kein Repo | gelöscht, umbenannt oder kein Zugriff |
 | Server verlangt einen Login | Credential-Helper oder SSH-Key fehlt |
+| SSH-Hostschlüssel unbekannt oder geändert | einmal im Terminal verbinden und prüfen |
 | Hostname nicht auflösbar | kein Netz oder DNS-Problem |
 | keine Verbindung zum Host | offline, Firewall oder Server aus |
 | Server antwortet mit Fehler | Problem dort, nicht am eigenen Repo |
 | keine Antwort in n Sekunden | Netz oder Server zu langsam |
+
+Unterhalb dieser Klartext-Einordnung bewahrt die Info-Ansicht zusätzlich Gits
+eigene Fehlermeldung als Beleg auf.
 
 **`X` entfernt das ausgewählte Remote** nach einer Rückfrage, die vorher genau
 benennt, was passiert. Es ist ausschließlich eine lokale Konfigurationsänderung:
@@ -230,7 +248,9 @@ Branch stehen letzter Commit, Upstream mit Vorsprung/Rückstand und der
 Merge-Zustand da. `X` löscht einen Branch, aber nur, wenn er vollständig in HEAD
 gemergt ist (`git branch -d`): Seine Commits hängen dann ohnehin an HEAD, es kann
 also nichts verloren gehen. Nicht gemergte Branches lehnt gmf mit Begründung ab
-und nennt den Terminal-Befehl, der es erzwingen würde.
+und nennt den Terminal-Befehl, der es erzwingen würde. Die Rückfrage zeigt sowohl
+den genauen Löschbefehl als auch `git branch <Name> <OID>` zum Wiederherstellen
+des Branches.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
 teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie
@@ -295,7 +315,8 @@ Lokale Branches:
    der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
    samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Danach kann der
    Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
-   werden.
+   werden. Nach einem lokalen Commit nennt die Ergebniszeile
+   `git reset --soft HEAD~1` als Rückgängig-Befehl.
 
 ## Installation
 
@@ -414,7 +435,9 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
 - `apps` — Taste → App zum Öffnen des Repos (macOS `open -a`). Die Taste taucht
   automatisch im Footer auf: `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` ergibt `Z Zed`. Eine Taste wählen, die oben in der
-  Tabelle nicht schon belegt ist.
+  Tabelle nicht schon belegt ist. Innerhalb einer SSH-Sitzung verweigert gmf die
+  Aktion mit einer klaren Erklärung: Eine App lässt sich nur auf dem Mac öffnen,
+  an dem man direkt arbeitet.
 - `sync_remote_names` / `sync_remote_hosts` — woran der private Sync-Remote
   erkannt wird: am Remote-Namen oder an einem exakt normalisierten Host in der
   Remote-URL (Teiltreffer werden nie akzeptiert). Für eine
@@ -423,8 +446,9 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   einsortiert.
 - `skip_dirs` — Ordner, die der Scan gar nicht erst betritt.
 - `lang` — `"en"`, `"de"` oder `null` für automatisch nach `$LANG`.
-- `compact_from` — ab so vielen Repos startet gmf in der Kompaktansicht
-  (Standard 20; `M` schaltet jederzeit um).
+- `compact_from` — wird diese Repo-Anzahl überschritten, startet gmf in der
+  Kompaktansicht (Standard 20: bis einschließlich 20 bleibt die Detailansicht;
+  `M` schaltet jederzeit um).
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
 
 ## Sicheres Push und Pull

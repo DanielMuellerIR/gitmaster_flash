@@ -1676,6 +1676,21 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertFalse(owned[0].exists())
         self.assertNotIn('glob("gmf-demo-', source.read_text())
 
+    def test_readme_screens_exist_in_both_languages(self):
+        module, _ = self._make_screens_module()
+        captures = {(name, lang) for name, lang, *_ in module.SCREENS}
+        self.assertEqual(
+            captures,
+            {
+                ("compact.svg", "en"),
+                ("command-log.svg", "en"),
+                ("overview.svg", "en"),
+                ("compact.de.svg", "de"),
+                ("command-log.de.svg", "de"),
+                ("overview.de.svg", "de"),
+            },
+        )
+
     @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
     def test_installer_quotes_weird_clone_path(self):
         source = Path(__file__).resolve().parents[1]
