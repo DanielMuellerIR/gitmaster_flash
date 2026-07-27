@@ -65,7 +65,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -949,7 +949,28 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
             timeout=timeout if commit_timeout is None else commit_timeout)
     if _real_index_signature(repo, timeout) != real_before:
         raise CommitSafetyError("Git changed the real index unexpectedly")
+    if result.returncode == 0:
+        adopt_commit_in_real_index(repo, paths, timeout)
     return result
+
+
+def adopt_commit_in_real_index(repo: Path, paths: list[str], timeout: int) -> None:
+    """Den echten Index für die committeten Pfade auf den neuen HEAD nachziehen.
+
+    Ohne diesen Schritt bleibt der echte Index auf dem Stand von vor dem Commit
+    stehen: Er zeigt für die eben committete Datei noch den alten Inhalt. `git
+    status` vergleicht Arbeitsbaum und Index gegen HEAD und meldet die Datei
+    deshalb weiter als geändert (`MM`) — obwohl der Commit einwandfrei ist. Genau
+    das tut auch Git selbst nach einem `git commit -- <pfad>`.
+
+    `git reset` klingt nach mehr, als es hier ist: In der Pfad-Form (mit `--`)
+    fasst es ausschließlich diese Index-Einträge an — nie den Arbeitsbaum, nie
+    einen Commit und nie die übrigen, bewusst gestageten Änderungen.
+    """
+    # Ein Fehler hier darf den bereits geschriebenen Commit nicht entwerten. Er
+    # steht im Befehlsprotokoll (H) mit seinem Exit-Code; schlimmstenfalls sieht
+    # die Datei bis zum nächsten `git add`/`git reset` weiter geändert aus.
+    run_git_logged(repo, "reset", "-q", "HEAD", "--", *paths, timeout=timeout)
 
 
 def current_head(repo: Path, timeout: int) -> str | None:

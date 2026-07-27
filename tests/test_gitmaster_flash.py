@@ -672,22 +672,57 @@ class CommitSafetyTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_temporary_index_commits_only_approved_path_and_preserves_real_index(self):
+    def _status(self) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), "status", "--porcelain"],
+                              check=True, capture_output=True, text=True).stdout
+
+    def test_temporary_index_commits_only_approved_path_and_keeps_other_staging(self):
         (self.repo / "include.txt").write_text("approved\n")
         (self.repo / "skip.txt").write_text("staged but excluded\n")
         git(self.repo, "add", "skip.txt")
-        index = self.repo / ".git" / "index"
-        index_before = index.read_bytes()
         r = commit_selected(self.repo, ["include.txt"], "selected", 10)
         self.assertEqual(r.returncode, 0, r.stderr)
         changed = subprocess.run(
             ["git", "-C", str(self.repo), "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
             check=True, capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(changed, ["include.txt"])
-        self.assertEqual(index.read_bytes(), index_before)
+        # Das bewusste Staging einer NICHT committeten Datei bleibt erhalten …
         self.assertIn("skip.txt", subprocess.run(
             ["git", "-C", str(self.repo), "diff", "--cached", "--name-only"],
             check=True, capture_output=True, text=True).stdout)
+        # … die committete Datei dagegen ist erledigt und verschwindet aus dem Status.
+        self.assertNotIn("include.txt", self._status())
+
+    def test_committed_file_is_clean_afterwards(self):
+        """Der echte Index muss den Commit übernehmen, sonst lügt die Anzeige.
+
+        Vorher blieb er auf dem Stand von vor dem Commit stehen: `git status` meldete
+        die Datei als `MM`, obwohl Arbeitsbaum und HEAD längst identisch waren — in
+        gmf sah es aus, als wäre der Commit gar nicht passiert.
+        """
+        (self.repo / "include.txt").write_text("approved\n")
+        r = commit_selected(self.repo, ["include.txt"], "selected", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._status(), "")
+        st = collect_status(self.repo, self.repo.parent, DEFAULT_CONFIG)
+        self.assertEqual((st.modified, st.deleted, st.untracked), (0, 0, 0))
+
+    def test_older_staged_version_of_the_same_file_does_not_survive(self):
+        """Committet wird der Arbeitsbaum-Stand — genau wie bei `git commit -- <pfad>`.
+
+        Eine ältere, gestagete Fassung derselben Datei ist damit überholt; der Index
+        zeigt danach den committeten Inhalt und nicht mehr die Zwischenversion.
+        """
+        (self.repo / "include.txt").write_text("staged version\n")
+        git(self.repo, "add", "include.txt")
+        (self.repo / "include.txt").write_text("worktree version\n")
+        r = commit_selected(self.repo, ["include.txt"], "selected", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for ref in ("HEAD:include.txt", ":include.txt"):
+            self.assertEqual(subprocess.run(
+                ["git", "-C", str(self.repo), "show", ref],
+                check=True, capture_output=True, text=True).stdout, "worktree version\n")
+        self.assertEqual(self._status(), "")
 
     def test_conflicts_block_commit(self):
         git(self.repo, "checkout", "-qb", "other")

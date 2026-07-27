@@ -55,6 +55,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   das curses-Bild und blockiert bis zum Timeout. Fehlende Zugangsdaten erkennt
   `credentials_missing()` an den englischen Markern (deshalb `LC_ALL=C`) und die UI
   zeigt einen Einrichtungshinweis statt nur eines Exit-Codes.
+- Der Commit läuft über einen temporären Index, damit fremdes Staging überlebt.
+  Danach muss der echte Index die committeten Pfade übernehmen
+  (`adopt_commit_in_real_index`), sonst zeigt `git status` sie weiter als `MM` und
+  gmf meldet das Repo trotz erfolgreichem Commit als schmutzig. Referenz ist
+  `git commit -- <pfad>`.
 - Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
   Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
   vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen

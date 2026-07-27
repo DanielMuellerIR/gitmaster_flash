@@ -298,7 +298,9 @@ Local branches:
 3. Merge conflicts block the helper completely. `.gitignore` is extended atomically
    without following symlinks. The commit is built in a temporary index containing
    only the approved paths; an existing user index, including deliberately staged
-   but excluded work, stays intact. Optionally the commit is pushed through the same
+   but excluded work, stays intact. For the committed paths the real index adopts
+   the new commit, exactly as `git commit -- <path>` does — otherwise `git status`
+   would keep reporting them as modified. Optionally the commit is pushed through the same
    guarded private sync path as `P` afterwards. After a local commit, the result
    line includes `git reset --soft HEAD~1` as the undo command.
 

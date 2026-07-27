@@ -313,7 +313,10 @@ Lokale Branches:
 3. Merge-Konflikte sperren die Hilfe vollständig. Die `.gitignore` wird atomar und
    ohne Folgen von Symlinks ergänzt. Der Commit entsteht über einen temporären Index,
    der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
-   samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Danach kann der
+   samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Für die
+   committeten Pfade übernimmt der echte Index den neuen Commit — genau wie bei
+   `git commit -- <pfad>`; sonst meldete `git status` sie weiterhin als geändert.
+   Danach kann der
    Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
    werden. Nach einem lokalen Commit nennt die Ergebniszeile
    `git reset --soft HEAD~1` als Rückgängig-Befehl.
