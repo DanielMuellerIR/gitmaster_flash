@@ -431,6 +431,10 @@ starting the UI, so a pipe does the sensible thing.
   the compact view (default 20: up to 20 use the detail view; `M` switches at any
   time).
 - `git_timeout` / `fetch_timeout` — seconds per git call.
+- `commit_timeout` — seconds for `git commit` alone (default 120). It runs the
+  repository's pre-commit hook, which often starts linters or tests and needs far
+  longer than `git_timeout`. When the limit is hit, git *and* everything the hook
+  started are terminated, and gmf reports it instead of aborting.
 
 ## Safe push and pull
 

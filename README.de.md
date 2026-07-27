@@ -450,6 +450,10 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   Kompaktansicht (Standard 20: bis einschließlich 20 bleibt die Detailansicht;
   `M` schaltet jederzeit um).
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
+- `commit_timeout` — Sekunden allein für `git commit` (Standard 120). Dabei läuft
+  der pre-commit-Hook des Repos, der oft Linter oder Tests startet und deutlich
+  länger braucht als `git_timeout`. Wird die Grenze erreicht, werden git *und*
+  alles vom Hook Gestartete beendet, und gmf meldet das, statt abzustürzen.
 
 ## Sicheres Push und Pull
 

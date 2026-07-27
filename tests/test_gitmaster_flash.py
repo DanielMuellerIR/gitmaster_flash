@@ -721,6 +721,83 @@ class CommitSafetyTests(unittest.TestCase):
         self.assertFalse((self.repo / ".gitignore").exists())
 
 
+class SlowPreCommitHookTests(unittest.TestCase):
+    """Ein langsamer pre-commit-Hook ist der Alltagsfall, an dem gmf abstürzte.
+
+    `git commit` führt den Hook des Repos aus; startet der Linter oder Tests, ist der
+    kurze `git_timeout` von zehn Sekunden längst um. Früher flog der `TimeoutExpired`
+    dann bis in `main()` durch und beendete die TUI mit einem Traceback.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"; self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "file.txt").write_text("base\n")
+        git(self.repo, "add", "file.txt")
+        git(self.repo, "commit", "-qm", "base")
+        (self.repo / "file.txt").write_text("changed\n")
+        self.marker = Path(self.tmp.name) / "hook-pids"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _install_hook(self, seconds: float) -> None:
+        """pre-commit-Hook, der `seconds` lang beschäftigt ist.
+
+        Er notiert seine eigene PID und die eines Enkelprozesses; daran prüft der
+        Test, dass ein Timeout wirklich die ganze Prozessgruppe abräumt.
+        """
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"sleep {seconds} &\n"
+            "child=$!\n"
+            f"echo \"$$ $child\" > {shlex.quote(str(self.marker))}\n"
+            "wait $child\n")
+        hook.chmod(0o755)
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def test_timeout_kills_hook_and_its_children_and_leaves_no_commit(self):
+        self._install_hook(30)
+        head_before = gmf_module.current_head(self.repo, 10)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            commit_selected(self.repo, ["file.txt"], "hängt", 10, commit_timeout=1)
+        hook_pid, child_pid = (int(p) for p in self.marker.read_text().split())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (self._alive(hook_pid) or self._alive(child_pid)):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(hook_pid), "pre-commit-Hook läuft weiter")
+        self.assertFalse(self._alive(child_pid), "Enkelprozess des Hooks läuft weiter")
+        self.assertEqual(gmf_module.current_head(self.repo, 10), head_before)
+        self.assertFalse((self.repo / ".git" / "index.lock").exists())
+
+    def test_commit_timeout_covers_the_hook_while_git_timeout_stays_short(self):
+        # Genau der gemeldete Fall: Vorbereitungsschritte sind schnell, nur der
+        # Commit selbst braucht wegen des Hooks länger als git_timeout.
+        self._install_hook(2)
+        r = commit_selected(self.repo, ["file.txt"], "mit Hook", 1, commit_timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(gmf_module.current_head(self.repo, 10), None)
+
+    def test_timeout_message_names_the_subcommand_and_the_limit(self):
+        exc = subprocess.TimeoutExpired(["git", "-C", str(self.repo), "commit", "-m", "x"], 42)
+        text = gmf_module.timeout_message(exc)
+        self.assertIn("commit", text)
+        self.assertIn("42", text)
+
+
 class StashAndReadFailureTests(unittest.TestCase):
     def test_stash_preview_includes_untracked_binary(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -847,12 +924,24 @@ class NonInteractiveGitTests(unittest.TestCase):
     def test_run_git_disables_prompts_and_keeps_caller_env(self):
         recorded = {}
 
-        def fake_run(argv, **kwargs):
-            recorded.update(kwargs)
-            recorded["argv"] = argv
-            return subprocess.CompletedProcess(argv, 0, "", "")
+        class FakePopen:
+            """Nur so viel Popen, wie run_git benutzt: Kontextmanager + communicate."""
 
-        with mock.patch("gitmaster_flash.subprocess.run", fake_run):
+            def __init__(self, argv, **kwargs):
+                recorded.update(kwargs)
+                recorded["argv"] = argv
+                self.returncode = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def communicate(self, timeout=None):
+                return "", ""
+
+        with mock.patch("gitmaster_flash.subprocess.Popen", FakePopen):
             gmf_module.run_git(Path("/tmp"), "status", env={"GIT_INDEX_FILE": "/tmp/i"})
         env = recorded["env"]
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")

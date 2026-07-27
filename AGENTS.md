@@ -55,6 +55,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   das curses-Bild und blockiert bis zum Timeout. Fehlende Zugangsdaten erkennt
   `credentials_missing()` an den englischen Markern (deshalb `LC_ALL=C`) und die UI
   zeigt einen Einrichtungshinweis statt nur eines Exit-Codes.
+- Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
+  Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
+  vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen
+  laufen über `dispatch_action()`; dort fängt die Hauptschleife
+  `subprocess.TimeoutExpired` ab und zeigt `timeout_message()`. `git commit` hat
+  mit `commit_timeout` einen eigenen, großzügigen Wert — der Hook eines Projekts
+  braucht regelmäßig mehr als die zehn Sekunden von `git_timeout`.
 - Zustandsändernde Aktionen laufen über `run_git_logged()`, damit sie im
   Befehlsprotokoll (`H`) erscheinen; die Lesebefehle des Scans bleiben bei
   `run_git()`, sonst ist das Protokoll wertlos. Neue Aktionen entsprechend anbinden.

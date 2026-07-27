@@ -55,6 +55,7 @@ import os
 import posixpath
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -64,7 +65,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.14.1"
+__version__ = "0.15.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -89,6 +90,10 @@ DEFAULT_CONFIG = {
     # Timeout in Sekunden für einzelne git-Aufrufe (fetch darf länger).
     "git_timeout": 10,
     "fetch_timeout": 30,
+    # `git commit` führt den pre-commit-Hook des Repos aus — und der startet in
+    # vielen Projekten Linter oder Tests, die deutlich länger als zehn Sekunden
+    # brauchen. Mit dem kurzen git_timeout wäre jeder solche Commit chancenlos.
+    "commit_timeout": 120,
 }
 
 # Muster für die Commit-Hilfe: Dateien, die typischerweise in .gitignore gehören.
@@ -268,6 +273,19 @@ TR = {
     "empty_msg": {"en": "Empty message — cancelled.", "de": "Leere Message — abgebrochen."},
     "git_add_failed": {"en": "git add failed: {e}", "de": "git add fehlgeschlagen: {e}"},
     "commit_failed": {"en": "Commit failed: {e}", "de": "Commit fehlgeschlagen: {e}"},
+    # Ein Commit läuft nicht immer sofort durch: der pre-commit-Hook des Repos kann
+    # Linter oder Tests starten. Ohne diese Zeile sähe die TUI so lange tot aus.
+    "commit_running": {
+        "en": "Committing … a pre-commit hook may run (up to {s}s).",
+        "de": "Committe … ein pre-commit-Hook kann laufen (bis zu {s}s)."},
+    "commit_timeout_none": {
+        "en": "Commit cancelled after {s}s — nothing was committed. Raise commit_timeout "
+              "in the config file if the hook needs longer.",
+        "de": "Commit nach {s}s abgebrochen — es wurde nichts committet. Bei Bedarf "
+              "commit_timeout in der config.json erhöhen."},
+    "commit_timeout_done": {
+        "en": "Commit cancelled after {s}s, but the commit exists — check git log.",
+        "de": "Commit nach {s}s abgebrochen, aber der Commit ist da — git log prüfen."},
     "commit_conflicts": {
         "en": "Commit helper is blocked while merge conflicts exist.",
         "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen."},
@@ -538,6 +556,11 @@ TR = {
     # main
     "not_a_dir": {"en": "Not a directory: {p}", "de": "Kein Ordner: {p}"},
     "git_timeout": {"en": "git timeout", "de": "git-Timeout"},
+    "action_timeout": {
+        "en": "git {cmd} took longer than {s}s and was cancelled "
+              "(slow pre-commit hook or slow network?).",
+        "de": "git {cmd} brauchte länger als {s}s und wurde abgebrochen "
+              "(langsamer pre-commit-Hook oder langsames Netz?)."},
     "demo_built": {"en": "Demo sandbox: {p}\n(fake repos; delete the folder when done)",
                    "de": "Demo-Sandbox: {p}\n(Fake-Repos; Ordner danach löschen)"},
 }
@@ -885,8 +908,14 @@ def has_unmerged_entries(repo: Path, timeout: int) -> bool:
     return bool(diff.stdout or index.stdout)
 
 
-def commit_selected(repo: Path, paths: list[str], message: str, timeout: int) -> subprocess.CompletedProcess:
-    """Commit exactly paths through a temporary index; preserve the user's index bytes."""
+def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
+                    commit_timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Commit exactly paths through a temporary index; preserve the user's index bytes.
+
+    `timeout` gilt für die schnellen Vorbereitungsschritte (Index lesen, Baum
+    schreiben). `commit_timeout` gilt nur für den Commit selbst, weil dort der
+    pre-commit-Hook des Repos läuft; ohne Angabe bleibt es beim selben Wert.
+    """
     if not paths:
         raise CommitSafetyError("no approved paths")
     if has_unmerged_entries(repo, timeout):
@@ -915,11 +944,25 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int) ->
         tree_after = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if tree_after != tree_before:
             raise CommitSafetyError("approved files changed during commit preparation")
-        result = run_git_logged(repo, "commit", "-m", message, timeout=timeout,
-                                 env=env)
+        result = run_git_logged(
+            repo, "commit", "-m", message, env=env,
+            timeout=timeout if commit_timeout is None else commit_timeout)
     if _real_index_signature(repo, timeout) != real_before:
         raise CommitSafetyError("Git changed the real index unexpectedly")
     return result
+
+
+def current_head(repo: Path, timeout: int) -> str | None:
+    """Commit-ID von HEAD — oder None, wenn sie sich nicht lesen lässt.
+
+    Wird gebraucht, um nach einem abgebrochenen Commit zu unterscheiden, ob er noch
+    zustande kam. Ein frisches Repo ohne Commits hat kein HEAD: auch dann None.
+    """
+    try:
+        r = run_git(repo, "rev-parse", "HEAD", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def stash_preview(repo: Path, timeout: int) -> tuple[bool, str]:
@@ -1070,18 +1113,49 @@ def failed_fetch_remotes(result: subprocess.CompletedProcess) -> list[str]:
     return names
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Nach einem Timeout nicht nur git, sondern alles beenden, was es gestartet hat.
+
+    `subprocess.run()` würde allein den git-Prozess killen. Ein `git commit` startet
+    aber den pre-commit-Hook, der seinerseits Linter oder Tests startet — die liefen
+    dann als verwaiste Prozesse weiter, hielten unsere Ausgabe-Pipes offen und
+    stolperten beim nächsten Versuch übereinander. Dank `start_new_session=True`
+    hängt diese ganze Verwandtschaft in einer eigenen Prozessgruppe, die wir in
+    einem Rutsch beenden können.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, AttributeError):
+        # Prozess schon weg, oder eine Plattform ohne Prozessgruppen: dann wenigstens
+        # das direkte Kind beenden.
+        proc.kill()
+
+
 def run_git(repo: Path, *args: str, timeout: int = 10,
             env: dict | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, timeout=timeout,
+    cmd = ["git", "-C", str(repo), *args]
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         env=dict(env or os.environ, **NONINTERACTIVE_GIT_ENV),
         stdin=subprocess.DEVNULL,
         # Eigene Session = kein kontrollierendes Terminal. Damit kommt auch ein
         # von Git gestartetes ssh nicht mehr an unser /dev/tty, um dort nach einer
         # Passphrase zu fragen; der ssh-agent funktioniert davon unberührt weiter.
         start_new_session=True,
-    )
+    ) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            try:
+                # Jetzt sind alle Schreiber tot, das Einsammeln der Reste ist kurz.
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            raise subprocess.TimeoutExpired(cmd, timeout, output=out,
+                                            stderr=err) from None
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 # Protokoll der Befehle, die diese Sitzung bewusst abgesetzt hat (Reihenfolge = Verlauf).
@@ -1131,6 +1205,20 @@ def run_git_logged(repo: Path, *args: str, timeout: int = 10,
         raise
     log_command(repo, args, r.returncode)
     return r
+
+
+def timeout_message(exc: subprocess.TimeoutExpired) -> str:
+    """Aus einem abgelaufenen Git-Aufruf einen lesbaren Satz machen.
+
+    Ein Timeout beendete die TUI früher mit einem Python-Traceback. Er ist aber
+    kein Programmfehler, sondern eine Auskunft: Dieser eine Befehl hat zu lange
+    gebraucht. Deshalb nennt die Meldung den Unterbefehl (`commit`, `push`, …)
+    und die häufigsten Ursachen.
+    """
+    cmd = list(exc.cmd or [])
+    # Der Aufruf sieht immer so aus: ["git", "-C", "<repo>", "<unterbefehl>", …]
+    name = cmd[3] if len(cmd) > 3 else "git"
+    return t("action_timeout", cmd=name, s=int(exc.timeout or 0))
 
 
 class GitReadError(RuntimeError):
@@ -2600,6 +2688,18 @@ class TUI:
             if ch in (ord("n"), ord("N"), 27):
                 return False
 
+    def show_busy(self, text: str) -> None:
+        """Eine Zwischenmeldung sofort auf den Schirm bringen.
+
+        Vor einem Git-Aufruf, der dauern kann: curses zeichnet erst beim nächsten
+        `refresh()`, ohne diesen Zwischenschritt bliebe das alte Bild stehen und die
+        TUI sähe abgestürzt aus.
+        """
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, h - 1, 0, terminal_text(text).ljust(w - 1),
+                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        self.scr.refresh()
+
     def prompt_line(self, y: int, prompt: str) -> str | None:
         """Einzeilige Texteingabe; Esc bricht ab, ⏎ bestätigt."""
         buf: list[str] = []
@@ -3346,16 +3446,34 @@ class TUI:
         # Ausführen: .gitignore atomar ergänzen; exakt freigegebene Pfade über
         # einen temporären Index committen. Der echte Benutzer-Index bleibt erhalten.
         t_ = self.cfg["git_timeout"]
+        commit_t = self.cfg["commit_timeout"]
+        head_before = current_head(st.path, t_)
         try:
             ignore_changed = update_gitignore_atomic(st.path, to_ignore) if to_ignore else False
             approved = list(dict.fromkeys(to_commit + ([".gitignore"] if ignore_changed else [])))
             if not approved:
                 self.message = t("nothing_selected")
                 return True
-            r = commit_selected(st.path, approved, msg, t_)
+            # Ab hier kann es dauern: `git commit` führt den pre-commit-Hook des
+            # Repos aus, der oft Linter oder Tests startet.
+            self.show_busy(t("commit_running", s=commit_t))
+            r = commit_selected(st.path, approved, msg, t_, commit_t)
         except (CommitSafetyError, GitReadError, OSError) as e:
             self.message = t("commit_failed", e=str(e)[:120])
             return True
+        except subprocess.TimeoutExpired:
+            # Git und der von ihm gestartete Hook wurden beendet. Ob der Commit
+            # vorher noch fertig wurde, weiß nur das Repo selbst — deshalb den
+            # HEAD vergleichen, statt zu raten.
+            done = current_head(st.path, t_) not in (None, head_before)
+            self.message = t("commit_timeout_done" if done else "commit_timeout_none",
+                             s=commit_t)
+            self.refresh_one(st)
+            return True
+        finally:
+            # Tasten, die während der Wartezeit gedrückt wurden, würden sonst
+            # anschließend als Kommandos ausgeführt (⏎ aus Ungeduld z.B.).
+            curses.flushinp()
         if r.returncode != 0:
             self.message = t("commit_failed", e=r.stderr.strip()[:120])
             return True
@@ -3368,6 +3486,41 @@ class TUI:
         return True
 
     # -- Hauptschleife -------------------------------------------------------
+
+    def dispatch_action(self, key: str) -> None:
+        """Einen Buchstabenbefehl ausführen.
+
+        Bewusst von der Hauptschleife getrennt: So liegt jede Aktion, die Git
+        aufruft, hinter genau einer Absicherung gegen Timeouts (siehe `run`).
+        """
+        if key == "C":
+            self.action_commit_wizard()
+        elif key == "U":
+            self.action_stash_pop()
+        elif key == "R":
+            self.reload(fetch=True)
+        elif key == "P":
+            self.action_sync_push()
+        elif key == "L":
+            self.action_sync_pull()
+        elif key == "G":
+            self.action_github_push()
+        elif key == "H":
+            self.action_git_help()
+        elif key == "I":
+            self.action_repo_info()
+        elif key == "A":
+            self.action_file_changes()
+        elif key == "M":
+            # Ansicht wechseln — die Auswahl bleibt auf demselben Repo, damit
+            # man in der Übersicht suchen und im Detail weiterarbeiten kann.
+            self.view_mode = "detail" if self.view_mode == "compact" else "compact"
+        elif key == "S":
+            self.action_stash_show()
+        elif key == "D":
+            self.action_stash_drop()
+        elif key in self.cfg["apps"]:
+            self.action_open_app(key)
 
     def run(self):
         curses.curs_set(0)
@@ -3436,34 +3589,14 @@ class TUI:
                 continue
             if key == "Q":
                 return
-            elif key == "C":
-                self.action_commit_wizard()
-            elif key == "U":
-                self.action_stash_pop()
-            elif key == "R":
-                self.reload(fetch=True)
-            elif key == "P":
-                self.action_sync_push()
-            elif key == "L":
-                self.action_sync_pull()
-            elif key == "G":
-                self.action_github_push()
-            elif key == "H":
-                self.action_git_help()
-            elif key == "I":
-                self.action_repo_info()
-            elif key == "A":
-                self.action_file_changes()
-            elif key == "M":
-                # Ansicht wechseln — die Auswahl bleibt auf demselben Repo, damit
-                # man in der Übersicht suchen und im Detail weiterarbeiten kann.
-                self.view_mode = "detail" if self.view_mode == "compact" else "compact"
-            elif key == "S":
-                self.action_stash_show()
-            elif key == "D":
-                self.action_stash_drop()
-            elif key in self.cfg["apps"]:
-                self.action_open_app(key)
+            # Jeder Git-Aufruf kann hängen bleiben (langsamer Hook, langsames Netz).
+            # Ein Timeout ist dann eine Auskunft und kein Grund, die Übersicht zu
+            # beenden — vorher stieg gmf an dieser Stelle mit einem Traceback aus.
+            try:
+                self.dispatch_action(key)
+            except subprocess.TimeoutExpired as exc:
+                self.message = timeout_message(exc)
+                curses.flushinp()
 
 
 def init_colors():
