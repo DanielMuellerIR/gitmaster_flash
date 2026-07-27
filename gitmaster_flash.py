@@ -65,7 +65,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.15.1"
+__version__ = "0.15.2"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -2327,8 +2327,36 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
 # TUI
 # ---------------------------------------------------------------------------
 
-# Farb-Paar-Nummern
+# Farb-Paar-Nummern. C_SEL ist kein eigener Farbton, sondern die Notlösung für
+# Rot in der markierten Zeile — siehe selected_pair().
 C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN = 1, 2, 3, 4, 5, 6
+
+
+def selected_pair(pair: int) -> tuple[int, bool]:
+    """Wie ein farbiges Element in der markierten Zeile dargestellt wird.
+
+    Markiert wird sonst durch Umkehren von Vorder- und Hintergrund. Bei Rot
+    ergibt das die dunkelste Schrift auf der dunkelsten Farbe — schwarz auf
+    sattem Rot ist kaum noch zu entziffern, und ausgerechnet die roten Angaben
+    (M:, D:, ↓hinterher, gescheiterter Fetch) sind die wichtigen. Rot bekommt
+    deshalb ein eigenes Paar: helle Schrift auf rotem Grund, nicht umgekehrt.
+    Grün, Gelb und Cyan sind hell genug, dass die dunkle Schrift darauf gut
+    steht; sie bleiben bei der einfachen Umkehrung.
+
+    Rückgabe: (Farbpaar, ob umgekehrt wird).
+    """
+    if pair == C_RED:
+        return C_SEL, False
+    return pair, True
+
+
+def color_attr(pair: int, is_selected: bool) -> int:
+    """curses-Attribut für ein farbiges Element, markiert oder nicht."""
+    if not is_selected:
+        return curses.color_pair(pair)
+    chosen, reverse = selected_pair(pair)
+    attr = curses.color_pair(chosen)
+    return attr | (curses.A_REVERSE if reverse else curses.A_BOLD)
 
 
 def terminal_text(value) -> str:
@@ -2472,7 +2500,7 @@ class TUI:
 
         def part(text, pair):
             nonlocal x
-            safe_addstr(self.scr, y, x, text, sel | curses.color_pair(pair))
+            safe_addstr(self.scr, y, x, text, color_attr(pair, is_selected))
             x += cell_width(terminal_text(text)) + 1
 
         if st.error:
@@ -2642,9 +2670,7 @@ class TUI:
             name_width = max(1, column_width - COMPACT_MARK_WIDTH - 1)
             text = (pad_cells(mark, COMPACT_MARK_WIDTH) + " "
                     + pad_cells(ellipsize(name, name_width), name_width))
-            attr = curses.color_pair(pair)
-            if index == self.selected and self.focus == "repos":
-                attr |= curses.A_REVERSE
+            attr = color_attr(pair, index == self.selected and self.focus == "repos")
             safe_addstr(self.scr, top + row, x, text, attr)
         if total_columns > columns:
             # Ohne diesen Hinweis wirkt die Liste abgeschnitten statt scrollbar.
@@ -2689,9 +2715,7 @@ class TUI:
                 pair = C_RED
             elif entry.startswith("⊘"):
                 pair = C_YELLOW
-            attr = curses.color_pair(pair)
-            if focused and index == self.log_selected:
-                attr |= curses.A_REVERSE
+            attr = color_attr(pair, focused and index == self.log_selected)
             safe_addstr(self.scr, top + 1 + offset, 1,
                         pad_cells(entry, w - 2), attr)
 
@@ -3114,8 +3138,7 @@ class TUI:
                 pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[code]
                 label = t("conflict_label") if code == "C" else ""
                 safe_addstr(self.scr, y, 1, f"{code}  {label}{path}",
-                            (curses.A_REVERSE if index == sel else 0)
-                            | curses.color_pair(pair))
+                            color_attr(pair, index == sel))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
@@ -3375,7 +3398,6 @@ class TUI:
                 off = sel - body_h + 1
             for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
                 it = items[i]
-                mark = curses.A_REVERSE if i == sel else 0
                 if it["ignore"]:
                     label, pair = t("to_gitignore", p=it["pattern"]), C_YELLOW
                 elif it["include"]:
@@ -3385,7 +3407,7 @@ class TUI:
                 path_width = max(1, w - 40)
                 safe_addstr(self.scr, y, 1,
                             f"{it['code']}  {pad_cells(it['path'], path_width)} {label}",
-                            mark | curses.color_pair(pair))
+                            color_attr(pair, i == sel))
             safe_addstr(self.scr, h - 2, 0, t("commit_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
@@ -3628,6 +3650,9 @@ def init_colors():
     curses.init_pair(C_YELLOW, curses.COLOR_YELLOW, -1)
     curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
     curses.init_pair(C_CYAN, curses.COLOR_CYAN, -1)
+    # Rot in der markierten Zeile: heller Text AUF Rot statt Rot als Hintergrund
+    # mit schwarzem Text (siehe selected_pair).
+    curses.init_pair(C_SEL, curses.COLOR_WHITE, curses.COLOR_RED)
 
 
 # ---------------------------------------------------------------------------

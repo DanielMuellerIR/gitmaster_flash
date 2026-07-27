@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 948 364" width="948" height="364" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
 <title>gitmaster_flash compact view — the whole collection at a glance</title>
 <rect width="948" height="364" rx="8" fill="#1c1c1c"/>
-<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.15.1 · ~/git · 27 repos · 20 to review                                                    </text>
+<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.15.2 · ~/git · 27 repos · 20 to review                                                    </text>
 <text x="20.4" y="42.0" fill="#e06c75" xml:space="preserve">●   api-gateway      </text>
 <text x="213.6" y="42.0" fill="#e06c75" xml:space="preserve">⚠   ml-experiments   </text>
 <text x="406.8" y="42.0" fill="#e5c07b" xml:space="preserve">↑5  chess-engine     </text>

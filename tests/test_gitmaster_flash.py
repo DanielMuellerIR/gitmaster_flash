@@ -136,6 +136,21 @@ class TestRemoteUrlDisplay(unittest.TestCase):
         self.assertEqual(display_remote_url(address), address)
 
 
+class SelectedLineColourTests(unittest.TestCase):
+    """Die markierte Zeile darf ihre wichtigste Angabe nicht unlesbar machen."""
+
+    def test_red_uses_light_text_instead_of_being_inverted(self):
+        # Umkehren hieße bei Rot: schwarze Schrift auf sattem Rot — praktisch nicht
+        # zu lesen, und ausgerechnet Rot trägt die dringenden Angaben (M:, D:, ↓).
+        self.assertEqual(gmf_module.selected_pair(gmf_module.C_RED),
+                         (gmf_module.C_SEL, False))
+
+    def test_light_colours_keep_the_plain_inversion(self):
+        for pair in (gmf_module.C_GREEN, gmf_module.C_YELLOW,
+                     gmf_module.C_CYAN, gmf_module.C_DIM):
+            self.assertEqual(gmf_module.selected_pair(pair), (pair, True))
+
+
 class TestSeveritySort(unittest.TestCase):
     def test_dirty_before_clean(self):
         dirty = RepoStatus(path=Path("/x"), rel="x", modified=1)
@@ -1796,6 +1811,21 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         # breiter zählen, wanderten spätere ↑n-/↓n-Zeilen im SVG seitlich.
         self.assertEqual(module._cell_width("✔"), 1)
         self.assertEqual(module._cell_width("⚑"), 1)
+
+    def test_screen_replay_keeps_real_background_colours(self):
+        """Ein Farbpaar mit eigenem Hintergrund muss im Bild eine Fläche werden.
+
+        Die markierte Zeile stellt Rot so dar: helle Schrift AUF Rot statt Rot als
+        Fläche mit schwarzer Schrift. Ohne Hintergrundfarben im Nachbau ging die
+        Fläche verloren — die helle Schrift stand dann auf dem dunklen Fenster und
+        das Bild zeigte etwas, das das Programm nie gezeichnet hat.
+        """
+        module, _ = self._make_screens_module()
+        grid = module.replay("\x1b[H\x1b[2J\x1b[37;41mM:1\x1b[0m ok", cols=10, rows=2)
+        self.assertEqual(grid[0][0].bg, module.ANSI_BG[41])
+        self.assertFalse(grid[0][0].rev)
+        self.assertIsNone(grid[0][4].bg)                 # nach ESC[0m wieder normal
+        self.assertIn(f'fill="{module.ANSI_BG[41]}"', module.to_svg(grid, "t"))
 
     def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
         module, source = self._make_screens_module()

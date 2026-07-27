@@ -61,6 +61,17 @@ ANSI = {
     94: "#61afef", 95: "#c678dd", 96: "#56b6c2", 97: "#ffffff",
 }
 
+# Flächenfarben (ESC[4xm). Deliberately deeper than the foreground tones above: a
+# terminal fills a background with the saturated base colour, and the lightened
+# foreground shades would wash out under text — the TUI puts white text on red for
+# the selected line, and on #e06c75 that would be barely readable.
+ANSI_BG = {
+    40: "#1c1c1c", 41: "#a11c26", 42: "#3f7d3f", 43: "#8a6d1f",
+    44: "#2f5d9e", 45: "#7d3f8a", 46: "#1f6d75", 47: "#d8d8d8",
+    100: "#3b3b3b", 101: "#a11c26", 102: "#3f7d3f", 103: "#8a6d1f",
+    104: "#2f5d9e", 105: "#7d3f8a", 106: "#1f6d75", 107: "#ffffff",
+}
+
 
 # Cursor keys as the TUI expects them. ncurses puts the terminal into "application
 # cursor" mode (ESC[?1h), and from then on it only recognises ESC O A/B/C/D. Sending
@@ -93,10 +104,11 @@ def _split_keys(keys: bytes) -> list:
 
 
 class Cell:
-    __slots__ = ("ch", "fg", "bold", "rev")
+    __slots__ = ("ch", "fg", "bg", "bold", "rev")
 
     def __init__(self):
         self.ch, self.fg, self.bold, self.rev = " ", FG, False, False
+        self.bg = None                                   # None = window background
 
 
 def _cell_width(ch: str) -> int:
@@ -194,6 +206,7 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
     grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
     cy = cx = 0
     cur_fg, cur_bold, cur_rev = FG, False, False
+    cur_bg = None
     i = 0
     while i < len(text):
         m = CSI.match(text, i)
@@ -233,10 +246,18 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 for n in (nums or [0]):
                     if n == 0:
                         cur_fg, cur_bold, cur_rev = FG, False, False
+                        cur_bg = None
                     elif n == 1:
                         cur_bold = True
                     elif n == 7:
                         cur_rev = True
+                    elif n == 49:                       # background back to default
+                        cur_bg = None
+                    elif n in ANSI_BG:
+                        # A colour pair with a real background (the TUI uses one for
+                        # red in the selected line). Without this the fill was lost
+                        # and its light text ended up on the dark window instead.
+                        cur_bg = ANSI_BG[n]
                     elif n in ANSI:
                         cur_fg = ANSI[n]
             elif cmd == "J":                        # erase display
@@ -288,7 +309,7 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 grid[cy][cx - 1].ch += ch
             else:
                 c = grid[cy][cx]
-                c.ch, c.fg, c.bold, c.rev = ch, cur_fg, cur_bold, cur_rev
+                c.ch, c.fg, c.bold, c.rev, c.bg = ch, cur_fg, cur_bold, cur_rev, cur_bg
                 # Breite Zeichen brauchen im SVG eine explizite Fortsetzungszelle;
                 # sonst driftet der Nachbau gegenüber dem curses-Raster.
                 for extra in range(1, min(width, cols - cx)):
@@ -370,7 +391,7 @@ def to_svg(grid: list, title: str) -> str:
             c = row[x]
             x2 = x
             while x2 < cols and row[x2].rev == c.rev and row[x2].fg == c.fg \
-                    and row[x2].bold == c.bold:
+                    and row[x2].bg == c.bg and row[x2].bold == c.bold:
                 x2 += 1
             runs.append((x, x2, c))
             x = x2
@@ -379,10 +400,11 @@ def to_svg(grid: list, title: str) -> str:
             if not s.strip():
                 continue
             px, py = pad + x0 * cw, pad + (y + 1) * ch - 4
-            if c.rev:
+            # Reverse swaps the two; a pair with its own background simply keeps them.
+            fill, area = (c.bg or BG, c.fg) if c.rev else (c.fg, c.bg)
+            if area is not None:
                 out.append(f'<rect x="{px:.1f}" y="{pad + y * ch:.1f}" '
-                           f'width="{(x1 - x0) * cw:.1f}" height="{ch}" fill="{c.fg}"/>')
-            fill = BG if c.rev else c.fg
+                           f'width="{(x1 - x0) * cw:.1f}" height="{ch}" fill="{area}"/>')
             esc = (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
             weight = ' font-weight="bold"' if c.bold else ""
             out.append(f'<text x="{px:.1f}" y="{py:.1f}" fill="{fill}"'

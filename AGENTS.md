@@ -55,6 +55,12 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   das curses-Bild und blockiert bis zum Timeout. Fehlende Zugangsdaten erkennt
   `credentials_missing()` an den englischen Markern (deshalb `LC_ALL=C`) und die UI
   zeigt einen Einrichtungshinweis statt nur eines Exit-Codes.
+- Farbige Elemente in einer markierten Zeile immer über `color_attr()` zeichnen,
+  nie `A_REVERSE | color_pair(...)` von Hand. Umkehren macht aus Rot eine schwarze
+  Schrift auf sattem Rot — unlesbar, und Rot trägt die dringenden Angaben.
+  `selected_pair()` entscheidet das zentral; der Bildgenerator kann echte
+  Hintergrundfarben (`ANSI_BG`), sonst zeigen die README-Bilder etwas anderes als
+  das Programm.
 - Der Commit läuft über einen temporären Index, damit fremdes Staging überlebt.
   Danach muss der echte Index die committeten Pfade übernehmen
   (`adopt_commit_in_real_index`), sonst zeigt `git status` sie weiter als `MM` und
