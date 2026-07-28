@@ -103,8 +103,8 @@ class TestSuggestedIgnore(unittest.TestCase):
 
 class TestRemoteBadges(unittest.TestCase):
     def test_synced_remote_is_still_named(self):
-        remote = RemoteStatus("minipc", is_sync=True, branch_exists=True)
-        self.assertEqual(remote.badge(), "minipc")
+        remote = RemoteStatus("backup", is_sync=True, branch_exists=True)
+        self.assertEqual(remote.badge(), "backup")
 
     def test_delta_and_missing_branch(self):
         self.assertEqual(RemoteStatus("github", public=True, branch_exists=True,
