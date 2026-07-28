@@ -92,7 +92,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   auch auf dem befragten Rechner, weil dort per stdin dasselbe Skript läuft —,
   und `--fetch` führt ein echtes `git fetch --all --prune` aus. Beides lässt
   Branch, Index und Arbeitsbaum unberührt; „ändert nie etwas" wäre trotzdem
-  falsch und stand so bis 2026-07-28 in beiden READMEs.
+  falsch und stand so bis 2026-07-28 in beiden READMEs. Dass die Datei angelegt
+  wird, ist dabei bewusst so: gmf zielt ausschließlich auf eigene Rechner, und
+  dort darf eine Datei entstehen, wenn sie einen Nutzen hat (Entscheidung
+  2026-07-28). Die Zusage muss den Vorgang nur benennen, nicht vermeiden.
 - Ändert sich der Remote-Vertrag — JSON-Felder, Exit-Codes, der `ssh`-Aufruf —,
   gehört der Fall nach `tests/test_cli_blackbox.py`. Dort führt ein temporäres
   `ssh` im PATH den echten, über stdin übertragenen Code lokal aus und prüft
@@ -107,10 +110,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
 - [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).
-- [ ] Beim reinen Abfragelauf (`--json`, `--list`, und damit auch auf der
-      `--diff`-Gegenstelle) keine `config.json` anlegen, sondern nur lesen. Dann
-      hinterlässt eine Abfrage auf einem fremden Rechner wirklich nichts.
-      Entscheidung offen: Der Vorgabe-Start bleibt sonst weniger selbsterklärend.
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).
