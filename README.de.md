@@ -404,8 +404,13 @@ dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber
 braucht es nur `python3` und `git`. Nebeneffekt: beide Seiten laufen immer in exakt
 derselben Fassung, Versionsdrift ist ausgeschlossen. Funktioniert auch gegen Linux.
 
-**Es ändert nie etwas** — kein Fetch in deine Repos, keine Remotes angelegt, nichts
-gepusht. Es sagt, was anders ist; das Reparieren bleibt bei dir.
+**Es ändert nie deine Repos** — keine Remotes angelegt, nichts committet oder gepusht,
+Branch, Index und Arbeitsbaum bleiben unangetastet. Es sagt, was anders ist; das
+Reparieren bleibt bei dir. Zweierlei schreibt es trotzdem, beides außerhalb der
+Repo-Inhalte: `--fetch` führt auf beiden Rechnern ein echtes `git fetch --all --prune`
+aus — genau dafür ist der Schalter da, und er berührt nur die Remote-Tracking-Refs —,
+und der allererste Lauf legt `~/.config/gitmaster_flash/config.json` an, auf dem
+befragten Rechner ebenso, weil dort dasselbe Skript läuft.
 
 **Tipp:** Rechner in `~/.ssh/config` eintragen und `ControlMaster auto` /
 `ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s` setzen. Beim Scannen vieler Repos

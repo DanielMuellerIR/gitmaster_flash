@@ -86,6 +86,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
+- „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
+  Zwei Ausnahmen gehören überall dorthin, wo die Zusage steht: `load_config()`
+  legt beim ersten Lauf `~/.config/gitmaster_flash/config.json` an — bei `--diff`
+  auch auf dem befragten Rechner, weil dort per stdin dasselbe Skript läuft —,
+  und `--fetch` führt ein echtes `git fetch --all --prune` aus. Beides lässt
+  Branch, Index und Arbeitsbaum unberührt; „ändert nie etwas" wäre trotzdem
+  falsch und stand so bis 2026-07-28 in beiden READMEs.
+- Ändert sich der Remote-Vertrag — JSON-Felder, Exit-Codes, der `ssh`-Aufruf —,
+  gehört der Fall nach `tests/test_cli_blackbox.py`. Dort führt ein temporäres
+  `ssh` im PATH den echten, über stdin übertragenen Code lokal aus und prüft
+  Remote-JSON, Remote-Exit-Code und lokale Auswertung gemeinsam, ohne Netz.
+  Unit-Tests mit gemocktem `subprocess` sehen genau diese Grenze nicht.
 
 ## Offene Punkte / Ideen
 
@@ -95,6 +107,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
 - [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).
+- [ ] Beim reinen Abfragelauf (`--json`, `--list`, und damit auch auf der
+      `--diff`-Gegenstelle) keine `config.json` anlegen, sondern nur lesen. Dann
+      hinterlässt eine Abfrage auf einem fremden Rechner wirklich nichts.
+      Entscheidung offen: Der Vorgabe-Start bleibt sonst weniger selbsterklärend.
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).

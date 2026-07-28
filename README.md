@@ -386,8 +386,13 @@ to be installed on the other machine: the script is piped over stdin, so the rem
 only needs `python3` and `git`, and both sides always run the exact same version (no
 version drift to reason about). Works against Linux too.
 
-**It never changes anything** — no fetching into your repos, no remotes added, nothing
-pushed. It tells you what differs; fixing is yours.
+**It never changes your repositories** — no remotes added, nothing committed or pushed,
+branch, index and working tree untouched. It tells you what differs; fixing is yours.
+Two things it does write, both outside your repository contents: `--fetch` runs a real
+`git fetch --all --prune` on both machines — that is what the flag is for, and it only
+updates remote-tracking refs — and the very first run creates
+`~/.config/gitmaster_flash/config.json`, on the queried machine as well, because the
+same script runs there.
 
 **Tip:** put your machines in `~/.ssh/config` and add
 `ControlMaster auto` / `ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s`. Scanning many
