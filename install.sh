@@ -56,8 +56,13 @@ resolve_sourced_path() {
   print -r -- "${path:A}"
 }
 
-if [[ -f "$zshrc" ]] && grep -qF "gmf.zsh" -- "$zshrc"; then
-  existing="$(grep -F "gmf.zsh" -- "$zshrc" | head -1)"
+# Nur Zeilen zählen, deren erstes Nicht-Leerzeichen KEIN "#" ist: eine
+# auskommentierte Zeile ("# source …/gmf.zsh") lädt den Wrapper in neuen Shells
+# nicht und darf nicht als bestehende Installation durchgehen — sonst meldet
+# das Skript Erfolg, obwohl `gmf` weiterhin fehlt.
+active_gmf_line='^[[:space:]]*[^#[:space:]].*gmf\.zsh'
+if [[ -f "$zshrc" ]] && grep -qE "$active_gmf_line" -- "$zshrc"; then
+  existing="$(grep -E "$active_gmf_line" -- "$zshrc" | head -1)"
   if [[ "$existing" == "$source_line" ]]; then
     print "Already installed: $zshrc sources gmf.zsh — nothing to do."
   elif [[ "$(resolve_sourced_path "$existing")" == "${wrapper_path:A}" ]]; then

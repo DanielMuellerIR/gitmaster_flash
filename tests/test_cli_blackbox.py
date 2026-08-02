@@ -222,6 +222,21 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Already installed", result.stdout)
         self.assertEqual(zshrc.read_text(), f"source ~/{self.repo.name}/gmf.zsh\n")
 
+    def test_commented_source_line_is_not_an_installation(self):
+        """Eine auskommentierte Zeile lädt den Wrapper nicht — der Installer darf
+        sie nicht als bestehende Installation werten und Erfolg melden."""
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text("# source ~/irgendwo/gmf.zsh\n")
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Already installed", result.stdout)
+        content = zshrc.read_text()
+        # Der Kommentar bleibt stehen, die echte source-Zeile kommt dazu.
+        self.assertIn("# source ~/irgendwo/gmf.zsh", content)
+        self.assertIn(f'source -- "{self.repo}/gmf.zsh"', content)
+
     def _resolve(self, line: str) -> str:
         """Nur die Pfadauflösung aus install.sh laden — ohne den langen Selbsttest."""
         script = (
