@@ -65,7 +65,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.15.2"
+__version__ = "0.16.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -163,6 +163,9 @@ TR = {
     "diff_remote_security": {
         "en": "DRIFT  {rel}: security/endpoint identity for {r} differs",
         "de": "DRIFT  {rel}: Sicherheit/Ziel-Identität für {r} unterscheidet sich"},
+    "diff_remote_branch": {
+        "en": "DRIFT  {rel}: branch '{br}' exists on {r} only {m}",
+        "de": "DRIFT  {rel}: Branch '{br}' existiert auf {r} nur {m}"},
     "hdr_review": {"en": "{n} to review", "de": "{n} zu prüfen"},
     "hdr_clean": {"en": "all clean ✔", "de": "alles sauber ✔"},
     # Repo-Zeile
@@ -533,8 +536,15 @@ TR = {
     "remove_effect_server": {
         "en": "· nothing changes on the server; this is purely local",
         "de": "· auf dem Server ändert sich nichts; das ist rein lokal"},
-    "remove_undo": {"en": "Undo (same URL again):", "de": "Rückgängig (URL wieder eintragen):"},
+    "remove_undo": {"en": "Undo (restore the local configuration):",
+                    "de": "Rückgängig (lokale Konfiguration wiederherstellen):"},
     "remove_command": {"en": "Command:", "de": "Befehl:"},
+    # Sicherheitszusage der destruktiven Dialoge: der auszuführende Befehl muss im
+    # Moment der Bestätigung sichtbar sein. Passt er nicht mehr aufs Fenster,
+    # wird die Aktion verweigert statt blind bestätigt.
+    "dialog_too_small": {
+        "en": "Window is too small to show this confirmation safely — enlarge it and retry.",
+        "de": "Fenster zu klein, um diese Bestätigung sicher zu zeigen — vergrößern und erneut versuchen."},
     "remove_sync_warning": {
         "en": "Careful: {r} is the sync remote here — P and L stop working for this repo.",
         "de": "Achtung: {r} ist hier der Sync-Remote — P und L funktionieren danach nicht mehr."},
@@ -634,6 +644,10 @@ class RepoStatus:
     # Satz (`error_long`) und Gits eigenen Wortlaut als Beweis (`error_detail`).
     error_long: str = ""
     error_detail: str = ""
+    # Herkunft des Fehlers: True = ein Fetch übers Netz schlug fehl. Nur solche
+    # Fehler überleben einen lokalen Refresh (carry_fetch_failure) — ein lokaler
+    # Lesefehler wird dagegen bei jedem Refresh neu festgestellt oder ist weg.
+    fetch_error: bool = False
 
     @property
     def dirty(self) -> bool:
@@ -747,6 +761,15 @@ class RemoteTarget:
     repo_id: str
     fingerprint: str
 
+    @property
+    def is_github(self) -> bool:
+        """Nur der exakte Host github.com bekommt die Public-Push-Klassifikation.
+
+        Zentrale Stelle für diese Entscheidung: Produktionscode (Badges,
+        Web-URLs) und der Helfer is_github_url() laufen beide hierüber.
+        """
+        return self.host == "github.com"
+
 
 @dataclass
 class RemoteConfig:
@@ -779,7 +802,11 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
     Pfade mit Umlauten oder Steuerzeichen in Anführungszeichen und maskiert sie.
     Diese Anzeigeform ist kein gültiger Pfad für ein späteres ``git add``.
     Rename-/Copy-Einträge besitzen bei ``-z`` ein zweites Feld mit dem alten
-    Namen; für Anzeige und Staging brauchen wir den ersten, neuen Namen.
+    Namen. Ein Rename ist Ziel UND Quelle: der Zielpfad erscheint als ``M``, der
+    Quellpfad zusätzlich als ``D`` — sonst würde die Commit-Hilfe nur den
+    Zielpfad stagen, den Rename als Kopie committen und die Löschung des alten
+    Namens bliebe im Repo zurück. Bei einer Kopie (``C``) bleibt die Quelle
+    unverändert und bekommt keinen Eintrag.
     """
     m = d = u = c = 0
     files = []
@@ -791,8 +818,10 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
         if not record:
             continue
         xy, path = record[:2], record[3:]
+        source = None
         if "R" in xy or "C" in xy:
             # Bei -z folgt nach dem Zielpfad noch der Quellpfad.
+            source = fields[i] if i < len(fields) else None
             i += 1
         if xy in UNMERGED_CODES:
             c += 1
@@ -806,6 +835,9 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
         else:
             m += 1
             files.append(("M", path))
+        if source and "R" in xy:
+            d += 1
+            files.append(("D", source))
     return m, d, u, c, files
 
 
@@ -921,16 +953,31 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
     if has_unmerged_entries(repo, timeout):
         raise CommitSafetyError("merge conflicts exist")
     real_before = _real_index_signature(repo, timeout)
+    head_before = current_head(repo, timeout)
     approved = set(paths)
     with tempfile.TemporaryDirectory(prefix="gmf-index-") as temp:
         index_path = str(Path(temp) / "index")
         env = dict(os.environ, GIT_INDEX_FILE=index_path)
-        _required_git(repo, "read-tree", "HEAD", timeout=timeout, env=env)
-        staged = run_git_logged(repo, "add", "--", *paths, timeout=timeout, env=env)
+        if head_before is None:
+            # Frisches Repo ohne ersten Commit: HEAD existiert noch nicht, der
+            # temporäre Index startet leer statt vom HEAD-Baum.
+            _required_git(repo, "read-tree", "--empty", timeout=timeout, env=env)
+        else:
+            _required_git(repo, "read-tree", "HEAD", timeout=timeout, env=env)
+        # Interna des temporären Index werden NICHT protokolliert: ein kopiertes
+        # `git add`/`git commit` liefe im Terminal gegen den ECHTEN Index (dem
+        # Protokoll fehlt das entscheidende GIT_INDEX_FILE) und könnte dort
+        # fremdes Staging mitcommitten. Statt dessen wird unten der
+        # terminal-äquivalente Befehl `git commit -m … -- <pfade>` protokolliert.
+        staged = _stage_approved(repo, paths, timeout, env)
         if staged.returncode != 0:
             return staged
-        names = _required_git(repo, "diff", "--cached", "--name-only", "-z", "--",
-                              timeout=timeout, env=env)
+        # --no-renames: die Freigabeprüfung vergleicht ROHE Pfade. Gits
+        # Rename-Erkennung würde Ziel+Quelle eines Renames zu EINEM Eintrag
+        # zusammenfassen und die approvte Quell-Löschung scheinbar verschwinden
+        # lassen.
+        names = _required_git(repo, "diff", "--cached", "--no-renames",
+                              "--name-only", "-z", "--", timeout=timeout, env=env)
         actual = {path for path in names.stdout.split("\0") if path}
         if actual != approved:
             raise CommitSafetyError("temporary index differs from approved paths")
@@ -940,18 +987,120 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         if _real_index_signature(repo, timeout) != real_before:
             raise CommitSafetyError("Git index changed during approval")
         # Stage once more and compare the complete tree to catch worktree races.
-        _required_git(repo, "add", "--", *paths, timeout=timeout, env=env)
+        restaged = _stage_approved(repo, paths, timeout, env)
+        if restaged.returncode != 0:
+            raise GitReadError("git add failed (exit %d)" % restaged.returncode)
         tree_after = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if tree_after != tree_before:
             raise CommitSafetyError("approved files changed during commit preparation")
-        result = run_git_logged(
-            repo, "commit", "-m", message, env=env,
-            timeout=timeout if commit_timeout is None else commit_timeout)
+        logged_args = ("commit", "-m", message, "--", *paths)
+        try:
+            result = run_git(
+                repo, "commit", "-m", message, env=env,
+                timeout=timeout if commit_timeout is None else commit_timeout)
+        except subprocess.TimeoutExpired:
+            log_command(repo, logged_args, returncode=None)
+            raise
+        log_command(repo, logged_args, result.returncode)
+    if result.returncode == 0:
+        _verify_hooks_kept_approved_tree(repo, head_before, tree_after, timeout)
     if _real_index_signature(repo, timeout) != real_before:
         raise CommitSafetyError("Git changed the real index unexpectedly")
     if result.returncode == 0:
         adopt_commit_in_real_index(repo, paths, timeout)
     return result
+
+
+def _stage_approved(repo: Path, paths: list[str], timeout: int,
+                    env: dict) -> subprocess.CompletedProcess:
+    """Freigegebene Pfade in den temporären Index stagen — auch Löschungen.
+
+    `git add` kann eine Löschung nur stagen, solange der Pfad noch im Index
+    steht. Beim zweiten Race-Check-Staging ist er dort bereits entfernt und im
+    Arbeitsbaum fehlt er ebenfalls — ein nacktes `git add` bräche dann mit
+    "pathspec did not match" ab. Genau daran konnte die Commit-Hilfe Löschungen
+    (und damit die Quellseite eines Renames) nie committen. Fehlende Pfade
+    werden deshalb über `git rm --cached --ignore-unmatch` als Löschung gestagt;
+    vorhandene normal über `git add`. Taucht ein Pfad zwischen den beiden
+    Staging-Läufen auf oder verschwindet er, ändert sich der Baum — das fängt
+    der write-tree-Vergleich des Aufrufers wie bisher ab.
+    """
+    present: list[str] = []
+    missing: list[str] = []
+    for path in paths:
+        (present if os.path.lexists(repo / path) else missing).append(path)
+    result = subprocess.CompletedProcess(["git", "add"], 0, "", "")
+    if present:
+        result = run_git(repo, "add", "--", *present, timeout=timeout, env=env)
+        if result.returncode != 0:
+            return result
+    if missing:
+        result = run_git(repo, "rm", "--cached", "-q", "--ignore-unmatch", "--",
+                         *missing, timeout=timeout, env=env)
+    return result
+
+
+def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
+                                     approved_tree: str, timeout: int) -> None:
+    """Nach dem Commit prüfen, dass kein Hook den freigegebenen Baum verändert hat.
+
+    `git commit` erbt GIT_INDEX_FILE — ein pre-commit-Hook kann darüber mit
+    `git add` zusätzliche, bewusst NICHT freigegebene Pfade in den temporären
+    Index stagen, und Git committet dann diesen erweiterten Baum. Das bräche die
+    Zusage, exakt die freigegebenen Pfade zu committen (schlimmstenfalls landet
+    eine abgewählte vertrauliche Datei im Commit). Prüfen lässt sich das erst
+    NACH dem Commit. Weicht der Baum ab, wird der eben erzeugte, noch nicht als
+    Erfolg gemeldete Commit atomar zurückgenommen: `update-ref` mit
+    Alt-Wert-Prüfung bewegt den Branch nur dann, wenn er noch exakt auf unserem
+    Commit steht — fremde Commits kann das nicht treffen.
+    """
+    head_after = _required_git(repo, "rev-parse", "HEAD", timeout=timeout).stdout.strip()
+    committed_tree = _required_git(repo, "rev-parse", "HEAD^{tree}",
+                                   timeout=timeout).stdout.strip()
+    if committed_tree == approved_tree:
+        return
+    parent = run_git(repo, "rev-parse", "--verify", "-q", head_after + "^",
+                     timeout=timeout)
+    parent_oid = parent.stdout.strip() if parent.returncode == 0 else None
+    if parent_oid == head_before:
+        if head_before is None:
+            # Erst-Commit: den Branch-Ref wieder löschen (unborn wiederherstellen).
+            rollback = run_git_logged(repo, "update-ref", "-d", "HEAD", head_after,
+                                      timeout=timeout)
+        else:
+            rollback = run_git_logged(repo, "update-ref", "HEAD", head_before,
+                                      head_after, timeout=timeout)
+        if rollback.returncode == 0:
+            raise CommitSafetyError(
+                "a hook changed the approved files; the commit was rolled back")
+    raise CommitSafetyError("a hook changed the committed tree; check git log")
+
+
+def finish_interrupted_commit(repo: Path, head_before: str | None,
+                              paths: list[str], timeout: int) -> bool:
+    """Nach einem Commit-Timeout klären, ob der Commit doch entstanden ist.
+
+    `git commit` kann den Commit längst geschrieben haben und erst danach — etwa
+    in einem hängenden post-commit-Hook — in den Timeout laufen. Dann existiert
+    der Commit, aber der echte Index wurde noch nicht nachgezogen: `git status`
+    (und damit gmf) zeigte die committeten Dateien weiter als geändert. Ändert
+    der neue Commit exakt die freigegebenen Pfade, wird der Index hier
+    nachgezogen; sonst bleibt er unangetastet (die Meldung verweist auf git log).
+    Rückgabe: True, wenn ein neuer Commit existiert.
+    """
+    head_after = current_head(repo, timeout)
+    if head_after is None or head_after == head_before:
+        return False
+    if head_before is None:
+        r = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
+                    "--root", head_after, timeout=timeout)
+    else:
+        r = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
+                    head_before, head_after, timeout=timeout)
+    changed = {line for line in r.stdout.splitlines() if line}
+    if r.returncode == 0 and changed == set(paths):
+        adopt_commit_in_real_index(repo, paths, timeout)
+    return True
 
 
 def adopt_commit_in_real_index(repo: Path, paths: list[str], timeout: int) -> None:
@@ -1062,6 +1211,27 @@ def credentials_missing(result: subprocess.CompletedProcess) -> bool:
     return classify_remote_check(result) == "auth"
 
 
+# Git zitiert in Fehlermeldungen die komplette Remote-URL — inklusive eines
+# eingebetteten Logins (https://user:token@host/…) und der Query-Parameter
+# (?token=…). Beides sind potenzielle Zugangsdaten.
+_HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
+_URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(\w+://[^\s'?#]*)[?#][^\s']*")
+
+
+def redact_remote_error(line: str) -> str:
+    """Zugangsdaten-Anteile aus einer Git-/SSH-Fehlerzeile entfernen.
+
+    Dieselbe Politik wie display_remote_url(): bei HTTP(S) fällt die gesamte
+    Userinfo weg (genau dort stehen Personal Access Tokens), Query und Fragment
+    fallen bei jedem Schema weg. Der SSH-Benutzer (git@…) bleibt stehen — er ist
+    Teil der hilfreichen Adresse, kein Geheimnis. Diese Zeilen erscheinen in der
+    TUI, auf der Info-Seite und über error_long auch in --json; deshalb wird
+    schon an der Eingangsgrenze redigiert, nicht erst bei der Anzeige.
+    """
+    line = _HTTP_USERINFO.sub(r"\1", line)
+    return _URL_QUERY_FRAGMENT.sub(r"\1", line)
+
+
 def last_error_line(result: subprocess.CompletedProcess) -> str:
     """Die aussagekräftigste Fehlerzeile von Git — der Beleg für die Ursache.
 
@@ -1071,7 +1241,7 @@ def last_error_line(result: subprocess.CompletedProcess) -> str:
     """
     lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
     detailed = [line for line in lines if "could not fetch" not in line]
-    return (detailed or lines or [""])[-1]
+    return redact_remote_error((detailed or lines or [""])[-1])
 
 
 def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
@@ -1091,7 +1261,7 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
         return ("ok" if refs else "empty"), len(refs), ""
     detail = next((line.strip() for line in reversed((r.stderr or "").splitlines())
                    if line.strip()), "")
-    return classify_remote_check(r), 0, detail[:160]
+    return classify_remote_check(r), 0, redact_remote_error(detail)[:160]
 
 
 def remote_failure_short(name: str, outcome: str) -> str:
@@ -1286,10 +1456,18 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     host = "local"
     port = None
     path = raw
+    user = ""
+    home_relative = False   # Pfad wird im Home-Verzeichnis des SSH-Benutzers aufgelöst
     if "://" not in raw and ":" in raw and not raw.startswith(("/", "./", "../", "~")):
-        hostpart, path = raw.split(":", 1)
+        hostpart, rest = raw.split(":", 1)
         if "/" not in hostpart:
             host = _normal_host(hostpart.rsplit("@", 1)[-1])
+            path = rest
+            user = hostpart.rsplit("@", 1)[0] if "@" in hostpart else ""
+            # SCP-Syntax: ein Pfad ohne führenden "/" liegt im Home des
+            # SSH-Benutzers — alice@host:repo und bob@host:repo sind also
+            # verschiedene Repositories, host:repo und host:/repo ebenfalls.
+            home_relative = not rest.startswith("/")
     elif urllib.parse.urlsplit(raw).scheme:
         parsed = urllib.parse.urlsplit(raw)
         if parsed.scheme == "file":
@@ -1298,6 +1476,7 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             host = _normal_host(parsed.hostname or "")
             port = parsed.port
             path = urllib.parse.unquote(parsed.path)
+            user = parsed.username or ""
     if host == "local":
         local = Path(path).expanduser()
         if not local.is_absolute() and repo is not None:
@@ -1308,11 +1487,18 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
         repo_id = posixpath.normpath("/" + path.lstrip("/"))
         if repo_id.endswith(".git"):
             repo_id = repo_id[:-4]
+        # Auch "~"-Pfade (ssh://host/~/repo, host:~/repo) hängen am Benutzer.
+        home_relative = home_relative or repo_id.startswith("/~")
         default_port = ((raw.startswith("ssh://") and port == 22)
                         or (raw.startswith("https://") and port == 443)
                         or (raw.startswith("http://") and port == 80))
         authority = host if not port or default_port else f"{host}:{port}"
-        canonical = authority + ":" + repo_id
+        # Der Benutzername bleibt aus der Anzeige (repo_id) heraus, gehört bei
+        # benutzerabhängigen Pfaden aber in die Identität: sonst gälten zwei
+        # verschiedene Home-Verzeichnisse als dasselbe Ziel — und ein
+        # "sicherer" Push ginge in das Repository des falschen Benutzers.
+        qualifier = f"~{user}" if home_relative else ""
+        canonical = authority + ":" + qualifier + repo_id
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
     return RemoteTarget(host, repo_id, fingerprint)
 
@@ -1353,15 +1539,9 @@ def detect_sync_remote(repo: Path, cfg: dict,
     return None
 
 
-def remote_urls(repo: Path, cfg: dict) -> dict[str, list[str]]:
-    """Compatibility helper: all effective URLs, while reads remain fail-closed."""
-    return {name: list(dict.fromkeys(remote.fetch_urls + remote.push_urls))
-            for name, remote in read_remote_configs(repo, cfg).items()}
-
-
 def is_github_url(url: str) -> bool:
     """Only an exact github.com host receives the public-push classification."""
-    return canonical_remote_target(url).host == "github.com"
+    return canonical_remote_target(url).is_github
 
 
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
@@ -1379,7 +1559,7 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     failed = fetch_failed or set()
     for name, remote in configs.items():
         targets = remote.fetch_targets + remote.push_targets
-        public_classes = {target.host == "github.com" for target in targets}
+        public_classes = {target.is_github for target in targets}
         state = RemoteStatus(
             name=name,
             public=True in public_classes,
@@ -1449,6 +1629,50 @@ def read_branches(repo: Path, cfg: dict) -> list[BranchInfo]:
     return branches
 
 
+def remote_restore_commands(remote: RemoteConfig,
+                            branches: list[BranchInfo]) -> list[str]:
+    """Befehle, die die lokale Konfiguration eines Remotes wiederherstellen.
+
+    `git remote remove` löscht mehr als eine URL-Zeile: zusätzliche Fetch-/
+    Push-URLs und die Upstream-Verknüpfung jedes Branches, der dieses Remote
+    verfolgt. Ein einzelner `git remote add` wäre als "Rückgängig" eine falsche
+    Zusage — gerade abweichende Push-Ziele würden danach still auf die Fetch-URL
+    zeigen. Die URLs laufen durch display_remote_url(): der Befehl ist Anzeige,
+    ein eingebettetes Token gehört nicht auf den Bildschirm. (Die gelöschten
+    Tracking-Refs holt der nächste Fetch zurück; das erklärt der Dialog.)
+    """
+    name = remote.name
+    commands = [format_git_command(("remote", "add", name,
+                                    display_remote_url(remote.fetch_urls[0])))]
+    for url in remote.fetch_urls[1:]:
+        commands.append(format_git_command(
+            ("remote", "set-url", "--add", name, display_remote_url(url))))
+    if remote.push_urls != remote.fetch_urls:
+        for index, url in enumerate(remote.push_urls):
+            option = ("--push",) if index == 0 else ("--add", "--push")
+            commands.append(format_git_command(
+                ("remote", "set-url", *option, name, display_remote_url(url))))
+    for branch in branches:
+        if branch.upstream.startswith(name + "/"):
+            commands.append(format_git_command(
+                ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
+    return commands
+
+
+def branch_restore_commands(branch: BranchInfo) -> list[str]:
+    """Befehle, die einen gelöschten Branch samt Upstream wiederherstellen.
+
+    `git branch -d` entfernt neben dem Ref auch branch.<name>.remote/merge —
+    ohne den zweiten Befehl wäre die Upstream-Verknüpfung nach dem "Undo" weg
+    und Ahead-/Behind- sowie Push-Verhalten stünden anders da als vorher.
+    """
+    commands = [format_git_command(("branch", branch.name, branch.oid))]
+    if branch.upstream:
+        commands.append(format_git_command(
+            ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
+    return commands
+
+
 def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
     """Diff einer einzelnen Datei, ohne Index oder Arbeitsbaum anzufassen.
 
@@ -1463,8 +1687,12 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
         r = run_git(repo, "diff", "HEAD", "--", path, timeout=timeout)
     else:
         r = run_git(repo, "diff", "--cached", "--", path, timeout=timeout)
-    # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist Erfolg.
-    if r.returncode in (0, 1):
+    # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist
+    # Erfolg. Exit 1 mit leerer Ausgabe und einer Fehlermeldung ist dagegen ein
+    # echter Fehler: `--no-index` gegen ein unversioniertes VERZEICHNIS (Status
+    # fasst dessen Dateien zu "dir/" zusammen) endet genau so — ein leerer Diff
+    # wäre dann gelogen.
+    if r.returncode == 0 or (r.returncode == 1 and (r.stdout or not r.stderr)):
         return True, r.stdout
     return False, (r.stderr or "").strip()[:240]
 
@@ -1511,7 +1739,7 @@ def github_web_urls(remote: RemoteConfig) -> list[str]:
     """Anklickbare, zugangsdatenfreie Web-URLs für alle GitHub-Ziele."""
     urls = []
     for target in remote.fetch_targets + remote.push_targets:
-        if target.host != "github.com":
+        if not target.is_github:
             continue
         path = urllib.parse.quote(target.repo_id, safe="/-._~")
         url = "https://github.com" + path
@@ -1911,13 +2139,15 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         failed_remotes: set[str] = set()
         if fetch:
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
-            # Fetch verändert weder Branch noch Working Tree.
+            # Fetch verändert weder Branch noch Working Tree. Als bewusst
+            # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
             try:
-                fetched = run_git(repo, "fetch", "--all", "--prune", "--quiet",
-                                  timeout=cfg["fetch_timeout"])
+                fetched = run_git_logged(repo, "fetch", "--all", "--prune", "--quiet",
+                                         timeout=cfg["fetch_timeout"])
             except subprocess.TimeoutExpired:
                 st.error = t("git_timeout")
                 st.remote_state = "error"
+                st.fetch_error = True
                 failed_remotes = set(configs)
             else:
                 if fetched.returncode != 0:
@@ -1939,6 +2169,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                         cfg["fetch_timeout"])
                     st.error_detail = last_error_line(fetched)
                     st.remote_state = "error"
+                    st.fetch_error = True
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
             # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
@@ -1973,7 +2204,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
     return st
 
 
-def carry_fetch_failure(old: RepoStatus, new: RepoStatus) -> None:
+def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
+                        refetched: str | None = None) -> None:
     """Einen bekannten Fetch-Fehler in den frisch gelesenen Zustand übernehmen.
 
     `collect_status` ohne `fetch` geht nur über lokale Daten und weiß deshalb
@@ -1981,17 +2213,30 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus) -> None:
     Aktion (Commit, Stash, abgebrochener Dialog) plötzlich sauber aus, obwohl der
     letzte Fetch gescheitert ist — der Fehler verschwände scheinbar von selbst.
     Ein neuer Fetch überschreibt das ordnungsgemäß.
+
+    Zwei Grenzen halten den Fehler ehrlich: `refetched` ist der Name eines
+    Remotes, dessen Fetch soeben nachweislich gelang — sein alter Fehlerzustand
+    ist damit widerlegt und bleibt nicht als rotes Badge stehen. Und übernommen
+    werden nur Fehler aus einem Fetch (`fetch_error`); ein lokaler Lese-/
+    Indexfehler wird vom frischen Lauf entweder erneut festgestellt oder er ist
+    repariert.
     """
-    failed = {remote.name for remote in old.remotes if remote.fetch_failed}
-    if not failed and not old.error:
+    failed = {remote.name for remote in old.remotes
+              if remote.fetch_failed and remote.name != refetched}
+    carry_error = bool(old.error and old.fetch_error)
+    if refetched is not None and not failed:
+        # Der einzige bekannte Fetch-Fehler ist gerade bewiesen repariert.
+        carry_error = False
+    if not failed and not carry_error:
         return
     for remote in new.remotes:
         if remote.name in failed:
             remote.fetch_failed = True
-    if old.error and not new.error:
+    if carry_error and not new.error:
         new.error = old.error
         new.error_long = old.error_long
         new.error_detail = old.error_detail
+        new.fetch_error = True
         if new.remote_state == "ok":
             new.remote_state = "error"
 
@@ -2073,7 +2318,11 @@ def _remote_root(local_root: Path, spec_path: str | None) -> str:
 
 def fetch_remote_status(host: str, root: str, *, fetch: bool) -> dict:
     """Run this very script on `host` over ssh and return its --json output."""
-    remote_args = ["python3", "-", "--json"]
+    # Die Fehlertexte im JSON (z.B. `error`) sind lokalisiert. Ohne --lang wählte
+    # die Gegenseite ihre Sprache selbst (Config/Locale) — derselbe Fetch-Fehler
+    # sähe im Vergleich dann wie DRIFT aus. Deshalb bekommt sie unsere UI-Sprache
+    # fest vorgegeben; sie bestimmt ohnehin nur die Darstellung.
+    remote_args = ["python3", "-", "--json", "--lang", UI_LANG]
     if fetch:
         remote_args.append("--fetch")
     remote_args.append(root)
@@ -2147,7 +2396,11 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
         for rn in sorted(set(xr) & set(yr),
                          key=lambda n: (not (xr[n].get("sync") or yr[n].get("sync")), n)):
             pa, pb = xr[rn], yr[rn]
-            security_fields = ("public", "mixed_public", "sync", "branch_exists",
+            # `branch_exists` fehlt hier bewusst: es hängt am jeweils
+            # ausgecheckten Branch und ist damit kein Endpunkt-Merkmal — zwei
+            # Rechner mit identischen Remotes, aber verschiedenen Branches,
+            # meldeten sonst dauerhaft eine Sicherheits-Drift.
+            security_fields = ("public", "mixed_public", "sync",
                                "fetch_fingerprint", "push_fingerprints",
                                "target_mismatch", "multiple_pushurls")
             if tuple(pa.get(k) for k in security_fields) != tuple(
@@ -2155,7 +2408,15 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                 out.append(t("diff_remote_security", rel=rel, r=rn))
             sa = (pa.get("ahead"), pa.get("behind"))
             sb = (pb.get("ahead"), pb.get("behind"))
-            if sa != sb:
+            if (x.get("branch") == y.get("branch")
+                    and bool(pa.get("branch_exists")) != bool(pb.get("branch_exists"))):
+                # Gleicher Branch, aber nur eine Seite kennt ihn auf dem Remote:
+                # DAS ist der echte Zustandsunterschied. Die Ahead/Behind-Zahlen
+                # der Seite ohne Branch wären daneben nur irreführende Nullen.
+                side = here_at if pa.get("branch_exists") else there_at
+                out.append(t("diff_remote_branch", rel=rel, r=rn,
+                             br=x.get("branch"), m=side))
+            elif sa != sb:
                 out.append(t("diff_remote_state", rel=rel, r=rn,
                              a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
                              b=there_at, ba=pb.get("ahead"), bb=pb.get("behind")))
@@ -2268,6 +2529,31 @@ def compact_layout(count: int, width: int, height: int,
     # Passt nicht alles auf den Schirm, bleibt die Höhe der Anschlag und es wird
     # seitlich gescrollt — deshalb hier bewusst nicht die Zeilen aufblähen.
     return min(rows, height), columns, column_width
+
+
+def compact_plan(count: int, width: int, height: int,
+                 cell_width_hint: int) -> tuple[int, int, int, bool]:
+    """Layout der Kompaktansicht inklusive Platz für den Scroll-Hinweis.
+
+    -> (Zeilen, Spalten, Spaltenbreite, hinweis). `hinweis` heißt: nicht alle
+    Spalten passen ins Fenster, und unterhalb des Rasters ist eine EIGENE Zeile
+    für den Hinweis "Spalten a-b/n" reserviert. Vorher wurde der Hinweis in die
+    letzte Rasterzeile gezeichnet und überschrieb dort ab etwa 40 Spalten Breite
+    den Namen und Status eines sichtbaren Repos.
+    """
+    rows, columns, column_width = compact_layout(count, width, height, cell_width_hint)
+    total_columns = max(1, math.ceil(count / rows)) if count else 1
+    if total_columns <= columns:
+        return rows, columns, column_width, False
+    if rows >= height:
+        if height <= 1:
+            # Degeneriert klein: lieber kein Hinweis als eine überschriebene Zeile.
+            return rows, columns, column_width, False
+        # Das Raster gibt seine unterste Zeile an den Hinweis ab. Weniger Zeilen
+        # heißt mehr Gesamtspalten — scrollbar bleibt es also auf jeden Fall.
+        rows, columns, column_width = compact_layout(count, width, height - 1,
+                                                     cell_width_hint)
+    return rows, columns, column_width, True
 
 
 def ellipsize(text: str, width: int) -> str:
@@ -2464,10 +2750,15 @@ class TUI:
         if first_load and len(self.statuses) > self.cfg["compact_from"]:
             self.view_mode = "compact"
 
-    def refresh_one(self, st: RepoStatus):
-        """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten."""
+    def refresh_one(self, st: RepoStatus, refetched: str | None = None):
+        """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten.
+
+        `refetched` nennt ein Remote, dessen Fetch soeben nachweislich gelang —
+        dessen alter Fehlerzustand wird dann nicht mitgeschleppt (sonst bliebe
+        ein längst reparierter Fetch-Fehler bis zum kompletten Reload rot).
+        """
         new = collect_status(st.path, self.root, self.cfg)
-        carry_fetch_failure(st, new)
+        carry_fetch_failure(st, new, refetched)
         idx = self.statuses.index(st)
         self.statuses[idx] = new
         return new
@@ -2504,9 +2795,11 @@ class TUI:
             x += cell_width(terminal_text(text)) + 1
 
         if st.error:
+            # Der Fehler ersetzt die Statuszählung, aber NICHT Branch und
+            # Remote-Badges: gerade jetzt muss sichtbar bleiben, WELCHES Remote
+            # das ✘ trägt (README verspricht das ausdrücklich).
             part(t("error_prefix", e=st.error), C_RED)
-            return
-        if st.clean_and_synced:
+        elif st.clean_and_synced:
             part(t("clean_synced"), C_GREEN)
         else:
             if st.conflicts:
@@ -2564,9 +2857,10 @@ class TUI:
         body_h = max(1, available - log_h)
         if self.view_mode == "compact":
             # Die kompakte Liste braucht nur so viele Zeilen, wie ihre Spalten hoch
-            # sind — der frei bleibende Platz darunter gehört dem Protokoll.
-            rows, _, _ = self.compact_geometry(body_h, w)
-            body_h = min(body_h, rows)
+            # sind (plus ggf. die Hinweiszeile) — der frei bleibende Platz darunter
+            # gehört dem Protokoll.
+            rows, _, _, hint = self.compact_geometry(body_h, w)
+            body_h = min(body_h, rows + (1 if hint else 0))
             log_h = max(log_h, available - body_h) if log_h else 0
             self.draw_compact(1, body_h, w)
         else:
@@ -2589,7 +2883,7 @@ class TUI:
         """Auswahl in der kompakten Ansicht um eine Spalte verschieben."""
         h, w = self.scr.getmaxyx()
         body_h = max(1, h - 5 - self.log_height(h))
-        rows, _, _ = self.compact_geometry(body_h, w)
+        rows, _, _, _ = self.compact_geometry(body_h, w)
         target = self.selected + direction * rows
         if 0 <= target < len(self.statuses):
             return target
@@ -2636,20 +2930,20 @@ class TUI:
                 safe_addstr(self.scr, y, 5, t("no_changes"), curses.color_pair(C_DIM))
             y += 1
 
-    def compact_geometry(self, body_h: int, w: int) -> tuple[int, int, int]:
-        """Zeilen, Spalten und Spaltenbreite der kompakten Ansicht."""
+    def compact_geometry(self, body_h: int, w: int) -> tuple[int, int, int, bool]:
+        """Zeilen, Spalten, Spaltenbreite und Hinweisbedarf der kompakten Ansicht."""
         cells = compact_cells(self.statuses)
         longest = max((COMPACT_MARK_WIDTH + 1 + cell_width(name)
                        for _, name, _ in cells), default=12)
-        return compact_layout(len(cells), w, body_h, longest + 1)
+        return compact_plan(len(cells), w, body_h, longest + 1)
 
     def draw_compact(self, top: int, body_h: int, w: int) -> None:
         """Kompakte Ansicht: Marke + Name, spaltenweise wie `ls`."""
         cells = compact_cells(self.statuses)
-        rows, columns, column_width = self.compact_geometry(body_h, w)
+        rows, columns, column_width, hint = self.compact_geometry(body_h, w)
         # Zeilen zuerst leeren: sonst bleiben rechts Reste des vorigen Bildes
         # stehen (die Ladeanzeige ist breiter als eine kurze Repo-Spalte).
-        for row in range(rows):
+        for row in range(rows + (1 if hint else 0)):
             safe_addstr(self.scr, top + row, 0, " " * max(0, w - 1))
         sel_row, sel_col = compact_position(self.selected, rows)
         # Immer so scrollen, dass die Auswahl sichtbar bleibt.
@@ -2672,9 +2966,12 @@ class TUI:
                     + pad_cells(ellipsize(name, name_width), name_width))
             attr = color_attr(pair, index == self.selected and self.focus == "repos")
             safe_addstr(self.scr, top + row, x, text, attr)
-        if total_columns > columns:
+        if hint:
             # Ohne diesen Hinweis wirkt die Liste abgeschnitten statt scrollbar.
-            safe_addstr(self.scr, top + body_h - 1, max(1, w - 22),
+            # Er steht auf seiner eigenen, von compact_plan() reservierten Zeile
+            # UNTER dem Raster — in der letzten Rasterzeile überschrieb er sonst
+            # einen sichtbaren Repo-Namen samt Status.
+            safe_addstr(self.scr, top + rows, max(1, w - 22),
                         t("compact_more", a=self.compact_col + 1,
                           b=min(total_columns, self.compact_col + columns),
                           n=total_columns),
@@ -2912,7 +3209,9 @@ class TUI:
                             else t("transfer_fetch_failed", r=remote,
                                    code=r.returncode))
             return None
-        return self.refresh_one(st)
+        # Der Fetch hat gerade bewiesen, dass DIESES Remote wieder erreichbar
+        # ist — ein alter Fetch-Fehler dazu darf den Refresh nicht überleben.
+        return self.refresh_one(st, refetched=remote)
 
     def _transfer_message(self, check: TransferCheck, remote: str,
                           branch: str) -> str:
@@ -3172,6 +3471,7 @@ class TUI:
         selected = 0        # Index in view.blocks (Remotes und Branches)
         top = 0             # erste sichtbare Zeile
         note = ""           # Ergebnis der letzten Prüfung/Aktion
+        followed = None     # Block, zu dem zuletzt hingescrollt wurde
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
@@ -3180,13 +3480,18 @@ class TUI:
             body_h = max(1, h - 4)
             selected = min(selected, max(0, len(view.blocks) - 1))
             block = view.blocks[selected] if view.blocks else None
-            if block:
-                # Der gewählte Block soll immer komplett sichtbar sein.
+            if block and block != followed:
+                # Ein NEU gewählter Block soll komplett sichtbar werden. Nur dann:
+                # Ein PgUp/PgDn-Sprung darf im nächsten Durchlauf nicht wieder
+                # zurückgesetzt werden, sonst blieben Kopf- und Zwischenbereiche
+                # auf kleinen Fenstern unerreichbar (der Footer verspricht die
+                # freie Seitennavigation ausdrücklich).
                 _, _, first, last = block
                 if first < top:
                     top = first
                 if last >= top + body_h:
                     top = min(first, max(0, last - body_h + 1))
+            followed = block
             top = max(0, min(top, max(0, len(view.lines) - body_h)))
             for y, index in enumerate(range(top, min(len(view.lines), top + body_h)),
                                       start=1):
@@ -3252,6 +3557,32 @@ class TUI:
         self.message = message
         return message
 
+    def _confirm_destructive(self, title: str, rows: list[tuple[int, str, int]],
+                             command: str, question: str) -> bool | None:
+        """Destruktiven Dialog zeichnen und bestätigen lassen.
+
+        `rows` sind (x, text, attr)-Zeilen ab Bildschirmzeile 2; der auszuführende
+        Befehl folgt direkt darunter, die Rückfrage stellt confirm() auf h-4.
+        Rückgabe None, wenn das Fenster zu klein ist, um Befehl UND Rückfrage
+        gleichzeitig zu zeigen — dann wird nichts ausgeführt. Vorher überschrieb
+        confirm() in kleinen Fenstern genau die Befehlszeile, und man bestätigte
+        eine Aktion, die nicht mehr zu sehen war.
+        """
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        command_y = 2 + len(rows)
+        if command_y > h - 5:
+            self.message = t("dialog_too_small")
+            return None
+        safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
+        for offset, (x, text, attr) in enumerate(rows, start=2):
+            safe_addstr(self.scr, offset, x, text, attr)
+        safe_addstr(self.scr, command_y, 1, t("remove_command"), curses.A_BOLD)
+        safe_addstr(self.scr, command_y, 1 + cell_width(t("remove_command")) + 1,
+                    command, curses.color_pair(C_CYAN) | curses.A_BOLD)
+        self.scr.refresh()
+        return self.confirm(question)
+
     def _remove_remote(self, st: RepoStatus, name: str) -> bool:
         """Remote nach ausführlicher Erklärung und Bestätigung aus der Config nehmen."""
         try:
@@ -3264,38 +3595,33 @@ class TUI:
             self.message = t("info_no_remotes")
             return False
         command = format_git_command(("remote", "remove", name))
-        self.scr.erase()
-        h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, 0, 0, (" " + t("remove_title", r=name)).ljust(w - 1),
-                    curses.A_BOLD)
-        y = 2
-        for url in remote.fetch_urls:
-            safe_addstr(self.scr, y, 1,
-                        f"{t('info_fetch_url')}: {display_remote_url(url)}")
-            y += 1
-        y += 1
-        safe_addstr(self.scr, y, 1, t("remove_what_happens"), curses.A_BOLD)
-        y += 1
-        for key in ("remove_effect_config", "remove_effect_refs",
-                    "remove_effect_upstream", "remove_effect_safe",
-                    "remove_effect_server"):
-            safe_addstr(self.scr, y, 3, t(key, r=name))
-            y += 1
-        y += 1
+        dim = curses.color_pair(C_DIM)
+        rows: list[tuple[int, str, int]] = []
+        rows.extend((1, f"{t('info_fetch_url')}: {display_remote_url(url)}", 0)
+                    for url in remote.fetch_urls)
+        rows.append((0, "", 0))
+        rows.append((1, t("remove_what_happens"), curses.A_BOLD))
+        rows.extend((3, t(key, r=name), 0)
+                    for key in ("remove_effect_config", "remove_effect_refs",
+                                "remove_effect_upstream", "remove_effect_safe",
+                                "remove_effect_server"))
+        rows.append((0, "", 0))
         if st.remote == name:
-            safe_addstr(self.scr, y, 1, t("remove_sync_warning", r=name),
-                        curses.color_pair(C_RED) | curses.A_BOLD)
-            y += 2
-        safe_addstr(self.scr, y, 1, t("remove_undo"), curses.color_pair(C_DIM))
-        y += 1
-        undo = format_git_command(("remote", "add", name, remote.fetch_urls[0]))
-        safe_addstr(self.scr, y, 3, terminal_text(undo), curses.color_pair(C_DIM))
-        y += 2
-        safe_addstr(self.scr, y, 1, t("remove_command"), curses.A_BOLD)
-        safe_addstr(self.scr, y, 1 + cell_width(t("remove_command")) + 1, command,
-                    curses.color_pair(C_CYAN) | curses.A_BOLD)
-        self.scr.refresh()
-        if not self.confirm(t("remove_confirm", r=name)):
+            rows.append((1, t("remove_sync_warning", r=name),
+                         curses.color_pair(C_RED) | curses.A_BOLD))
+            rows.append((0, "", 0))
+        rows.append((1, t("remove_undo"), dim))
+        # Alle nötigen Wiederherstellungsbefehle, nicht nur die erste Fetch-URL:
+        # `git remote remove` löscht auch Push-URLs und Branch-Upstreams mit.
+        rows.extend((3, terminal_text(undo), dim)
+                    for undo in remote_restore_commands(
+                        remote, read_branches(st.path, self.cfg)))
+        rows.append((0, "", 0))
+        confirmed = self._confirm_destructive(
+            t("remove_title", r=name), rows, command, t("remove_confirm", r=name))
+        if confirmed is None:
+            return False
+        if not confirmed:
             log_cancelled(st.path, ("remote", "remove", name))
             self.message = t("remove_cancelled")
             return False
@@ -3323,36 +3649,31 @@ class TUI:
             self.message = t("branch_not_merged", b=name)
             return False
         command = format_git_command(("branch", "-d", name))
-        self.scr.erase()
-        h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, 0, 0, (" " + t("branch_delete_title", b=name)).ljust(w - 1),
-                    curses.A_BOLD)
-        y = 2
-        for line in aligned_rows([
+        dim = curses.color_pair(C_DIM)
+        rows: list[tuple[int, str, int]] = []
+        rows.extend((0, line, 0) for line in aligned_rows([
                 (t("info_branch_commit"),
                  f"{branch.oid} · {branch.date} · {terminal_text(branch.subject)}"),
                 (t("info_upstream"), terminal_text(branch.upstream) or t("none_label")),
-        ], indent=" "):
-            safe_addstr(self.scr, y, 0, line)
-            y += 1
-        y += 1
-        safe_addstr(self.scr, y, 1, t("remove_what_happens"), curses.A_BOLD)
-        y += 1
-        for key in ("branch_effect_pointer", "branch_effect_merged",
-                    "branch_effect_remote", "branch_effect_safe"):
-            safe_addstr(self.scr, y, 3, t(key, b=name))
-            y += 1
-        y += 2
-        safe_addstr(self.scr, y, 1, t("remove_undo"), curses.color_pair(C_DIM))
-        y += 1
-        undo = format_git_command(("branch", name, branch.oid))
-        safe_addstr(self.scr, y, 3, terminal_text(undo), curses.color_pair(C_DIM))
-        y += 2
-        safe_addstr(self.scr, y, 1, t("remove_command"), curses.A_BOLD)
-        safe_addstr(self.scr, y, 1 + cell_width(t("remove_command")) + 1, command,
-                    curses.color_pair(C_CYAN) | curses.A_BOLD)
-        self.scr.refresh()
-        if not self.confirm(t("branch_delete_confirm", b=name)):
+        ], indent=" "))
+        rows.append((0, "", 0))
+        rows.append((1, t("remove_what_happens"), curses.A_BOLD))
+        rows.extend((3, t(key, b=name), 0)
+                    for key in ("branch_effect_pointer", "branch_effect_merged",
+                                "branch_effect_remote", "branch_effect_safe"))
+        rows.append((0, "", 0))
+        rows.append((1, t("remove_undo"), dim))
+        # `git branch -d` löscht auch branch.<name>.remote/merge — bei gesetztem
+        # Upstream gehört der --set-upstream-to-Befehl deshalb mit zum Undo.
+        rows.extend((3, terminal_text(undo), dim)
+                    for undo in branch_restore_commands(branch))
+        rows.append((0, "", 0))
+        confirmed = self._confirm_destructive(
+            t("branch_delete_title", b=name), rows, command,
+            t("branch_delete_confirm", b=name))
+        if confirmed is None:
+            return False
+        if not confirmed:
             log_cancelled(st.path, ("branch", "-d", name))
             self.message = t("branch_delete_cancelled")
             return False
@@ -3506,9 +3827,12 @@ class TUI:
             return True
         except subprocess.TimeoutExpired:
             # Git und der von ihm gestartete Hook wurden beendet. Ob der Commit
-            # vorher noch fertig wurde, weiß nur das Repo selbst — deshalb den
-            # HEAD vergleichen, statt zu raten.
-            done = current_head(st.path, t_) not in (None, head_before)
+            # vorher noch fertig wurde (z.B. hing nur der post-commit-Hook), weiß
+            # nur das Repo selbst — deshalb den HEAD vergleichen, statt zu raten.
+            # Existiert der Commit, zieht finish_interrupted_commit auch den
+            # echten Index nach; sonst zeigten Status und gmf die committeten
+            # Pfade weiter als geändert.
+            done = finish_interrupted_commit(st.path, head_before, approved, t_)
             self.message = t("commit_timeout_done" if done else "commit_timeout_none",
                              s=commit_t)
             self.refresh_one(st)
@@ -3638,8 +3962,24 @@ class TUI:
             try:
                 self.dispatch_action(key)
             except subprocess.TimeoutExpired as exc:
-                self.message = timeout_message(exc)
-                curses.flushinp()
+                self.handle_action_timeout(exc)
+
+    def handle_action_timeout(self, exc: subprocess.TimeoutExpired) -> None:
+        """Nach einem Aktions-Timeout melden UND das Repo defensiv neu einlesen.
+
+        Eine Aktion kann vor dem hängenden Schritt schon mutiert haben — etwa
+        ein Fast-forward, dessen post-merge-Hook dann in den Timeout läuft. Der
+        aktionsinterne refresh_one() wird wegen der Ausnahme nie erreicht; ohne
+        das Neu-Einlesen hier arbeitete die TUI mit altem Branch-, Datei- oder
+        Stash-Zustand weiter und böte darauf falsche Folgeaktionen an.
+        (collect_status fängt eigene Fehler intern ab und liefert schlimmstenfalls
+        einen Fehlerstatus — es kann diesen Handler nicht erneut sprengen.)
+        """
+        self.message = timeout_message(exc)
+        curses.flushinp()
+        st = self.current()
+        if st:
+            self.refresh_one(st)
 
 
 def init_colors():
@@ -3667,11 +4007,23 @@ DEMO_DATE = "2026-01-02T10:00:00+00:00"
 
 
 def _dgit(repo: Path, *args: str) -> None:
-    """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen)."""
+    """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen).
+
+    Die Umgebung wird von allen GIT_*-Variablen befreit: GIT_AUTHOR_NAME,
+    GIT_COMMITTER_*, GIT_CONFIG_* oder GIT_DEFAULT_HASH der aufrufenden Shell
+    würden sonst Identität, Config oder Hashformat übersteuern — und damit die
+    maschinenunabhängigen Demo-Commit-IDs brechen, auf denen der Bild-Check
+    (`docs/make-screens.py --check`) beruht. Identität und Datum stehen deshalb
+    hier explizit; globale und System-Gitconfig bleiben außen vor.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env.update(GIT_AUTHOR_DATE=DEMO_DATE, GIT_COMMITTER_DATE=DEMO_DATE,
+               GIT_AUTHOR_NAME="Demo", GIT_AUTHOR_EMAIL="demo@example.invalid",
+               GIT_COMMITTER_NAME="Demo", GIT_COMMITTER_EMAIL="demo@example.invalid",
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     subprocess.run(["git", "-C", str(repo), *args], check=True,
-                   capture_output=True, text=True,
-                   env={**os.environ, "GIT_AUTHOR_DATE": DEMO_DATE,
-                        "GIT_COMMITTER_DATE": DEMO_DATE})
+                   capture_output=True, text=True, env=env)
 
 
 def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]:

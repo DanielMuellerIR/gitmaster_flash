@@ -76,11 +76,22 @@ class TestParsePorcelain(unittest.TestCase):
         self.assertIn(("U", "übungen/Abendsession 2026-07-21.pdf"), files)
         self.assertIn(("U", "zeile\numbruch.txt"), files)
 
-    def test_rename_uses_destination_and_consumes_source(self):
+    def test_rename_keeps_destination_and_source(self):
+        # Ein Rename ist Ziel UND Quelle: nur mit beiden Pfaden kann die
+        # Commit-Hilfe den Rename komplett stagen — sonst committet sie eine
+        # Kopie und die Löschung des alten Namens bleibt zurück.
         output = "R  neu ü.txt\0alt ü.txt\0 M danach.txt\0"
-        modified, _, _, _, files = parse_porcelain(output)
-        self.assertEqual(modified, 2)
-        self.assertEqual(files, [("M", "neu ü.txt"), ("M", "danach.txt")])
+        modified, deleted, _, _, files = parse_porcelain(output)
+        self.assertEqual((modified, deleted), (2, 1))
+        self.assertEqual(files, [("M", "neu ü.txt"), ("D", "alt ü.txt"),
+                                 ("M", "danach.txt")])
+
+    def test_copy_does_not_invent_a_deletion(self):
+        # Bei einer Kopie bleibt die Quelle unverändert liegen.
+        output = "C  kopie.txt\0quelle.txt\0"
+        modified, deleted, _, _, files = parse_porcelain(output)
+        self.assertEqual((modified, deleted), (1, 0))
+        self.assertEqual(files, [("M", "kopie.txt")])
 
     def test_empty(self):
         self.assertEqual(parse_porcelain(""), (0, 0, 0, 0, []))
@@ -598,6 +609,32 @@ class DiffTests(unittest.TestCase):
         out = diff_status(_side(repos=[a]), _side(repos=[b]), "here", "there")
         self.assertTrue(any("security/endpoint" in line for line in out))
 
+    def test_branch_presence_on_same_branch_is_state_drift_not_security(self):
+        """Gleicher Branch, aber nur eine Seite kennt ihn auf dem Remote: das ist
+        ein Zustandsunterschied — keine Sicherheits-/Endpunkt-Meldung."""
+        a = _repo("x", remotes=[("origin", 0, 0)])
+        b = _repo("x", remotes=[("origin", 0, 0)])
+        a["remotes"][0]["branch_exists"] = True
+        b["remotes"][0]["branch_exists"] = False
+        out = diff_status(_side(repos=[a]), _side(repos=[b]), "here", "there")
+        self.assertEqual(len(out), 1)
+        self.assertIn("DRIFT", out[0])
+        self.assertIn("main", out[0])
+        self.assertIn("here", out[0])
+        self.assertNotIn("security/endpoint", out[0])
+
+    def test_branch_presence_with_different_branches_is_no_drift(self):
+        """Zwei Rechner mit identischen Remotes, aber verschiedenen Branches:
+        `branch_exists` hängt am ausgecheckten Branch und darf keine
+        Sicherheits-Drift und keinen Exit 1 wegen Endpunkt-Identität erzeugen."""
+        a = _repo("x", branch="main", remotes=[("origin", 0, 0)])
+        b = _repo("x", branch="feature", remotes=[("origin", 0, 0)])
+        a["remotes"][0]["branch_exists"] = True
+        b["remotes"][0]["branch_exists"] = False
+        out = diff_status(_side(repos=[a]), _side(repos=[b]), "here", "there")
+        self.assertEqual(len(out), 1)          # nur die erklärbare local-Zeile
+        self.assertNotIn("DRIFT", out[0])
+
     def test_remote_root_uses_remote_home(self):
         """Home dirs differ between machines (/Users/anna vs /home/bob) — the path
         must be resolved against the REMOTE $HOME, not pasted absolutely."""
@@ -625,6 +662,37 @@ class RemoteSecurityTests(unittest.TestCase):
         self.assertTrue(is_github_url("ssh://git@github.com/org/repo.git"))
         self.assertFalse(is_github_url("ssh://github.com.attacker.invalid/org/repo.git"))
         self.assertFalse(is_github_url("https://example.invalid/github.com/org/repo"))
+
+    def test_scp_user_belongs_to_the_identity_of_home_relative_paths(self):
+        """Relative SCP-Pfade liegen im Home des SSH-Benutzers.
+
+        alice@host:repo und bob@host:repo sind also verschiedene Repositories —
+        gälten sie als identisch, könnte ein "sicherer" Push im Repo des falschen
+        Benutzers landen.
+        """
+        alice = canonical_remote_target("alice@host:repo.git")
+        bob = canonical_remote_target("bob@host:repo.git")
+        self.assertNotEqual(alice, bob)
+        # Derselbe Benutzer, dieselbe Schreibweise: natürlich identisch.
+        self.assertEqual(alice, canonical_remote_target("alice@host:repo.git"))
+        # Der Benutzername bleibt trotzdem aus der Anzeige-Identität heraus.
+        self.assertEqual(alice.repo_id, "/repo")
+
+    def test_scp_relative_and_absolute_paths_stay_distinct(self):
+        # host:repo wird im Remote-Home aufgelöst, host:/repo absolut — zwei Ziele.
+        relative = canonical_remote_target("host:repo.git")
+        absolute = canonical_remote_target("host:/repo.git")
+        self.assertNotEqual(relative, absolute)
+        # Tilde-Pfade hängen ebenfalls am Benutzer.
+        self.assertNotEqual(canonical_remote_target("alice@host:~/repo.git"),
+                            canonical_remote_target("bob@host:~/repo.git"))
+
+    def test_scp_github_form_still_maps_to_the_web_url_path(self):
+        # git@github.com:org/repo ist formal home-relativ; die Web-URL-Ableitung
+        # (repo_id) muss davon unberührt bleiben.
+        target = canonical_remote_target("git@github.com:example/demo.git")
+        self.assertTrue(target.is_github)
+        self.assertEqual(target.repo_id, "/example/demo")
 
     def test_sync_host_must_match_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -739,6 +807,73 @@ class CommitSafetyTests(unittest.TestCase):
                 check=True, capture_output=True, text=True).stdout, "worktree version\n")
         self.assertEqual(self._status(), "")
 
+    def test_rename_commits_move_and_deletion_together(self):
+        """Ein approvter Rename (Ziel + Quelle) ergibt einen echten Move-Commit.
+
+        Vorher stagte die Hilfe nur den Zielpfad: der Commit enthielt eine Kopie,
+        und die Löschung des alten Namens blieb als schmutziger Rest im Repo.
+        """
+        git(self.repo, "mv", "include.txt", "renamed.txt")
+        st = collect_status(self.repo, self.repo.parent, DEFAULT_CONFIG)
+        self.assertIn(("M", "renamed.txt"), st.files)
+        self.assertIn(("D", "include.txt"), st.files)
+        r = commit_selected(self.repo, ["renamed.txt", "include.txt"], "umbenannt", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        changed = subprocess.run(
+            ["git", "-C", str(self.repo), "diff-tree", "--no-commit-id",
+             "--name-status", "-r", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(sorted(changed), ["A", "D", "include.txt", "renamed.txt"])
+        self.assertEqual(self._status(), "")
+
+    def test_plain_deletion_can_be_committed(self):
+        """Löschungen konnte die Hilfe nie committen: das zweite Race-Check-
+        Staging fand den Pfad weder im Index noch im Arbeitsbaum und `git add`
+        brach mit "pathspec did not match" ab (GitReadError, Exit 128)."""
+        (self.repo / "include.txt").unlink()
+        r = commit_selected(self.repo, ["include.txt"], "geloescht", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        changed = subprocess.run(
+            ["git", "-C", str(self.repo), "diff-tree", "--no-commit-id",
+             "--name-status", "-r", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(changed, ["D", "include.txt"])
+        self.assertEqual(self._status(), "")
+
+    def test_initial_commit_in_fresh_repository(self):
+        """Die Commit-Hilfe muss auch den allerersten Commit eines Repos können.
+
+        Ohne HEAD scheiterte `git read-tree HEAD` mit GitReadError — ausgerechnet
+        beim ersten Commit, den der alte direkte Pfad noch konnte.
+        """
+        fresh = Path(self.tmp.name) / "frisch"; fresh.mkdir()
+        git(fresh, "init", "-q", "-b", "main")
+        git(fresh, "config", "user.email", "t@example.invalid")
+        git(fresh, "config", "user.name", "T")
+        (fresh / "erste.txt").write_text("hallo\n")
+        r = commit_selected(fresh, ["erste.txt"], "initial", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = subprocess.run(["git", "-C", str(fresh), "log", "--format=%s"],
+                             check=True, capture_output=True, text=True).stdout
+        self.assertEqual(log.strip(), "initial")
+        status = subprocess.run(["git", "-C", str(fresh), "status", "--porcelain"],
+                                check=True, capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+
+    def test_command_log_shows_the_terminal_equivalent_commit(self):
+        """Das Protokoll verspricht terminal-ausführbare Zeilen. Ein nacktes
+        `git add`/`git commit` liefe dort aber gegen den ECHTEN Index (ohne das
+        GIT_INDEX_FILE der Hilfe) — deshalb steht stattdessen der äquivalente,
+        pfadbegrenzte Befehl im Protokoll."""
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+        (self.repo / "include.txt").write_text("approved\n")
+        r = commit_selected(self.repo, ["include.txt"], "selected", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        joined = "\n".join(gmf_module.COMMAND_LOG)
+        self.assertIn("git commit -m selected -- include.txt", joined)
+        self.assertNotIn("git add", joined)
+
     def test_conflicts_block_commit(self):
         git(self.repo, "checkout", "-qb", "other")
         (self.repo / "include.txt").write_text("other\n"); git(self.repo, "commit", "-qam", "other")
@@ -769,6 +904,86 @@ class CommitSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(CommitSafetyError, "changed during update"):
                 update_gitignore_atomic(self.repo, ["*.log"])
         self.assertFalse((self.repo / ".gitignore").exists())
+
+
+class HookInterferenceTests(unittest.TestCase):
+    """`git commit` vererbt GIT_INDEX_FILE an seine Hooks.
+
+    Ein pre-commit-Hook kann darüber mit `git add` zusätzliche, bewusst NICHT
+    freigegebene Pfade in den temporären Index stagen — genau so landete eine
+    abgewählte Datei im Commit. Die Hilfe muss das nach dem Commit erkennen und
+    den Commit zurücknehmen, statt Erfolg zu melden.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"; self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        gmf_module.COMMAND_LOG.clear()
+        self.addCleanup(gmf_module.COMMAND_LOG.clear)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _install_hook(self, script: str) -> None:
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n" + script + "\n")
+        hook.chmod(0o755)
+
+    def _base_commit(self) -> None:
+        (self.repo / "gut.txt").write_text("base\n")
+        (self.repo / "geheim.txt").write_text("base\n")
+        git(self.repo, "add", "gut.txt", "geheim.txt")
+        git(self.repo, "commit", "-qm", "base")
+
+    def test_hook_staged_path_rolls_the_commit_back(self):
+        self._base_commit()
+        (self.repo / "gut.txt").write_text("freigegeben\n")
+        (self.repo / "geheim.txt").write_text("abgewählt\n")
+        self._install_hook("git add geheim.txt")
+        head_before = gmf_module.current_head(self.repo, 10)
+        with self.assertRaisesRegex(CommitSafetyError, "rolled back"):
+            commit_selected(self.repo, ["gut.txt"], "nur gut", 10)
+        # Der Branch steht wieder auf dem alten Commit; nichts wurde publiziert.
+        self.assertEqual(gmf_module.current_head(self.repo, 10), head_before)
+        show = subprocess.run(
+            ["git", "-C", str(self.repo), "show", "HEAD:geheim.txt"],
+            check=True, capture_output=True, text=True).stdout
+        self.assertEqual(show, "base\n")
+        # Arbeitsbaum unangetastet: beide Änderungen liegen weiter vor.
+        status = subprocess.run(
+            ["git", "-C", str(self.repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True).stdout
+        self.assertIn("gut.txt", status)
+        self.assertIn("geheim.txt", status)
+
+    def test_hook_interference_on_initial_commit_restores_unborn_state(self):
+        (self.repo / "gut.txt").write_text("a\n")
+        (self.repo / "geheim.txt").write_text("b\n")
+        self._install_hook("git add geheim.txt")
+        with self.assertRaisesRegex(CommitSafetyError, "rolled back"):
+            commit_selected(self.repo, ["gut.txt"], "initial", 10)
+        # Das Repo ist wieder ohne Commit (unborn branch), nichts ging verloren.
+        self.assertIsNone(gmf_module.current_head(self.repo, 10))
+        status = subprocess.run(
+            ["git", "-C", str(self.repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True).stdout
+        self.assertIn("gut.txt", status)
+        self.assertIn("geheim.txt", status)
+
+    def test_harmless_hook_does_not_disturb_the_commit(self):
+        self._base_commit()
+        (self.repo / "gut.txt").write_text("freigegeben\n")
+        self._install_hook("echo pre-commit lief > /dev/null")
+        r = commit_selected(self.repo, ["gut.txt"], "mit Hook", 10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        changed = subprocess.run(
+            ["git", "-C", str(self.repo), "diff-tree", "--no-commit-id",
+             "--name-only", "-r", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(changed, ["gut.txt"])
 
 
 class SlowPreCommitHookTests(unittest.TestCase):
@@ -846,6 +1061,34 @@ class SlowPreCommitHookTests(unittest.TestCase):
         text = gmf_module.timeout_message(exc)
         self.assertIn("commit", text)
         self.assertIn("42", text)
+
+    def test_commit_written_before_a_hanging_post_commit_hook_is_adopted(self):
+        """Hängt erst der post-commit-Hook, existiert der Commit längst.
+
+        Dann muss der echte Index die committeten Pfade trotzdem übernehmen —
+        sonst meldete `git status` sie weiter als geändert und gmf zeigte das
+        Repo trotz gelungenem Commit als schmutzig.
+        """
+        hook = self.repo / ".git" / "hooks" / "post-commit"
+        hook.write_text("#!/bin/sh\nsleep 30\n")
+        hook.chmod(0o755)
+        head_before = gmf_module.current_head(self.repo, 10)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            commit_selected(self.repo, ["file.txt"], "haengt danach", 10,
+                            commit_timeout=1)
+        done = gmf_module.finish_interrupted_commit(
+            self.repo, head_before, ["file.txt"], 10)
+        self.assertTrue(done)
+        self.assertNotEqual(gmf_module.current_head(self.repo, 10), head_before)
+        status = subprocess.run(
+            ["git", "-C", str(self.repo), "status", "--porcelain"],
+            check=True, capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+
+    def test_interrupted_commit_without_result_reports_false(self):
+        head_before = gmf_module.current_head(self.repo, 10)
+        self.assertFalse(gmf_module.finish_interrupted_commit(
+            self.repo, head_before, ["file.txt"], 10))
 
 
 class StashAndReadFailureTests(unittest.TestCase):
@@ -1024,6 +1267,39 @@ class NonInteractiveGitTests(unittest.TestCase):
             subprocess.CompletedProcess(["git"], 1, "", "boom\n")), [])
 
 
+class ErrorRedactionTests(unittest.TestCase):
+    """Git zitiert in Fehlermeldungen die komplette URL — inklusive Login/Query.
+
+    Diese Zeilen erscheinen in TUI, Info-Seite und (als error_long) in --json;
+    Tokens müssen deshalb schon an der Eingangsgrenze verschwinden.
+    """
+
+    @staticmethod
+    def _result(stderr: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess([], 128, "", stderr)
+
+    def test_http_userinfo_query_and_fragment_are_removed(self):
+        stderr = ("fatal: unable to access "
+                  "'https://user:s3cr3t@example.com/org/repo.git?private_token=abc123#frag': "
+                  "The requested URL returned error: 403")
+        line = gmf_module.last_error_line(self._result(stderr))
+        self.assertNotIn("s3cr3t", line)
+        self.assertNotIn("abc123", line)
+        self.assertNotIn("user:", line)
+        # Adresse und Ursache bleiben als Beleg erhalten.
+        self.assertIn("example.com/org/repo.git", line)
+        self.assertIn("403", line)
+
+    def test_ssh_user_remains_part_of_the_address(self):
+        stderr = "fatal: Could not read from remote repository ssh://git@example.com/x.git"
+        line = gmf_module.last_error_line(self._result(stderr))
+        self.assertIn("git@example.com", line)
+
+    def test_plain_messages_pass_unchanged(self):
+        stderr = "ssh: connect to host example.com port 22: Connection refused"
+        self.assertEqual(gmf_module.last_error_line(self._result(stderr)), stderr)
+
+
 class RemoteCheckTests(unittest.TestCase):
     """`T` auf der Info-Seite: existiert das Remote-Repo — und wenn nicht, warum?"""
 
@@ -1197,6 +1473,175 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         self.assertEqual(fresh.error_detail, broken.error_detail)
         self.assertTrue(any(r.fetch_failed for r in fresh.remotes if r.name == "github"))
         self.assertFalse(fresh.clean_and_synced)
+
+    def test_successful_refetch_clears_the_known_failure(self):
+        """Nach einem bewiesen erfolgreichen Fetch darf der alte Fehler nicht
+        bis zum kompletten Reload weiterleuchten."""
+        git(self.repo, "remote", "add", "github", str(self.root / "geloescht.git"))
+        broken = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertTrue(broken.error)
+        self.assertTrue(broken.fetch_error)
+        fresh = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        gmf_module.carry_fetch_failure(broken, fresh, refetched="github")
+        self.assertEqual(fresh.error, "")
+        self.assertFalse(any(r.fetch_failed for r in fresh.remotes))
+
+    def test_local_read_error_is_not_carried_over(self):
+        """Nur Fetch-Fehler überleben einen lokalen Refresh: ein reparierter
+        Index-/Lesefehler muss nach dem Neu-Einlesen verschwinden."""
+        old = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        old.error = "cannot read Git index: kaputt"
+        old.remote_state = "error"          # fetch_error bleibt False
+        fresh = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        gmf_module.carry_fetch_failure(old, fresh)
+        self.assertEqual(fresh.error, "")
+        self.assertEqual(fresh.remote_state, "ok")
+
+    def test_interactive_fetch_appears_in_the_command_log(self):
+        # R bzw. --fetch ist eine bewusst ausgelöste Aktion und gehört ins
+        # Protokoll — sonst erklärt das Protokoll genau die eine Netz-Aktion nicht.
+        collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        joined = "\n".join(gmf_module.COMMAND_LOG)
+        self.assertIn("git fetch --all --prune", joined)
+
+    def test_repo_line_with_error_still_shows_branch_and_remotes(self):
+        """Der Fehlertext darf Branch und Remote-Badges nicht verdrängen —
+        gerade dann muss sichtbar sein, WELCHES Remote das ✘ trägt."""
+        git(self.repo, "remote", "add", "github", str(self.root / "geloescht.git"))
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertTrue(st.error)
+
+        class Screen:
+            def __init__(self):
+                self.texts = []
+
+            def getmaxyx(self):
+                return (30, 200)
+
+            def addstr(self, y, x, text, attr=0):
+                self.texts.append(text)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw_repo_line(0, st, False)
+        drawn = " ".join(ui.scr.texts)
+        self.assertIn(st.error, drawn)
+        self.assertIn("[" + st.branch + "]", drawn)
+        self.assertIn("github", drawn)
+        self.assertIn("origin", drawn)
+
+    def test_action_timeout_rereads_the_repo(self):
+        """Eine Aktion kann vor dem hängenden Schritt schon mutiert haben —
+        nach dem Timeout muss die TUI den echten Zustand neu einlesen."""
+        class Screen:
+            def getmaxyx(self):
+                return (30, 100)
+
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        exc = subprocess.TimeoutExpired(["git", "-C", str(self.repo), "merge"], 7)
+        with mock.patch("gitmaster_flash.curses.flushinp"):
+            ui.handle_action_timeout(exc)
+        self.assertIsNot(ui.statuses[0], st)
+        self.assertIn("merge", ui.message)
+
+    def test_remote_restore_commands_cover_pushurls_and_upstreams(self):
+        """`git remote remove` löscht mehr als eine URL-Zeile — das angezeigte
+        "Rückgängig" muss Push-URLs und Branch-Upstreams mit wiederherstellen."""
+        remote = gmf_module.RemoteConfig(
+            "origin",
+            ["ssh://example.invalid/a.git", "ssh://example.invalid/b.git"],
+            ["ssh://example.invalid/push.git"],
+            [], [])
+        branches = [gmf_module.BranchInfo(name="main", upstream="origin/main"),
+                    gmf_module.BranchInfo(name="dev", upstream="backup/dev")]
+        commands = gmf_module.remote_restore_commands(remote, branches)
+        self.assertEqual(commands, [
+            "git remote add origin ssh://example.invalid/a.git",
+            "git remote set-url --add origin ssh://example.invalid/b.git",
+            "git remote set-url --push origin ssh://example.invalid/push.git",
+            "git branch --set-upstream-to=origin/main main",
+        ])
+        # Eine URL mit eingebettetem Token erscheint nur redigiert.
+        secret = gmf_module.RemoteConfig(
+            "hub", ["https://user:s3cr3t@example.invalid/x.git"],
+            ["https://user:s3cr3t@example.invalid/x.git"], [], [])
+        shown = gmf_module.remote_restore_commands(secret, [])
+        self.assertNotIn("s3cr3t", "\n".join(shown))
+
+    def test_branch_restore_commands_include_the_upstream(self):
+        branch = gmf_module.BranchInfo(name="feature", upstream="origin/feature",
+                                       oid="abc1234")
+        self.assertEqual(gmf_module.branch_restore_commands(branch), [
+            "git branch feature abc1234",
+            "git branch --set-upstream-to=origin/feature feature",
+        ])
+        ohne = gmf_module.BranchInfo(name="lokal", oid="abc1234")
+        self.assertEqual(gmf_module.branch_restore_commands(ohne),
+                         ["git branch lokal abc1234"])
+
+    def test_tiny_window_refuses_the_destructive_dialog(self):
+        """Sicherheitszusage: der auszuführende Befehl muss bei der Bestätigung
+        sichtbar sein. In einem zu kleinen Fenster überschrieb confirm() genau
+        diese Zeile — jetzt wird die Aktion stattdessen verweigert."""
+        class Screen:
+            def __init__(self):
+                self.keys = iter([ord("x"), ord("q")])
+
+            def erase(self): pass
+            def getmaxyx(self): return (10, 80)
+            def addstr(self, *a): pass
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [collect_status(self.repo, self.root, DEFAULT_CONFIG)]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm") as confirm:
+            ui.action_repo_info()
+        confirm.assert_not_called()
+        self.assertIn('[remote "origin"]', (self.repo / ".git" / "config").read_text())
+        self.assertEqual(ui.message, gmf_module.t("dialog_too_small"))
+
+    def test_info_view_paging_survives_the_redraw(self):
+        """Der Footer verspricht freie Seitennavigation: ein PgDn-Sprung darf im
+        nächsten Zeichendurchlauf nicht auf den gewählten Block zurückschnappen."""
+        for i in range(8):
+            git(self.repo, "branch", f"zweig-{i}")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        view = build_info_view(st, DEFAULT_CONFIG)
+        body_h = 30 - 4
+        self.assertGreater(len(view.lines), body_h)   # Paging hat etwas zu tun
+        expected_top = min(len(view.lines) - body_h, body_h)
+
+        class Screen:
+            def __init__(self):
+                self.keys = iter([curses.KEY_NPAGE, ord("q")])
+                self.frames = []
+
+            def erase(self):
+                self.frames.append([])
+
+            def getmaxyx(self):
+                return (30, 100)
+
+            def addstr(self, y, x, text, attr=0):
+                if self.frames:
+                    self.frames[-1].append((y, text))
+
+            def refresh(self): pass
+
+            def getch(self):
+                return next(self.keys)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_repo_info()
+        last_frame = ui.scr.frames[-1]
+        first_body_line = next(text for y, text in last_frame if y == 1)
+        self.assertEqual(first_body_line, view.lines[expected_top])
 
     def test_cancelled_action_is_logged_as_not_run(self):
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
@@ -1430,6 +1875,19 @@ class BranchAndDiffTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("-x", diff)
 
+    def test_untracked_directory_yields_an_error_instead_of_an_empty_diff(self):
+        """Der Status fasst ein unversioniertes Verzeichnis zu "dir/" zusammen;
+        `git diff --no-index` scheitert daran mit Exit 1 UND Fehlermeldung.
+        Vorher galt jeder Exit 1 als Erfolg — die Ansicht zeigte dann einen
+        leeren Diff und tat so, als wäre der Ordner inhaltslos."""
+        (self.repo / "neu-dir").mkdir()
+        (self.repo / "neu-dir" / "datei.txt").write_text("inhalt\n")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertIn(("U", "neu-dir/"), st.files)
+        ok, message = file_diff(self.repo, "U", "neu-dir/", 10)
+        self.assertFalse(ok)
+        self.assertTrue(message)
+
     def test_changes_view_shows_diff_for_the_selected_file(self):
         (self.repo / "a.md").write_text("geändert\n")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
@@ -1511,6 +1969,28 @@ class CompactViewTests(unittest.TestCase):
         self.assertEqual(gmf_module.compact_position(3, rows), (0, 1))
         self.assertEqual(gmf_module.compact_position(8, rows), (2, 2))
 
+    def test_scroll_hint_gets_its_own_reserved_row(self):
+        # 40 Spalten, viele Repos: der Hinweis begann früher in der letzten
+        # Rasterzeile bei Spalte 18 und überschrieb dort die zweite Repo-Spalte
+        # (Beginn Spalte 17). Jetzt gibt das Raster eine Zeile an ihn ab.
+        rows, columns, width, hint = gmf_module.compact_plan(60, 40, 10, 20)
+        self.assertTrue(hint)
+        self.assertLess(rows, 10)
+        # Passt alles ins Fenster, wird keine Zeile reserviert.
+        _, _, _, no_hint = gmf_module.compact_plan(6, 110, 10, 20)
+        self.assertFalse(no_hint)
+
+    def test_scroll_hint_does_not_overwrite_a_repo_cell(self):
+        ui = self._ui(60, width=40, height=20)
+        ui.view_mode = "compact"
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        hint_rows = {y for y, _, text in ui.scr.lines
+                     if "columns" in text or "Spalten" in text}
+        name_rows = {y for y, _, text in ui.scr.lines if "repo-" in text}
+        self.assertTrue(hint_rows)
+        self.assertFalse(hint_rows & name_rows, (hint_rows, name_rows))
+
     def test_long_names_are_shortened_visibly(self):
         self.assertEqual(gmf_module.ellipsize("kurz", 10), "kurz")
         shortened = gmf_module.ellipsize("firefox-tabs-save-and-restore", 12)
@@ -1565,7 +2045,7 @@ class CompactViewTests(unittest.TestCase):
                 mock.patch.object(TUI, "reload"):
             ui.scr.keys = iter([curses.KEY_RIGHT, ord("q")])
             ui.run()
-        rows, _, _ = ui.compact_geometry(max(1, 30 - 5 - ui.log_height(30)), 100)
+        rows, _, _, _ = ui.compact_geometry(max(1, 30 - 5 - ui.log_height(30)), 100)
         self.assertEqual(ui.selected, rows)
         # Und zurück.
         with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
@@ -1766,6 +2246,17 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertEqual(shlex.split(command)[-1], root)
         self.assertEqual(shlex.split(command).count(root), 1)
 
+    def test_remote_side_gets_the_local_ui_language(self):
+        """Ohne --lang wählte die Gegenseite ihre Sprache selbst — derselbe
+        lokalisierte Fehlertext sähe im --diff dann wie DRIFT aus."""
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout='{"version":"x","repos":[]}', stderr="")
+        with mock.patch("gitmaster_flash.subprocess.run", return_value=completed) as run:
+            fetch_remote_status("example", "~/git", fetch=False)
+        command = shlex.split(run.call_args.args[0][-1])
+        self.assertIn("--lang", command)
+        self.assertEqual(command[command.index("--lang") + 1], gmf_module.UI_LANG)
+
     def test_remote_json_with_attention_exit_is_accepted(self):
         """Exit 1 ist bei --json ein Befund, kein fehlgeschlagener SSH-Aufruf."""
         payload = {"version": "x", "repos": [{"rel": "needs-attention"}]}
@@ -1857,6 +2348,23 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
                 ("overview.de.svg", "de"),
             },
         )
+
+    def test_demo_commits_ignore_the_callers_git_environment(self):
+        """Demo-Commit-IDs sind ein Vertrag (Bild-Check): GIT_*-Variablen der
+        aufrufenden Shell dürfen Identität und damit die IDs nicht verschieben."""
+        sabotage = {"GIT_AUTHOR_NAME": "Evil", "GIT_AUTHOR_EMAIL": "evil@example.invalid",
+                    "GIT_COMMITTER_NAME": "Evil", "GIT_COMMITTER_EMAIL": "evil@example.invalid"}
+        heads = []
+        for env in (sabotage, {}):
+            with tempfile.TemporaryDirectory() as temp:
+                with mock.patch.dict(os.environ, env):
+                    repo, _ = gmf_module._demo_repo(Path(temp), "probe")
+                head = subprocess.run(
+                    ["git", "-C", str(repo), "log", "-1", "--format=%H %an %ae"],
+                    check=True, capture_output=True, text=True).stdout.split()
+                heads.append(head)
+        self.assertEqual(heads[0], heads[1])
+        self.assertEqual(heads[0][1:], ["Demo", "demo@example.invalid"])
 
     @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
     def test_installer_quotes_weird_clone_path(self):
