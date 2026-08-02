@@ -234,8 +234,11 @@ Der Abschnitt `[remote "<Name>"]` verschwindet aus `.git/config`, die
 Remote-Tracking-Branches `refs/remotes/<Name>/*` werden gelöscht, und ein lokaler
 Branch mit Upstream dorthin verliert diese Verknüpfung. Commits, Dateien,
 Branches und Stashes bleiben unberührt, auf dem Server ändert sich nichts. Der
-Dialog zeigt sowohl den Befehl, der ausgeführt wird, als auch die Zeile
-`git remote add …`, die alles zurücknimmt.
+Dialog zeigt sowohl den Befehl, der ausgeführt wird, als auch die Befehle, die
+die lokale Konfiguration wiederherstellen — einschließlich zusätzlicher
+Fetch-/Push-URLs und der Upstream-Verknüpfung jedes Branches, der das Remote
+verfolgte, denn `git remote remove` löscht auch diese mit. (Die
+Remote-Tracking-Branches selbst holt der nächste Fetch zurück.)
 
 Zusammen nützlich: Auf GitHub gelöschte Repos behalten lokal ihr totes Remote.
 `R` markiert so ein Remote rot (`✘`) in der Repo-Zeile, `T` bestätigt, dass die
@@ -249,8 +252,10 @@ Merge-Zustand da. `X` löscht einen Branch, aber nur, wenn er vollständig in HE
 gemergt ist (`git branch -d`): Seine Commits hängen dann ohnehin an HEAD, es kann
 also nichts verloren gehen. Nicht gemergte Branches lehnt gmf mit Begründung ab
 und nennt den Terminal-Befehl, der es erzwingen würde. Die Rückfrage zeigt sowohl
-den genauen Löschbefehl als auch `git branch <Name> <OID>` zum Wiederherstellen
-des Branches.
+den genauen Löschbefehl als auch die Befehle zum Wiederherstellen des Branches —
+`git branch <Name> <OID>` und, falls ein Upstream gesetzt war, die Zeile
+`git branch --set-upstream-to …`, denn `git branch -d` löscht auch diese
+Verknüpfung mit.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
 teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie

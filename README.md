@@ -223,7 +223,10 @@ what happens. This is a local Git configuration change only: the
 branches `refs/remotes/<name>/*` are deleted, and a local branch that tracked it
 loses its upstream setting. Commits, files, branches and stashes stay untouched,
 and nothing is sent to or changed on the server. The dialog shows both the exact
-command it will run and the one-line `git remote add …` that undoes it.
+command it will run and the commands that restore the local configuration —
+including extra fetch/push URLs and the upstream link of every branch that
+tracked the remote, because `git remote remove` deletes those too. (The
+remote-tracking branches themselves come back with the next fetch.)
 
 Useful together: repositories deleted on GitHub keep their now-dead remote
 locally. `R` marks such a remote red (`✘`) in the repository line, `T` confirms
@@ -236,8 +239,10 @@ ahead/behind, and whether it is already merged. `X` on a branch deletes it, but
 only when it is fully merged into HEAD (`git branch -d`): its commits are then
 reachable from HEAD anyway, so nothing can be lost. Unmerged branches are refused
 with the reason and the terminal command that would force it. The confirmation
-shows both the exact delete command and the `git branch <name> <oid>` command
-that restores the branch.
+shows both the exact delete command and the commands that restore the branch —
+`git branch <name> <oid>` plus, if an upstream was set, the
+`git branch --set-upstream-to …` line, because `git branch -d` deletes that
+link as well.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ

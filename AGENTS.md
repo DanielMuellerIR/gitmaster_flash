@@ -65,7 +65,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Danach muss der echte Index die committeten Pfade übernehmen
   (`adopt_commit_in_real_index`), sonst zeigt `git status` sie weiter als `MM` und
   gmf meldet das Repo trotz erfolgreichem Commit als schmutzig. Referenz ist
-  `git commit -- <pfad>`.
+  `git commit -- <pfad>`. Zwei Konsequenzen daraus: `git commit` vererbt
+  `GIT_INDEX_FILE` an die Hooks — ein pre-commit-Hook, der per `git add` weitere
+  Pfade stagt, verändert den Commit-Baum; deshalb wird der Baum nach dem Commit
+  geprüft und bei Abweichung atomar zurückgerollt
+  (`_verify_hooks_kept_approved_tree`). Und ins Befehlsprotokoll kommt nicht das
+  Temp-Index-Interna, sondern der terminal-äquivalente Befehl
+  `git commit -m … -- <pfade>` — nur der wäre im Terminal gefahrlos wiederholbar.
 - Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
   Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
   vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen
@@ -106,6 +112,16 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
+- [ ] `fetch --all` klassifiziert bei mehreren gescheiterten Remotes nur den
+      kombinierten stderr — bei gemischten Ursachen (Login fehlt an einem Remote,
+      Repo weg an einem anderen) ist mindestens eine Diagnose falsch. Remotes
+      einzeln fetchen bzw. stderr pro Remote zuordnen und Ursache/Detail je
+      `RemoteStatus` speichern (Code-Review 2026-08-02).
+- [ ] `docs/make-screens.py` wertet Ruhe auf dem PTY als „fertig“: läuft nach dem
+      letzten Tastendruck noch eine stille Git-Aktion, kann auf langsamen Maschinen
+      ein Zwischenzustand aufgenommen werden und `--check` wird timingabhängig.
+      Auf einen erwarteten Bildschirm-/Protokollmarker warten statt nur auf Ruhe
+      (Code-Review 2026-08-02).
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
