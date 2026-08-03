@@ -387,7 +387,11 @@ TR = {
               "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
               "   Requires typing PUSH <remote>; pins source and target OIDs and sends no tags.\n"
               "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
-              "R  Fetches all remotes in all repositories; it does not change working trees.",
+              "R  Fetches all remotes in all repositories; it does not change working trees.\n\n"
+              "Z  Discards the selected file in the changes view (A) — the only action\n"
+              "   that loses an uncommitted change, and there is no undo for it.\n"
+              "   Untracked files, merge conflicts and renames are refused.\n"
+              "   A in that dialog puts all changes into a stash instead.",
         "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
               "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
               "L  Nur per Fast-forward vom privaten Sync-Remote holen.\n"
@@ -395,7 +399,11 @@ TR = {
               "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
               "   Verlangt PUSH <Remote>; pinnt Quell-/Ziel-OID und sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
-              "R  Fetcht alle Remotes aller Repos; Working Trees bleiben unverändert."},
+              "R  Fetcht alle Remotes aller Repos; Working Trees bleiben unverändert.\n\n"
+              "Z  Verwirft in der Änderungsansicht (A) die gewählte Datei — die einzige\n"
+              "   Aktion, die eine nicht committete Änderung verliert; kein Zurück.\n"
+              "   Unverfolgte Dateien, Merge-Konflikte und Umbenennungen lehnt gmf ab.\n"
+              "   A im selben Dialog legt stattdessen alle Änderungen in einen Stash."},
     # Repo-Info
     "repo_info_title": {"en": "Repository info · {rel}", "de": "Repo-Info · {rel}"},
     "info_path": {"en": "Path", "de": "Pfad"},
@@ -639,8 +647,8 @@ TR = {
                      "de": "In dieser Sitzung ausgeführte Befehle"},
     "cmdlog_cancelled": {"en": "not run — cancelled", "de": "nicht ausgeführt — abgebrochen"},
     "cmdlog_empty": {
-        "en": "(none yet — actions like C, P, L, G, U, D and X are listed here)",
-        "de": "(noch keine — Aktionen wie C, P, L, G, U, D und X stehen hier)"},
+        "en": "(none yet — actions like C, P, L, G, U, D, X and Z are listed here)",
+        "de": "(noch keine — Aktionen wie C, P, L, G, U, D, X und Z stehen hier)"},
     "cmdlog_hint": {
         "en": "Every line is a real Git command; you can run it in a terminal yourself.",
         "de": "Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar."},
