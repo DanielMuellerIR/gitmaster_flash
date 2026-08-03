@@ -110,6 +110,58 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 ## Offene Punkte / Ideen
 
+- [ ] **Änderungen verwerfen (`V` in der Änderungsansicht)** — geplant, Zuschnitt
+      entschieden am 2026-08-03. Anlass: Auf einem Rechner, auf dem an einem Projekt
+      gar nicht gearbeitet wurde, stehen trotzdem Dateien als geändert im Status
+      (beobachtet an `pubspec.lock`) und blockieren den Abgleich zwischen den
+      Rechnern. Bisher half nur ein fremdes Werkzeug — ein Fall, den gmf selbst
+      können muss.
+      Zuschnitt:
+      - Die Taste sitzt in `action_file_changes()` (`A`), nicht im Fuß des
+        Hauptschirms. Dort steht die Dateiliste bereits, und `⏎` zeigt vorher den
+        Diff: Man verwirft nur, was man gesehen hat. Der Hauptschirm bleibt damit
+        unverändert, die erzeugten Bilder in `docs/` müssen nicht neu entstehen.
+      - **Einzelne Datei: hart** (`git restore`), ohne Sicherungsnetz. Verloren geht
+        nur der Unterschied zu einem committeten Stand; Datei und Historie bleiben.
+        Das ist die bewusste Ausnahme von der Dialog-Regel oben: Einen
+        Rückgängig-Befehl gibt es hier nicht. Der Dialog nennt stattdessen den
+        Umfang der Änderung (Zahl geänderter Zeilen), damit eine Datei mit echter
+        Arbeit sich sichtbar von einer bloß angefassten unterscheidet.
+      - **Alle Dateien: als Stash** (`git stash push`), mit zweiter Bestätigung. Bei
+        „alle“ fehlt die Einzelbeurteilung, die den harten Weg trägt. In gmf ist ein
+        Stash nichts Verstecktes: Er steht in der Repo-Zeile, `S` zeigt den Inhalt,
+        `D` wirft ihn weg — das Aufräumen bleibt also sichtbar und in derselben
+        Ansicht erledigbar.
+      - **Unverfolgte Dateien (`??`) bleiben außen vor.** Sie waren nie in Git, es
+        gibt keinen früheren Stand: Das wäre Löschen, nicht Verwerfen. Sollte sich
+        zeigen, dass sie den Abgleich in der Praxis ebenfalls blockieren, bekommen
+        sie eine eigene, anders benannte Aktion mit eigenem Dialog — nicht dieselbe
+        Taste.
+      - Kein CLI-Schalter: Die nicht-interaktive Schnittstelle bleibt lesend.
+      Technisch:
+      - `parse_porcelain()` muss den rohen XY-Status mitliefern; heute verkürzt es
+        ihn auf M/D/U/C. Ohne ihn ist nicht unterscheidbar, ob nur der Arbeitsbaum,
+        nur der Index oder beides betroffen ist, und ein neu hinzugefügtes `A ` (das
+        keinen HEAD-Stand hat) sieht aus wie eine gewöhnliche Änderung. Mitzuziehen:
+        Änderungsansicht, Commit-Hilfe, Tests.
+      - Umbenennungen stehen als zwei Einträge (Ziel `M`, Quelle `D`). Einzeln
+        verworfen bleibt die halbe Umbenennung liegen: beide Hälften zusammen
+        behandeln oder die Aktion dort verweigern.
+      - Konflikte (`UNMERGED_CODES`) sperren.
+      - Dialog über `_confirm_destructive()`, Ausführung über `run_git_logged()`
+        (sonst fehlt sie im Protokoll), danach `refresh_one()`; leert sich die
+        Liste, die Ansicht verlassen.
+      - `confirm()` kennt nur Ja/Nein und braucht für die Ausweitung eine dritte
+        Antwort. Keine zweite Taste dafür: Groß- und Kleinschreibung sind im ganzen
+        Programm gleichbedeutend, `v` und `V` dürfen nichts Verschiedenes tun.
+      - Ob `git stash push -- <pfad>` fremdes Staging anderer Dateien unberührt
+        lässt, ist genau die Annahme, die dieses Repo per Test absichert: Blackbox
+        auf einem echten temporären Repo, nicht mit gemocktem `subprocess`. Ebenso
+        zu prüfen: Repo ohne HEAD, dort schlägt `git stash` fehl.
+- [ ] Verlauf umschreiben (`reset`, Squash) bleibt bewusst draußen. Nichts davon ist
+      an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
+      im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
+      Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
 - [ ] `fetch --all` klassifiziert bei mehreren gescheiterten Remotes nur den
