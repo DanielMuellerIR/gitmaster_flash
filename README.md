@@ -147,7 +147,7 @@ memorize. Case does not matter — `f` works like `F`.
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
-| A | look at the changes: pick a file, see its diff |
+| A | look at the changes: pick a file, see its diff; there `V` discards it |
 | C | commit helper (see below) |
 | P | safely push the current branch to the private sync remote |
 | L | safely fast-forward the current branch from the private sync remote |
@@ -165,7 +165,7 @@ first. Its preview includes untracked and binary files; a failed or unexpectedly
 empty Git preview is labelled explicitly before the destructive drop action
 remains available.
 
-## Changes (`A`)
+## Changes: look and discard (`A`, there `V`)
 
 `→` shows *that* a file changed; `A` shows *what* changed in it. Pick a file with
 `↑`/`↓` (or `Tab`), press `⏎`, and its diff opens in the scrollable viewer —
@@ -178,11 +178,35 @@ including new files, which `git diff` normally ignores, and deleted ones.
  U  notes.txt
  D  old-config.yml
 
- ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back
+ ↑/↓ or Tab select file · ⏎ show diff · V discard · Q/Esc back
 ```
 
-Purely read-only: neither the index nor the working tree is touched, so you can
-look before deciding what to commit or discard.
+Looking is purely read-only: neither the index nor the working tree is touched.
+`V` discards the selected file, and it is the one place in gmf that really
+throws away an uncommitted change. It sits here on purpose — where the file list
+is in front of you and `⏎` shows the diff first.
+
+What `V` does depends on the state of the file:
+
+- **Modified, deleted or staged:** back to the state of the last commit
+  (`git restore --source=HEAD --staged --worktree`). History stays untouched;
+  only the uncommitted change is lost. There is no undo command for that, and
+  the dialog says so — it also names the extent in changed lines, so a file with
+  real work in it looks different from one that a program merely touched.
+- **Newly added:** the file is in no commit, so there is no earlier state to go
+  back to. It only loses its staging and stays on disk as an untracked file —
+  gmf does not delete it.
+- **Untracked, merge conflict or rename:** refused, with the reason shown above
+  the footer. Untracked files were never in Git, so removing one would be
+  deleting, not discarding. A rename consists of two entries — taking back one
+  half would leave the other behind.
+
+From two changed tracked files on, the same dialog offers a second route with
+`A`: **all** changes in the repository go into a stash instead of into nothing,
+after a confirmation of their own. That is the widening for the case where you
+did not judge every file individually. Afterwards the content stays visible and
+within reach: `S` shows it, `U` brings it back, `D` drops it. Untracked files
+are left alone here as well.
 
 ## Repository info and remotes (`I`)
 

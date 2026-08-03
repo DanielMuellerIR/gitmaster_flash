@@ -157,7 +157,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
-| A | Änderungen ansehen: Datei wählen, Diff lesen |
+| A | Änderungen ansehen: Datei wählen, Diff lesen; dort `V` verwerfen |
 | C | Commit-Hilfe (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
@@ -175,7 +175,7 @@ erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und bin�
 Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
 destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
 
-## Änderungen ansehen (`A`)
+## Änderungen ansehen und verwerfen (`A`, dort `V`)
 
 `→` zeigt, *dass* sich eine Datei geändert hat; `A` zeigt, *was* sich darin
 geändert hat. Datei mit `↑`/`↓` (oder `Tab`) wählen, `⏎` drücken — der Diff
@@ -189,11 +189,36 @@ sonst ignoriert, und für gelöschte.
  U  notizen.txt
  D  alte-config.yml
 
- ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück
+ ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · V verwerfen · Q/Esc zurück
 ```
 
-Rein lesend: weder Index noch Arbeitsbaum werden angefasst. Man kann also erst
-schauen und dann entscheiden, was committet oder verworfen wird.
+Ansehen ist rein lesend: weder Index noch Arbeitsbaum werden dabei angefasst.
+`V` verwirft dagegen die gewählte Datei und ist der einzige Weg in gmf, der eine
+nicht committete Änderung wirklich wegwirft. Er sitzt bewusst hier, wo die
+Dateiliste vor einem steht und `⏎` vorher den Diff zeigt.
+
+Was `V` tut, hängt vom Zustand der Datei ab:
+
+- **Geändert, gelöscht oder vorgemerkt:** zurück auf den Stand des letzten
+  Commits (`git restore --source=HEAD --staged --worktree`). Die Historie bleibt
+  unberührt; verloren geht nur die nicht committete Änderung. Einen
+  Rückgängig-Befehl gibt es dafür nicht, und der Dialog sagt das auch so — er
+  nennt zusätzlich den Umfang in geänderten Zeilen, damit eine Datei mit echter
+  Arbeit sich von einer bloß angefassten unterscheidet.
+- **Neu hinzugefügt:** Die Datei steht in keinem Commit, einen früheren Stand
+  gibt es also nicht. Sie verliert nur die Vormerkung und bleibt als unverfolgte
+  Datei liegen — gmf löscht sie nicht.
+- **Unverfolgt, Merge-Konflikt oder Umbenennung:** abgelehnt, mit Begründung in
+  der Zeile über der Fußleiste. Unverfolgte Dateien waren nie in Git; sie zu
+  entfernen wäre Löschen und nicht Verwerfen. Eine Umbenennung besteht aus zwei
+  Einträgen — eine Hälfte allein zurückzunehmen ließe die andere stehen.
+
+Ab zwei geänderten verfolgten Dateien bietet derselbe Dialog mit `A` einen
+zweiten Weg an: **alle** Änderungen des Repos wandern in einen Stash statt ins
+Nichts, nach eigener Bestätigung. Das ist die Ausweitung für den Fall, dass man
+eben nicht jede Datei einzeln beurteilt hat. Der Inhalt bleibt danach sichtbar
+und greifbar: `S` zeigt ihn, `U` holt ihn zurück, `D` wirft ihn weg.
+Unverfolgte Dateien bleiben auch dabei liegen.
 
 ## Repo-Info und Remotes (`I`)
 

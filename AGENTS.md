@@ -92,6 +92,23 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
+  Ausdrückliche Ausnahme ist `V` auf einer einzelnen Datei: Einen
+  Rückgängig-Befehl gibt es dort nicht, weil eine verworfene Änderung danach
+  nirgends mehr steht. An seiner Stelle sagt der Dialog ausdrücklich, dass es
+  kein Zurück gibt, und nennt den Umfang der Änderung in Zeilen — daran
+  unterscheidet sich eine Datei mit echter Arbeit von einer, die nur ein
+  Programm beim Start angefasst hat (Entscheidung 2026-08-03).
+- `V` in der Änderungsansicht ist der einzige Weg in gmf, der eine nicht
+  committete Änderung wirklich wegwirft. Der Zuschnitt ist eine Entscheidung und
+  keine Zwischenstufe: einzelne Datei hart (`plan_discard()`), alle Dateien
+  zusammen als Stash (`plan_discard_all()`), unverfolgte Dateien gar nicht. Bei
+  „alle“ fehlt die Beurteilung der einzelnen Datei, die den harten Weg trägt;
+  unverfolgte Dateien waren nie in Git, sie zu entfernen wäre Löschen statt
+  Verwerfen. Eine Erweiterung darauf braucht einen eigenen Dialog mit eigenem
+  Namen, nicht dieselbe Taste. Was eine Datei überhaupt braucht, hängt am rohen
+  Status in `ChangedFile.xy`; die Anzeige-Buchstaben M/D/U/C reichen dafür nicht.
+  Fürs Verwerfen gibt es bewusst keinen CLI-Schalter — die nicht-interaktive
+  Schnittstelle bleibt lesend.
 - „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
   Zwei Ausnahmen gehören überall dorthin, wo die Zusage steht: `load_config()`
   legt beim ersten Lauf `~/.config/gitmaster_flash/config.json` an — bei `--diff`
@@ -110,54 +127,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 ## Offene Punkte / Ideen
 
-- [ ] **Änderungen verwerfen (`V` in der Änderungsansicht)** — geplant, Zuschnitt
-      entschieden am 2026-08-03. Anlass: Auf einem Rechner, auf dem an einem Projekt
-      gar nicht gearbeitet wurde, stehen trotzdem Dateien als geändert im Status
-      (beobachtet an `pubspec.lock`) und blockieren den Abgleich zwischen den
-      Rechnern. Bisher half nur ein fremdes Werkzeug — ein Fall, den gmf selbst
-      können muss.
-      Zuschnitt:
-      - Die Taste sitzt in `action_file_changes()` (`A`), nicht im Fuß des
-        Hauptschirms. Dort steht die Dateiliste bereits, und `⏎` zeigt vorher den
-        Diff: Man verwirft nur, was man gesehen hat. Der Hauptschirm bleibt damit
-        unverändert, die erzeugten Bilder in `docs/` müssen nicht neu entstehen.
-      - **Einzelne Datei: hart** (`git restore`), ohne Sicherungsnetz. Verloren geht
-        nur der Unterschied zu einem committeten Stand; Datei und Historie bleiben.
-        Das ist die bewusste Ausnahme von der Dialog-Regel oben: Einen
-        Rückgängig-Befehl gibt es hier nicht. Der Dialog nennt stattdessen den
-        Umfang der Änderung (Zahl geänderter Zeilen), damit eine Datei mit echter
-        Arbeit sich sichtbar von einer bloß angefassten unterscheidet.
-      - **Alle Dateien: als Stash** (`git stash push`), mit zweiter Bestätigung. Bei
-        „alle“ fehlt die Einzelbeurteilung, die den harten Weg trägt. In gmf ist ein
-        Stash nichts Verstecktes: Er steht in der Repo-Zeile, `S` zeigt den Inhalt,
-        `D` wirft ihn weg — das Aufräumen bleibt also sichtbar und in derselben
-        Ansicht erledigbar.
-      - **Unverfolgte Dateien (`??`) bleiben außen vor.** Sie waren nie in Git, es
-        gibt keinen früheren Stand: Das wäre Löschen, nicht Verwerfen. Sollte sich
-        zeigen, dass sie den Abgleich in der Praxis ebenfalls blockieren, bekommen
-        sie eine eigene, anders benannte Aktion mit eigenem Dialog — nicht dieselbe
-        Taste.
-      - Kein CLI-Schalter: Die nicht-interaktive Schnittstelle bleibt lesend.
-      Technisch:
-      - `parse_porcelain()` muss den rohen XY-Status mitliefern; heute verkürzt es
-        ihn auf M/D/U/C. Ohne ihn ist nicht unterscheidbar, ob nur der Arbeitsbaum,
-        nur der Index oder beides betroffen ist, und ein neu hinzugefügtes `A ` (das
-        keinen HEAD-Stand hat) sieht aus wie eine gewöhnliche Änderung. Mitzuziehen:
-        Änderungsansicht, Commit-Hilfe, Tests.
-      - Umbenennungen stehen als zwei Einträge (Ziel `M`, Quelle `D`). Einzeln
-        verworfen bleibt die halbe Umbenennung liegen: beide Hälften zusammen
-        behandeln oder die Aktion dort verweigern.
-      - Konflikte (`UNMERGED_CODES`) sperren.
-      - Dialog über `_confirm_destructive()`, Ausführung über `run_git_logged()`
-        (sonst fehlt sie im Protokoll), danach `refresh_one()`; leert sich die
-        Liste, die Ansicht verlassen.
-      - `confirm()` kennt nur Ja/Nein und braucht für die Ausweitung eine dritte
-        Antwort. Keine zweite Taste dafür: Groß- und Kleinschreibung sind im ganzen
-        Programm gleichbedeutend, `v` und `V` dürfen nichts Verschiedenes tun.
-      - Ob `git stash push -- <pfad>` fremdes Staging anderer Dateien unberührt
-        lässt, ist genau die Annahme, die dieses Repo per Test absichert: Blackbox
-        auf einem echten temporären Repo, nicht mit gemocktem `subprocess`. Ebenso
-        zu prüfen: Repo ohne HEAD, dort schlägt `git stash` fehl.
+- [ ] Unverfolgte Dateien bleiben vom Verwerfen ausgenommen (siehe Regel oben).
+      Falls sich zeigt, dass sie den Abgleich zwischen den Rechnern in der Praxis
+      ebenso blockieren wie geänderte, gehört das in eine eigene, anders benannte
+      Aktion mit eigenem Dialog — Löschen ist kein Verwerfen (offen seit
+      2026-08-03).
 - [ ] Verlauf umschreiben (`reset`, Squash) bleibt bewusst draußen. Nichts davon ist
       an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
       im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt

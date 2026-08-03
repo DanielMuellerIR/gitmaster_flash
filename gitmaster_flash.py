@@ -14,6 +14,8 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
         (needs the shell wrapper `gmf` from gmf.zsh — a child process cannot
         change the parent shell's working directory)
   F/…   open the repo in a configured app (see config.json)
+  A     look at the changes file by file; there V discards the selected one
+        (hard for a single file, all of them together into a stash instead)
   C     commit helper: suggests what to commit and what to .gitignore
   P     safely push the current branch to the private sync remote
   L     safely fast-forward the current branch from the private sync remote
@@ -66,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
