@@ -162,6 +162,46 @@ class TestDiscardPlan(unittest.TestCase):
         self.assertEqual(plan_discard_all(only_new, True).refused, "only_untracked")
 
 
+class ConfirmDialogTests(unittest.TestCase):
+    """Die Rückfrage kann eine dritte Antwort anbieten, ohne dass die
+    bestehenden Ja/Nein-Aufrufer etwas davon merken."""
+
+    def ask(self, keys, extra_key=""):
+        drawn = []
+
+        class Screen:
+            def __init__(self):
+                self.keys = iter(keys)
+
+            def getmaxyx(self): return (24, 80)
+            def addstr(self, y, x, text, *a): drawn.append(text)
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+
+        ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            return ui.confirm("Wirklich?", extra_key), drawn
+
+    def test_yes_and_no_are_unchanged(self):
+        self.assertIs(self.ask([ord("j")])[0], True)
+        self.assertIs(self.ask([ord("y")])[0], True)
+        self.assertIs(self.ask([ord("n")])[0], False)
+        self.assertIs(self.ask([27])[0], False)
+
+    def test_extra_key_answers_with_itself_in_both_cases(self):
+        self.assertEqual(self.ask([ord("a")], extra_key="A")[0], "A")
+        self.assertEqual(self.ask([ord("A")], extra_key="A")[0], "A")
+
+    def test_extra_key_is_ignored_when_not_offered(self):
+        # Ohne dritte Antwort darf ein A nicht versehentlich etwas auslösen:
+        # der Dialog wartet weiter, hier bis zum folgenden N.
+        self.assertIs(self.ask([ord("a"), ord("n")])[0], False)
+
+    def test_the_offered_key_appears_in_the_question(self):
+        _, drawn = self.ask([ord("n")], extra_key="A")
+        self.assertIn("A)", drawn[0])
+
+
 class TestSuggestedIgnore(unittest.TestCase):
     def test_typical_junk(self):
         self.assertEqual(suggested_ignore(".DS_Store"), ".DS_Store")

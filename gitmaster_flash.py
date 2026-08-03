@@ -207,6 +207,7 @@ TR = {
     "log_pane_focus": {"en": "  ↑/↓ scroll · Tab back to the list",
                        "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
+    "yesno_extra": {"en": "  (Y/N/{k})", "de": "  (J/N/{k})"},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
                       "de": "App nicht gefunden: {p} (config.json anpassen)"},
@@ -3116,9 +3117,18 @@ class TUI:
 
     # -- Dialog-Helfer ------------------------------------------------------
 
-    def confirm(self, question: str) -> bool:
+    def confirm(self, question: str, extra_key: str = "") -> bool | str:
+        """Rückfrage in der vorletzten Zeile: J/Y bestätigt, N/Esc bricht ab.
+
+        Mit ``extra_key`` bekommt der Dialog eine dritte Antwort — für den Fall,
+        dass er neben Ja und Nein noch einen anderen Weg anbietet (etwa
+        „stattdessen alle Dateien"). Diese Taste liefert dann sich selbst als
+        Rückgabewert. Aufrufer müssen deshalb auf ``is True`` prüfen: Ein
+        Buchstabe ist in Python wahr und würde sonst als Zustimmung durchgehen.
+        """
         h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, h - 4, 1, (question + t("yesno")).ljust(w - 2),
+        hint = t("yesno_extra", k=extra_key.upper()) if extra_key else t("yesno")
+        safe_addstr(self.scr, h - 4, 1, (question + hint).ljust(w - 2),
                     curses.color_pair(C_YELLOW) | curses.A_BOLD)
         self.scr.refresh()
         while True:
@@ -3127,6 +3137,8 @@ class TUI:
                 return True
             if ch in (ord("n"), ord("N"), 27):
                 return False
+            if extra_key and ch in (ord(extra_key.lower()), ord(extra_key.upper())):
+                return extra_key.upper()
 
     def show_busy(self, text: str) -> None:
         """Eine Zwischenmeldung sofort auf den Schirm bringen.
