@@ -157,7 +157,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
-| A | Änderungen ansehen: Datei wählen, Diff lesen; dort `V` verwerfen |
+| A | Änderungen ansehen: Datei wählen, Diff lesen; dort `Z` verwerfen |
 | C | Commit-Hilfe (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
@@ -175,7 +175,7 @@ erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und bin�
 Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
 destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
 
-## Änderungen ansehen und verwerfen (`A`, dort `V`)
+## Änderungen ansehen und verwerfen (`A`, dort `Z`)
 
 `→` zeigt, *dass* sich eine Datei geändert hat; `A` zeigt, *was* sich darin
 geändert hat. Datei mit `↑`/`↓` (oder `Tab`) wählen, `⏎` drücken — der Diff
@@ -189,15 +189,15 @@ sonst ignoriert, und für gelöschte.
  U  notizen.txt
  D  alte-config.yml
 
- ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · V verwerfen · Q/Esc zurück
+ ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Z verwerfen · Q/Esc zurück
 ```
 
 Ansehen ist rein lesend: weder Index noch Arbeitsbaum werden dabei angefasst.
-`V` verwirft dagegen die gewählte Datei und ist der einzige Weg in gmf, der eine
+`Z` verwirft dagegen die gewählte Datei und ist der einzige Weg in gmf, der eine
 nicht committete Änderung wirklich wegwirft. Er sitzt bewusst hier, wo die
 Dateiliste vor einem steht und `⏎` vorher den Diff zeigt.
 
-Was `V` tut, hängt vom Zustand der Datei ab:
+Was `Z` tut, hängt vom Zustand der Datei ab:
 
 - **Geändert, gelöscht oder vorgemerkt:** zurück auf den Stand des letzten
   Commits (`git restore --source=HEAD --staged --worktree`). Die Historie bleibt

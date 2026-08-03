@@ -92,13 +92,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
-  Ausdrückliche Ausnahme ist `V` auf einer einzelnen Datei: Einen
+  Ausdrückliche Ausnahme ist `Z` auf einer einzelnen Datei: Einen
   Rückgängig-Befehl gibt es dort nicht, weil eine verworfene Änderung danach
   nirgends mehr steht. An seiner Stelle sagt der Dialog ausdrücklich, dass es
   kein Zurück gibt, und nennt den Umfang der Änderung in Zeilen — daran
   unterscheidet sich eine Datei mit echter Arbeit von einer, die nur ein
   Programm beim Start angefasst hat (Entscheidung 2026-08-03).
-- `V` in der Änderungsansicht ist der einzige Weg in gmf, der eine nicht
+- `Z` in der Änderungsansicht ist der einzige Weg in gmf, der eine nicht
   committete Änderung wirklich wegwirft. Der Zuschnitt ist eine Entscheidung und
   keine Zwischenstufe: einzelne Datei hart (`plan_discard()`), alle Dateien
   zusammen als Stash (`plan_discard_all()`), unverfolgte Dateien gar nicht. Bei

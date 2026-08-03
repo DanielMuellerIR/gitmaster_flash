@@ -14,7 +14,7 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
         (needs the shell wrapper `gmf` from gmf.zsh — a child process cannot
         change the parent shell's working directory)
   F/…   open the repo in a configured app (see config.json)
-  A     look at the changes file by file; there V discards the selected one
+  A     look at the changes file by file; there Z discards the selected one
         (hard for a single file, all of them together into a stash instead)
   C     commit helper: suggests what to commit and what to .gitignore
   P     safely push the current branch to the private sync remote
@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -186,8 +186,8 @@ TR = {
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
     "changes_footer": {
-        "en": " ↑/↓ or Tab select file · ⏎ show diff · V discard · Q/Esc back",
-        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · V verwerfen · Q/Esc zurück"},
+        "en": " ↑/↓ or Tab select file · ⏎ show diff · Z discard · Q/Esc back",
+        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Z verwerfen · Q/Esc zurück"},
     "no_changes_to_show": {"en": "Nothing changed in this repository.",
                            "de": "In diesem Repo hat sich nichts geändert."},
     "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
@@ -3625,7 +3625,7 @@ class TUI:
 
         Die Liste zeigt, WAS sich geändert hat — bisher stand dort nur, DASS sich
         etwas geändert hat. Ansehen ist rein lesend: `git diff` fasst weder Index
-        noch Baum an. `V` verwirft die Datei unter dem Cursor und ist der einzige
+        noch Baum an. `Z` verwirft die Datei unter dem Cursor und ist der einzige
         Weg in gmf, der eine nicht committete Änderung wirklich wegwirft — er
         sitzt bewusst hier, wo man die Datei vor sich hat und mit ⏎ vorher in den
         Diff sehen kann.
@@ -3680,7 +3680,7 @@ class TUI:
                     return
                 self.show_pager(t("diff_title", p=terminal_text(path)),
                                 (text or t("diff_empty")).splitlines())
-            elif ch in (ord("v"), ord("V")):
+            elif ch in (ord("z"), ord("Z")):
                 changed = self.action_discard_file(st, st.files[sel])
                 note = self.message
                 if changed:

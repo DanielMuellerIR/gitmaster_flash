@@ -600,7 +600,7 @@ class DiscardKeyTests(unittest.TestCase):
     def test_key_v_runs_the_action_and_reloads_the_list(self):
         # Durch die echte Tastenschleife: V, dann J im Dialog, dann Q.
         (self.repo / "a.md").write_text("kaputt\n")
-        ui = self.make_ui([ord("v"), ord("j"), ord("q")])
+        ui = self.make_ui([ord("z"), ord("j"), ord("q")])
         with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
             ui.action_file_changes()
         self.assertEqual((self.repo / "a.md").read_text(), "committet\n")

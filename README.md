@@ -147,7 +147,7 @@ memorize. Case does not matter — `f` works like `F`.
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
-| A | look at the changes: pick a file, see its diff; there `V` discards it |
+| A | look at the changes: pick a file, see its diff; there `Z` discards it |
 | C | commit helper (see below) |
 | P | safely push the current branch to the private sync remote |
 | L | safely fast-forward the current branch from the private sync remote |
@@ -165,7 +165,7 @@ first. Its preview includes untracked and binary files; a failed or unexpectedly
 empty Git preview is labelled explicitly before the destructive drop action
 remains available.
 
-## Changes: look and discard (`A`, there `V`)
+## Changes: look and discard (`A`, there `Z`)
 
 `→` shows *that* a file changed; `A` shows *what* changed in it. Pick a file with
 `↑`/`↓` (or `Tab`), press `⏎`, and its diff opens in the scrollable viewer —
@@ -178,15 +178,15 @@ including new files, which `git diff` normally ignores, and deleted ones.
  U  notes.txt
  D  old-config.yml
 
- ↑/↓ or Tab select file · ⏎ show diff · V discard · Q/Esc back
+ ↑/↓ or Tab select file · ⏎ show diff · Z discard · Q/Esc back
 ```
 
 Looking is purely read-only: neither the index nor the working tree is touched.
-`V` discards the selected file, and it is the one place in gmf that really
+`Z` discards the selected file, and it is the one place in gmf that really
 throws away an uncommitted change. It sits here on purpose — where the file list
 is in front of you and `⏎` shows the diff first.
 
-What `V` does depends on the state of the file:
+What `Z` does depends on the state of the file:
 
 - **Modified, deleted or staged:** back to the state of the last commit
   (`git restore --source=HEAD --staged --worktree`). History stays untouched;
