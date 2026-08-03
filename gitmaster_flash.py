@@ -64,6 +64,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 __version__ = "0.16.0"
 
@@ -637,7 +638,7 @@ class RepoStatus:
     deleted: int = 0
     untracked: int = 0
     conflicts: int = 0            # ungemergte Dateien (Merge-Konflikt, z.B. nach stash pop)
-    files: list = field(default_factory=list)   # [(Buchstabe M/D/U/C, Pfad), ...]
+    files: list[ChangedFile] = field(default_factory=list)
     stashes: list = field(default_factory=list)  # ["stash@{0} WIP ...", ...]
     error: str = ""
     # Die Repo-Zeile bekommt das Stichwort (`error`), die Info-Seite den ganzen
@@ -790,7 +791,25 @@ class RemoteConfig:
 UNMERGED_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
 
 
-def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
+class ChangedFile(NamedTuple):
+    """Eine geänderte Datei — einmal fürs Auge, einmal für Git.
+
+    ``code`` ist die Vereinfachung für die Anzeige (M/D/U/C, siehe
+    parse_porcelain). ``xy`` ist das rohe Statusfeld von ``git status
+    --porcelain``: erstes Zeichen der Index (was gestaget ist), zweites Zeichen
+    der Arbeitsbaum (was daneben noch geändert ist). Erst daran ist erkennbar,
+    ob eine Änderung nur im Arbeitsbaum liegt (`` M``), nur im Index (``M ``)
+    oder in beiden (``MM``) — und ob es eine neu hinzugefügte Datei (``A ``) ist,
+    für die es gar keinen früheren Stand gibt. Ohne diese Unterscheidung lässt
+    sich nicht sagen, was ein Zurücksetzen der Datei überhaupt bedeutet.
+    """
+
+    code: str
+    path: str
+    xy: str
+
+
+def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
     """NUL-getrenntes ``git status --porcelain=v1 -z`` auswerten.
 
     -> (modified, deleted, untracked, conflicts, dateien).
@@ -807,9 +826,13 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
     Zielpfad stagen, den Rename als Kopie committen und die Löschung des alten
     Namens bliebe im Repo zurück. Bei einer Kopie (``C``) bleibt die Quelle
     unverändert und bekommt keinen Eintrag.
+
+    Beide Hälften eines Renames tragen dasselbe rohe ``xy`` (also ``R…``). Nur
+    daran ist später erkennbar, dass sie zusammengehören: Wer eine der beiden
+    Hälften allein zurücksetzt, lässt die halbe Umbenennung im Repo stehen.
     """
     m = d = u = c = 0
-    files = []
+    files: list[ChangedFile] = []
     fields = output.split("\0")
     i = 0
     while i < len(fields):
@@ -825,19 +848,19 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list]:
             i += 1
         if xy in UNMERGED_CODES:
             c += 1
-            files.append(("C", path))
+            files.append(ChangedFile("C", path, xy))
         elif xy == "??":
             u += 1
-            files.append(("U", path))
+            files.append(ChangedFile("U", path, xy))
         elif "D" in xy:
             d += 1
-            files.append(("D", path))
+            files.append(ChangedFile("D", path, xy))
         else:
             m += 1
-            files.append(("M", path))
+            files.append(ChangedFile("M", path, xy))
         if source and "R" in xy:
             d += 1
-            files.append(("D", source))
+            files.append(ChangedFile("D", source, xy))
     return m, d, u, c, files
 
 
@@ -2771,8 +2794,8 @@ class TUI:
         for i, st in enumerate(self.statuses):
             rows.append(("repo", i))
             if st.rel in self.expanded:
-                for code, path in st.files:
-                    rows.append(("file", i, code, path))
+                for entry in st.files:
+                    rows.append(("file", i, entry.code, entry.path))
                 for stash in st.stashes:
                     rows.append(("stash", i, stash))
                 if not st.files and not st.stashes:
@@ -3433,10 +3456,10 @@ class TUI:
                 off = sel - body_h + 1
             for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
                                       start=1):
-                code, path = st.files[index]
-                pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[code]
-                label = t("conflict_label") if code == "C" else ""
-                safe_addstr(self.scr, y, 1, f"{code}  {label}{path}",
+                entry = st.files[index]
+                pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[entry.code]
+                label = t("conflict_label") if entry.code == "C" else ""
+                safe_addstr(self.scr, y, 1, f"{entry.code}  {label}{entry.path}",
                             color_attr(pair, index == sel))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
@@ -3451,8 +3474,9 @@ class TUI:
             elif ch == 9:                      # Tab wie ↓, ohne Escape-Sequenz
                 sel = (sel + 1) % len(st.files)
             elif ch in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT):
-                code, path = st.files[sel]
-                ok, text = file_diff(st.path, code, path, self.cfg["git_timeout"])
+                entry = st.files[sel]
+                path = entry.path
+                ok, text = file_diff(st.path, entry.code, path, self.cfg["git_timeout"])
                 if not ok:
                     self.message = t("diff_failed", p=path, e=text)
                     return
@@ -3700,9 +3724,9 @@ class TUI:
             return
         # Jede Datei bekommt einen Vorschlag: committen oder gitignoren.
         items = []
-        for code, path in st.files:
-            pattern = suggested_ignore(path)
-            items.append({"code": code, "path": path,
+        for entry in st.files:
+            pattern = suggested_ignore(entry.path)
+            items.append({"code": entry.code, "path": entry.path,
                           "ignore": pattern is not None, "pattern": pattern,
                           "include": pattern is None})
         sel = 0

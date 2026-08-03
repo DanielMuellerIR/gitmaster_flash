@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gitmaster_flash as gmf_module  # noqa: E402
 
 from gitmaster_flash import (  # noqa: E402
-    DEFAULT_CONFIG, __version__, CommitSafetyError, RemoteStatus, RepoStatus, TUI,
+    DEFAULT_CONFIG, __version__, ChangedFile, CommitSafetyError, RemoteStatus,
+    RepoStatus, TUI,
     build_info_view, check_remote, classify_remote_check, collect_status, find_repos,
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
     detect_sync_remote, display_remote_url, fetch_remote_status, file_diff,
@@ -57,41 +58,54 @@ class TestParsePorcelain(unittest.TestCase):
         ])
         m, d, u, c, files = parse_porcelain(output)
         self.assertEqual((m, d, u, c), (3, 1, 2, 0))
-        self.assertIn(("U", "neu.md"), files)
-        self.assertIn(("D", "geloescht.txt"), files)
-        self.assertIn(("M", "gestaged.py"), files)
+        self.assertIn(ChangedFile("U", "neu.md", "??"), files)
+        self.assertIn(ChangedFile("D", "geloescht.txt", " D"), files)
+        self.assertIn(ChangedFile("M", "gestaged.py", "M "), files)
+
+    def test_raw_status_survives_the_simplification(self):
+        # Die Anzeige kürzt alles auf M — fürs Zurücksetzen muss aber
+        # unterscheidbar bleiben, WO die Änderung liegt.
+        output = "\0".join([" M nur-arbeitsbaum.py", "M  nur-index.py",
+                            "MM beides.py", "A  neu-hinzugefuegt.py", ""])
+        *_, files = parse_porcelain(output)
+        self.assertEqual([f.code for f in files], ["M", "M", "M", "M"])
+        self.assertEqual([f.xy for f in files], [" M", "M ", "MM", "A "])
 
     def test_conflicts_detected_first(self):
         # UU/UD/AA sind Merge-Konflikte und dürfen NICHT als M oder D zählen.
         output = "UU beide.txt\0UD ich-geloescht.txt\0AA beide-neu.txt\0"
         m, d, u, c, files = parse_porcelain(output)
         self.assertEqual((m, d, u, c), (0, 0, 0, 3))
-        self.assertIn(("C", "beide.txt"), files)
-        self.assertIn(("C", "ich-geloescht.txt"), files)
+        self.assertIn(ChangedFile("C", "beide.txt", "UU"), files)
+        self.assertIn(ChangedFile("C", "ich-geloescht.txt", "UD"), files)
 
     def test_unicode_and_control_characters_remain_literal(self):
         output = "?? übungen/Abendsession 2026-07-21.pdf\0?? zeile\numbruch.txt\0"
         _, _, untracked, _, files = parse_porcelain(output)
         self.assertEqual(untracked, 2)
-        self.assertIn(("U", "übungen/Abendsession 2026-07-21.pdf"), files)
-        self.assertIn(("U", "zeile\numbruch.txt"), files)
+        self.assertIn(ChangedFile("U", "übungen/Abendsession 2026-07-21.pdf", "??"),
+                      files)
+        self.assertIn(ChangedFile("U", "zeile\numbruch.txt", "??"), files)
 
     def test_rename_keeps_destination_and_source(self):
         # Ein Rename ist Ziel UND Quelle: nur mit beiden Pfaden kann die
         # Commit-Hilfe den Rename komplett stagen — sonst committet sie eine
         # Kopie und die Löschung des alten Namens bleibt zurück.
+        # Beide Hälften tragen dasselbe rohe "R ", nur daran sind sie später als
+        # zusammengehörig erkennbar.
         output = "R  neu ü.txt\0alt ü.txt\0 M danach.txt\0"
         modified, deleted, _, _, files = parse_porcelain(output)
         self.assertEqual((modified, deleted), (2, 1))
-        self.assertEqual(files, [("M", "neu ü.txt"), ("D", "alt ü.txt"),
-                                 ("M", "danach.txt")])
+        self.assertEqual(files, [ChangedFile("M", "neu ü.txt", "R "),
+                                 ChangedFile("D", "alt ü.txt", "R "),
+                                 ChangedFile("M", "danach.txt", " M")])
 
     def test_copy_does_not_invent_a_deletion(self):
         # Bei einer Kopie bleibt die Quelle unverändert liegen.
         output = "C  kopie.txt\0quelle.txt\0"
         modified, deleted, _, _, files = parse_porcelain(output)
         self.assertEqual((modified, deleted), (1, 0))
-        self.assertEqual(files, [("M", "kopie.txt")])
+        self.assertEqual(files, [ChangedFile("M", "kopie.txt", "C ")])
 
     def test_empty(self):
         self.assertEqual(parse_porcelain(""), (0, 0, 0, 0, []))
@@ -815,8 +829,8 @@ class CommitSafetyTests(unittest.TestCase):
         """
         git(self.repo, "mv", "include.txt", "renamed.txt")
         st = collect_status(self.repo, self.repo.parent, DEFAULT_CONFIG)
-        self.assertIn(("M", "renamed.txt"), st.files)
-        self.assertIn(("D", "include.txt"), st.files)
+        self.assertIn(ChangedFile("M", "renamed.txt", "R "), st.files)
+        self.assertIn(ChangedFile("D", "include.txt", "R "), st.files)
         r = commit_selected(self.repo, ["renamed.txt", "include.txt"], "umbenannt", 10)
         self.assertEqual(r.returncode, 0, r.stderr)
         changed = subprocess.run(
@@ -1883,7 +1897,7 @@ class BranchAndDiffTests(unittest.TestCase):
         (self.repo / "neu-dir").mkdir()
         (self.repo / "neu-dir" / "datei.txt").write_text("inhalt\n")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
-        self.assertIn(("U", "neu-dir/"), st.files)
+        self.assertIn(ChangedFile("U", "neu-dir/", "??"), st.files)
         ok, message = file_diff(self.repo, "U", "neu-dir/", 10)
         self.assertFalse(ok)
         self.assertTrue(message)
@@ -2232,7 +2246,8 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
 
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
         ui.statuses = [RepoStatus(path=Path("/tmp/repo"), rel="r",
-                                  files=[("M", "very-long-name.txt")], modified=1)]
+                                  files=[ChangedFile("M", "very-long-name.txt", " M")],
+                                  modified=1)]
         with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
             ui.action_commit_wizard()
         self.assertEqual(ui.message, "Commit helper cancelled.")
