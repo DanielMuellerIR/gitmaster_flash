@@ -184,8 +184,8 @@ TR = {
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
     "changes_footer": {
-        "en": " ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back",
-        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück"},
+        "en": " ↑/↓ or Tab select file · ⏎ show diff · V discard · Q/Esc back",
+        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · V verwerfen · Q/Esc zurück"},
     "no_changes_to_show": {"en": "Nothing changed in this repository.",
                            "de": "In diesem Repo hat sich nichts geändert."},
     "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
@@ -541,6 +541,83 @@ TR = {
     "remove_undo": {"en": "Undo (restore the local configuration):",
                     "de": "Rückgängig (lokale Konfiguration wiederherstellen):"},
     "remove_command": {"en": "Command:", "de": "Befehl:"},
+    # Änderungen verwerfen (V in der Änderungsansicht)
+    "discard_title": {"en": "Discard changes · {p}",
+                      "de": "Änderungen verwerfen · {p}"},
+    "discard_effect_restore": {
+        "en": "· the file goes back to the state of the last commit",
+        "de": "· die Datei geht auf den Stand des letzten Commits zurück"},
+    "discard_effect_unstage": {
+        "en": "· this file is in no commit yet — there is no earlier state",
+        "de": "· diese Datei steht in keinem Commit — einen früheren Stand gibt es nicht"},
+    "discard_effect_stays": {
+        "en": "· it only loses its staging and stays on disk as an untracked file",
+        "de": "· sie verliert nur die Vormerkung und bleibt als unverfolgte Datei liegen"},
+    "discard_effect_history": {
+        "en": "· committed history is untouched; only the uncommitted change is lost",
+        "de": "· die Historie bleibt unberührt; verloren geht nur die nicht committete Änderung"},
+    "discard_extent": {"en": "· extent: {n} changed line(s)",
+                       "de": "· Umfang: {n} geänderte Zeile(n)"},
+    "discard_no_undo": {
+        "en": "No undo: what is discarded here cannot be brought back.",
+        "de": "Kein Rückgängig: Was hier verworfen wird, kommt nicht zurück."},
+    "discard_offer_all": {
+        "en": "A = put all {n} changed files into a stash instead (can be brought back)",
+        "de": "A = stattdessen alle {n} geänderten Dateien in einen Stash (holbar)"},
+    "discard_confirm": {"en": "Discard the changes in '{p}'?",
+                        "de": "Änderungen in '{p}' verwerfen?"},
+    "discard_unstage_confirm": {"en": "Remove '{p}' from the staged files?",
+                                "de": "'{p}' aus den vorgemerkten Dateien nehmen?"},
+    "discard_cancelled": {"en": "Cancelled — nothing discarded.",
+                          "de": "Abgebrochen — nichts verworfen."},
+    "discard_done": {"en": "Discarded: {p}", "de": "Verworfen: {p}"},
+    "discard_unstage_done": {"en": "No longer staged, file kept: {p}",
+                             "de": "Nicht mehr vorgemerkt, Datei bleibt liegen: {p}"},
+    "discard_failed": {"en": "Discarding failed: {e}",
+                       "de": "Verwerfen fehlgeschlagen: {e}"},
+    "discard_refused_untracked": {
+        "en": "Untracked file — it was never in Git, so there is no earlier state to "
+              "go back to. Delete it yourself or put it in .gitignore.",
+        "de": "Unverfolgte Datei — sie war nie in Git, es gibt keinen früheren Stand. "
+              "Selbst löschen oder in .gitignore aufnehmen."},
+    "discard_refused_conflict": {
+        "en": "Merge conflict — resolve it first; gmf discards nothing here.",
+        "de": "Merge-Konflikt — erst auflösen; gmf verwirft hier nichts."},
+    "discard_refused_rename": {
+        "en": "Renamed file — the new and the old name belong together, and gmf does "
+              "not discard half a rename.",
+        "de": "Umbenannte Datei — neuer und alter Name gehören zusammen, und eine "
+              "halbe Umbenennung verwirft gmf nicht."},
+    # Alle Änderungen eines Repos (zweite Stufe desselben Dialogs)
+    "discard_all_title": {"en": "Discard all changes · {rel}",
+                          "de": "Alle Änderungen verwerfen · {rel}"},
+    "discard_all_effect_stash": {
+        "en": "· all {n} changed file(s) go into a stash, not into the bin",
+        "de": "· alle {n} geänderten Dateien wandern in einen Stash, nicht in den Müll"},
+    "discard_all_effect_tree": {
+        "en": "· the working tree returns to the state of the last commit",
+        "de": "· der Arbeitsbaum geht auf den Stand des letzten Commits zurück"},
+    "discard_all_effect_untracked": {
+        "en": "· untracked files stay where they are",
+        "de": "· unverfolgte Dateien bleiben liegen"},
+    "discard_all_effect_visible": {
+        "en": "· the stash stays visible in the list: S shows it, D drops it",
+        "de": "· der Stash bleibt in der Liste sichtbar: S zeigt ihn, D wirft ihn weg"},
+    "discard_all_undo": {"en": "Undo (brings everything back, U does the same):",
+                         "de": "Rückgängig (holt alles zurück, U tut dasselbe):"},
+    "discard_all_confirm": {"en": "Move all changes in '{rel}' into a stash?",
+                            "de": "Alle Änderungen in '{rel}' in einen Stash legen?"},
+    "discard_all_done": {"en": "All changes stashed in {rel} — U brings them back.",
+                         "de": "Alle Änderungen in {rel} gestasht — U holt sie zurück."},
+    "discard_all_refused_no_head": {
+        "en": "This repository has no commit yet — Git cannot stash here.",
+        "de": "Dieses Repo hat noch keinen Commit — Git kann hier nicht stashen."},
+    "discard_all_refused_only_untracked": {
+        "en": "Only untracked files here — gmf discards none of those.",
+        "de": "Hier liegen nur unverfolgte Dateien — davon verwirft gmf keine."},
+    "discard_all_refused_conflict": {
+        "en": "Merge conflict — resolve it first; gmf discards nothing here.",
+        "de": "Merge-Konflikt — erst auflösen; gmf verwirft hier nichts."},
     # Sicherheitszusage der destruktiven Dialoge: der auszuführende Befehl muss im
     # Moment der Bestätigung sichtbar sein. Passt er nicht mehr aufs Fenster,
     # wird die Aktion verweigert statt blind bestätigt.
@@ -1772,6 +1849,32 @@ def branch_restore_commands(branch: BranchInfo) -> list[str]:
     return commands
 
 
+def repo_has_head(repo: Path, timeout: int) -> bool:
+    """Gibt es in diesem Repo überhaupt schon einen Commit?
+
+    Vor dem allerersten Commit existiert HEAD nur als Verweis ins Leere. Git
+    kann dort weder etwas stashen noch auf einen früheren Stand zurückgehen.
+    """
+    return run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
+                   timeout=timeout).returncode == 0
+
+
+def count_changed_lines(diff_text: str) -> int:
+    """Geänderte Zeilen in einem Diff zählen — als Maß fürs Auge.
+
+    Die Zahl steht im Verwerfen-Dialog: An ihr merkt man, ob dort echte Arbeit
+    hängt oder nur eine Datei, die ein Programm beim Start angefasst hat. Die
+    Kopfzeilen (``+++``/``---``) gehören nicht dazu, sie nennen nur Dateinamen.
+    """
+    count = 0
+    for line in diff_text.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            count += 1
+    return count
+
+
 def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
     """Diff einer einzelnen Datei, ohne Index oder Arbeitsbaum anzufassen.
 
@@ -1780,8 +1883,7 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
     """
     if code == "U":
         r = run_git(repo, "diff", "--no-index", "--", os.devnull, path, timeout=timeout)
-    elif run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
-                 timeout=timeout).returncode == 0:
+    elif repo_has_head(repo, timeout):
         # Gegen HEAD, damit gestagte UND ungestagte Änderungen zusammen erscheinen.
         r = run_git(repo, "diff", "HEAD", "--", path, timeout=timeout)
     else:
@@ -3517,10 +3619,14 @@ class TUI:
     # -- Änderungen ansehen (A) ---------------------------------------------
 
     def action_file_changes(self):
-        """Geänderte Dateien durchgehen und einzeln als Diff ansehen.
+        """Geänderte Dateien durchgehen, einzeln ansehen und verwerfen können.
 
         Die Liste zeigt, WAS sich geändert hat — bisher stand dort nur, DASS sich
-        etwas geändert hat. Rein lesend: `git diff` fasst weder Index noch Baum an.
+        etwas geändert hat. Ansehen ist rein lesend: `git diff` fasst weder Index
+        noch Baum an. `V` verwirft die Datei unter dem Cursor und ist der einzige
+        Weg in gmf, der eine nicht committete Änderung wirklich wegwirft — er
+        sitzt bewusst hier, wo man die Datei vor sich hat und mit ⏎ vorher in den
+        Diff sehen kann.
         """
         st = self.current()
         if not st:
@@ -3530,6 +3636,7 @@ class TUI:
             return
         sel = 0
         off = 0
+        note = ""           # Ergebnis der letzten Aktion, direkt über der Fußzeile
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
@@ -3548,6 +3655,8 @@ class TUI:
                 label = t("conflict_label") if entry.code == "C" else ""
                 safe_addstr(self.scr, y, 1, f"{entry.code}  {label}{entry.path}",
                             color_attr(pair, index == sel))
+            if note:
+                safe_addstr(self.scr, h - 2, 1, note, curses.color_pair(C_YELLOW))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
@@ -3569,6 +3678,117 @@ class TUI:
                     return
                 self.show_pager(t("diff_title", p=terminal_text(path)),
                                 (text or t("diff_empty")).splitlines())
+            elif ch in (ord("v"), ord("V")):
+                changed = self.action_discard_file(st, st.files[sel])
+                note = self.message
+                if changed:
+                    # Die Liste ist jetzt eine andere: neu einlesen, sonst zeigte
+                    # die Ansicht eine Datei, die es so nicht mehr gibt.
+                    st = self.refresh_one(st)
+                    if not st.files:
+                        return
+                    sel = min(sel, len(st.files) - 1)
+                    off = min(off, sel)
+
+    def action_discard_file(self, st: RepoStatus, entry: ChangedFile) -> bool:
+        """Eine einzelne Datei zurücksetzen — hart, nach ausführlicher Ansage.
+
+        Rückgabe True, wenn etwas ausgeführt wurde und die Ansicht neu einlesen
+        muss. Ein abgelehnter Fall (unverfolgt, Konflikt, Umbenennung) sagt über
+        `self.message`, warum nichts passiert ist: Eine Taste, die wortlos nichts
+        tut, sieht aus wie ein kaputtes Programm.
+        """
+        plan = plan_discard(entry)
+        if plan.refused:
+            self.message = t("discard_refused_" + plan.refused)
+            return False
+        dim = curses.color_pair(C_DIM)
+        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
+        if plan.kind == "unstage":
+            # Hier geht nichts verloren: Die Datei bleibt liegen, nur die
+            # Vormerkung fällt weg. Deshalb steht unten auch keine Warnung.
+            rows.append((3, t("discard_effect_unstage"), 0))
+            rows.append((3, t("discard_effect_stays"), 0))
+        else:
+            rows.append((3, t("discard_effect_restore"), 0))
+            rows.append((3, t("discard_effect_history"), 0))
+        ok, text = file_diff(st.path, entry.code, entry.path, self.cfg["git_timeout"])
+        if ok:
+            rows.append((3, t("discard_extent", n=count_changed_lines(text)), 0))
+        rows.append((0, "", 0))
+        if plan.kind != "unstage":
+            rows.append((1, t("discard_no_undo"),
+                         curses.color_pair(C_RED) | curses.A_BOLD))
+            rows.append((0, "", 0))
+        # Die Ausweitung nur anbieten, wenn sie mehr umfasst als diese eine Datei —
+        # "alle 1 Dateien" wäre keine Wahl, sondern eine Stolperfalle.
+        stashable = [f for f in st.files if f.xy != "??"]
+        extra_key = "A" if len(stashable) > 1 else ""
+        if extra_key:
+            rows.append((1, t("discard_offer_all", n=len(stashable)), dim))
+            rows.append((0, "", 0))
+        question = t("discard_unstage_confirm" if plan.kind == "unstage"
+                     else "discard_confirm", p=entry.path)
+        answer = self._confirm_destructive(
+            t("discard_title", p=terminal_text(entry.path)), rows,
+            format_git_command(plan.args), question, extra_key)
+        if answer is None:
+            return False
+        if extra_key and answer == extra_key:
+            return self.action_discard_all(st)
+        # confirm() liefert bei der dritten Antwort einen Buchstaben — der wäre
+        # als Wahrheitswert wahr. Deshalb ausdrücklich gegen True prüfen.
+        if answer is not True:
+            log_cancelled(st.path, plan.args)
+            self.message = t("discard_cancelled")
+            return False
+        r = run_git_logged(st.path, *plan.args, timeout=self.cfg["git_timeout"])
+        if r.returncode != 0:
+            self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
+            return False
+        self.message = t("discard_done" if plan.kind == "restore"
+                         else "discard_unstage_done", p=entry.path)
+        return True
+
+    def action_discard_all(self, st: RepoStatus) -> bool:
+        """Alle verfolgten Änderungen eines Repos in einen Stash legen.
+
+        Zweite Stufe des Verwerfen-Dialogs. Bewusst NICHT hart: Bei „alle" fehlt
+        die Beurteilung der einzelnen Datei, die das harte Zurücksetzen trägt.
+        """
+        plan = plan_discard_all(st.files,
+                                repo_has_head(st.path, self.cfg["git_timeout"]))
+        if plan.refused:
+            self.message = t("discard_all_refused_" + plan.refused)
+            return False
+        dim = curses.color_pair(C_DIM)
+        count = sum(1 for f in st.files if f.xy != "??")
+        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
+        rows.extend((3, line, 0) for line in (
+            t("discard_all_effect_stash", n=count),
+            t("discard_all_effect_tree"),
+            t("discard_all_effect_untracked"),
+            t("discard_all_effect_visible"),
+        ))
+        rows.append((0, "", 0))
+        rows.append((1, t("discard_all_undo"), dim))
+        rows.append((3, format_git_command(("stash", "pop")), dim))
+        rows.append((0, "", 0))
+        confirmed = self._confirm_destructive(
+            t("discard_all_title", rel=terminal_text(st.rel)), rows,
+            format_git_command(plan.args), t("discard_all_confirm", rel=st.rel))
+        if confirmed is None:
+            return False
+        if not confirmed:
+            log_cancelled(st.path, plan.args)
+            self.message = t("discard_cancelled")
+            return False
+        r = run_git_logged(st.path, *plan.args, timeout=self.cfg["git_timeout"])
+        if r.returncode != 0:
+            self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
+            return False
+        self.message = t("discard_all_done", rel=st.rel)
+        return True
 
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
@@ -3669,7 +3889,8 @@ class TUI:
         return message
 
     def _confirm_destructive(self, title: str, rows: list[tuple[int, str, int]],
-                             command: str, question: str) -> bool | None:
+                             command: str, question: str,
+                             extra_key: str = "") -> bool | str | None:
         """Destruktiven Dialog zeichnen und bestätigen lassen.
 
         `rows` sind (x, text, attr)-Zeilen ab Bildschirmzeile 2; der auszuführende
@@ -3678,6 +3899,9 @@ class TUI:
         gleichzeitig zu zeigen — dann wird nichts ausgeführt. Vorher überschrieb
         confirm() in kleinen Fenstern genau die Befehlszeile, und man bestätigte
         eine Aktion, die nicht mehr zu sehen war.
+
+        Mit `extra_key` bietet der Dialog eine dritte Antwort an; sie kommt dann
+        als Buchstabe zurück (siehe confirm()).
         """
         self.scr.erase()
         h, w = self.scr.getmaxyx()
@@ -3692,7 +3916,7 @@ class TUI:
         safe_addstr(self.scr, command_y, 1 + cell_width(t("remove_command")) + 1,
                     command, curses.color_pair(C_CYAN) | curses.A_BOLD)
         self.scr.refresh()
-        return self.confirm(question)
+        return self.confirm(question, extra_key)
 
     def _remove_remote(self, st: RepoStatus, name: str) -> bool:
         """Remote nach ausführlicher Erklärung und Bestätigung aus der Config nehmen."""

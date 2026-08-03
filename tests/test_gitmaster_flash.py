@@ -519,6 +519,150 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         self.assertEqual(plan.refused, "no_head")
 
 
+class DiscardKeyTests(unittest.TestCase):
+    """Die Taste V in der Änderungsansicht: Dialog, Ablehnungen, Ausweitung."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "demo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q")
+        git(self.repo, "config", "user.email", "test@example.invalid")
+        git(self.repo, "config", "user.name", "Test")
+        (self.repo / "a.md").write_text("committet\n")
+        (self.repo / "b.md").write_text("auch committet\n")
+        git(self.repo, "add", "a.md", "b.md")
+        git(self.repo, "commit", "-qm", "erster Commit")
+        gmf_module.COMMAND_LOG.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        gmf_module.COMMAND_LOG.clear()
+
+    def make_ui(self, keys):
+        class Screen:
+            def __init__(self):
+                self.keys = iter(keys)
+                self.drawn = []
+
+            def erase(self): pass
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, y, x, text, *a): self.drawn.append(text)
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [collect_status(self.repo, self.root, DEFAULT_CONFIG)]
+        return ui
+
+    def entry_for(self, ui, path):
+        for entry in ui.statuses[0].files:
+            if entry.path == path:
+                return entry
+        self.fail(f"{path} fehlt im Status")
+
+    def test_confirmed_discard_restores_the_file_and_is_logged(self):
+        (self.repo / "a.md").write_text("kaputt\n")
+        ui = self.make_ui([ord("j")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "a.md"))
+        self.assertTrue(changed)
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+        # Zusage aus AGENTS.md: zustandsändernde Aktionen stehen im Protokoll (H).
+        self.assertTrue(any("restore" in line for line in gmf_module.COMMAND_LOG),
+                        gmf_module.COMMAND_LOG)
+
+    def test_declined_discard_keeps_everything_and_says_so(self):
+        (self.repo / "a.md").write_text("kaputt\n")
+        ui = self.make_ui([ord("n")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "a.md"))
+        self.assertFalse(changed)
+        self.assertEqual((self.repo / "a.md").read_text(), "kaputt\n")
+        self.assertEqual(ui.message, gmf_module.t("discard_cancelled"))
+        # "⊘ nicht ausgeführt" beantwortet, ob der gezeigte Befehl gelaufen ist.
+        self.assertTrue(any(line.startswith("⊘") for line in gmf_module.COMMAND_LOG))
+
+    def test_untracked_file_is_refused_with_an_explanation(self):
+        (self.repo / "neu.txt").write_text("nur hier\n")
+        ui = self.make_ui([])          # kein Tastendruck: es darf kein Dialog kommen
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "neu.txt"))
+        self.assertFalse(changed)
+        self.assertEqual((self.repo / "neu.txt").read_text(), "nur hier\n")
+        self.assertEqual(ui.message, gmf_module.t("discard_refused_untracked"))
+        self.assertEqual(gmf_module.COMMAND_LOG, [])
+
+    def test_key_v_runs_the_action_and_reloads_the_list(self):
+        # Durch die echte Tastenschleife: V, dann J im Dialog, dann Q.
+        (self.repo / "a.md").write_text("kaputt\n")
+        ui = self.make_ui([ord("v"), ord("j"), ord("q")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_file_changes()
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+        # Die Ansicht verlässt sich nach dem Verwerfen nicht auf die alte Liste.
+        self.assertEqual(ui.statuses[0].files, [])
+
+    def test_widening_to_all_files_stashes_instead_of_destroying(self):
+        (self.repo / "a.md").write_text("geändert\n")
+        (self.repo / "b.md").write_text("auch geändert\n")
+        (self.repo / "neu.txt").write_text("unverfolgt\n")
+        # A im ersten Dialog, J im zweiten.
+        ui = self.make_ui([ord("a"), ord("j")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "a.md"))
+        self.assertTrue(changed)
+        after = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(after.modified, 0)
+        self.assertEqual(len(after.stashes), 1)
+        self.assertEqual((self.repo / "neu.txt").read_text(), "unverfolgt\n")
+        git(self.repo, "stash", "pop")
+        self.assertEqual((self.repo / "a.md").read_text(), "geändert\n")
+
+    def test_widening_is_not_offered_for_a_single_changed_file(self):
+        # Nur eine verfolgte Änderung: "alle 1 Dateien" wäre keine Wahl. Das A
+        # darf dann nichts auslösen — der Dialog wartet auf eine echte Antwort.
+        (self.repo / "a.md").write_text("kaputt\n")
+        ui = self.make_ui([ord("a"), ord("n")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "a.md"))
+        self.assertFalse(changed)
+        self.assertEqual(ui.message, gmf_module.t("discard_cancelled"))
+        self.assertEqual(collect_status(self.repo, self.root, DEFAULT_CONFIG).stashes,
+                         [])
+
+    def test_added_file_is_only_unstaged_and_the_dialog_says_so(self):
+        (self.repo / "neu.txt").write_text("nur hier\n")
+        git(self.repo, "add", "neu.txt")
+        ui = self.make_ui([ord("j")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_file(ui.statuses[0],
+                                             self.entry_for(ui, "neu.txt"))
+        self.assertTrue(changed)
+        self.assertEqual((self.repo / "neu.txt").read_text(), "nur hier\n")
+        drawn = " ".join(ui.scr.drawn)
+        self.assertIn(gmf_module.t("discard_effect_stays"), drawn)
+        # Keine Verlustwarnung, wo nichts verloren geht.
+        self.assertNotIn(gmf_module.t("discard_no_undo"), drawn)
+
+    def test_the_command_and_the_extent_are_visible_before_confirming(self):
+        (self.repo / "a.md").write_text("eins\nzwei\ndrei\n")
+        ui = self.make_ui([ord("n")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_discard_file(ui.statuses[0], self.entry_for(ui, "a.md"))
+        drawn = " ".join(ui.scr.drawn)
+        self.assertIn("git restore --source=HEAD --staged --worktree -- a.md", drawn)
+        self.assertIn(gmf_module.t("discard_no_undo"), drawn)
+        # Eine Zeile raus, drei rein.
+        self.assertIn(gmf_module.t("discard_extent", n=4), drawn)
+
+
 class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
     """Zwei Remotes: Der Branch trackt einen NICHT-Sync-Remote (github) und ist
     ihm voraus, ist aber mit dem Sync-Remote (backup) synchron. Genau dieser Fall
