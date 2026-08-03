@@ -34,7 +34,8 @@ from gitmaster_flash import (  # noqa: E402
     build_info_view, check_remote, classify_remote_check, collect_status, find_repos,
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
     detect_sync_remote, display_remote_url, fetch_remote_status, file_diff,
-    inspect_transfer, is_github_url, pad_cells, parse_porcelain, read_branches,
+    inspect_transfer, is_github_url, pad_cells, parse_porcelain, plan_discard,
+    plan_discard_all, read_branches,
     remote_check_message, repo_info_lines, safe_pull_args, stash_preview, status_dict,
     safe_push_args, suggested_ignore, terminal_text, truncate_cells,
     update_gitignore_atomic, upstream_delta,
@@ -109,6 +110,56 @@ class TestParsePorcelain(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(parse_porcelain(""), (0, 0, 0, 0, []))
+
+
+class TestDiscardPlan(unittest.TestCase):
+    """Die Entscheidungstabelle fürs Verwerfen — ohne Git, rein am Status."""
+
+    def test_tracked_change_goes_back_to_the_last_commit(self):
+        # Egal ob nur Arbeitsbaum, nur Vormerkung oder beides: derselbe Weg
+        # zurück. Ein blankes `git restore` würde eine gestagete Änderung stehen
+        # lassen, deshalb --source=HEAD zusammen mit --staged --worktree.
+        for xy in (" M", "M ", "MM", " D", "D ", " T"):
+            with self.subTest(xy=xy):
+                plan = plan_discard(ChangedFile("M", "datei.py", xy))
+                self.assertEqual(plan.kind, "restore")
+                self.assertEqual(plan.args, ("restore", "--source=HEAD", "--staged",
+                                             "--worktree", "--", "datei.py"))
+
+    def test_added_file_is_only_unstaged_never_deleted(self):
+        # Eine neu hinzugefügte Datei steht in keinem Commit — es gibt keinen
+        # Stand, auf den man zurückgeht. Sie darf nur aus der Vormerkung fallen.
+        for xy in ("A ", "AM", "C "):
+            with self.subTest(xy=xy):
+                plan = plan_discard(ChangedFile("M", "neu.py", xy))
+                self.assertEqual(plan.kind, "unstage")
+                self.assertEqual(plan.args, ("restore", "--staged", "--", "neu.py"))
+
+    def test_untracked_conflict_and_rename_are_refused(self):
+        cases = {"??": "untracked", "UU": "conflict", "AA": "conflict",
+                 "R ": "rename", "RM": "rename"}
+        for xy, reason in cases.items():
+            with self.subTest(xy=xy):
+                plan = plan_discard(ChangedFile("M", "x.py", xy))
+                self.assertEqual(plan.refused, reason)
+                self.assertEqual(plan.args, ())
+
+    def test_discard_all_stashes_without_pathspec(self):
+        files = [ChangedFile("M", "a.py", " M"), ChangedFile("U", "neu.txt", "??")]
+        plan = plan_discard_all(files, has_head=True)
+        self.assertEqual(plan.kind, "stash")
+        self.assertEqual(plan.args[:2], ("stash", "push"))
+        # Ohne --include-untracked: unverfolgte Dateien bleiben liegen.
+        self.assertNotIn("--include-untracked", plan.args)
+        self.assertNotIn("-u", plan.args)
+
+    def test_discard_all_refuses_what_git_cannot_stash(self):
+        conflicted = [ChangedFile("C", "a.py", "UU")]
+        self.assertEqual(plan_discard_all(conflicted, True).refused, "conflict")
+        normal = [ChangedFile("M", "a.py", " M")]
+        self.assertEqual(plan_discard_all(normal, False).refused, "no_head")
+        only_new = [ChangedFile("U", "neu.txt", "??")]
+        self.assertEqual(plan_discard_all(only_new, True).refused, "only_untracked")
 
 
 class TestSuggestedIgnore(unittest.TestCase):
@@ -322,6 +373,110 @@ class TestAgainstRealRepo(unittest.TestCase):
         details = [line for line in lines if line.startswith("    ")]
         self.assertEqual(len(value_columns(head)), 1, head)
         self.assertEqual(len(value_columns(details)), 1, details)
+
+
+class DiscardAgainstRealRepoTests(unittest.TestCase):
+    """Die geplanten Befehle gegen echtes Git — die Entscheidungstabelle allein
+    beweist nur, WAS gmf aufruft, nicht was Git daraus macht."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "demo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q")
+        git(self.repo, "config", "user.email", "test@example.invalid")
+        git(self.repo, "config", "user.name", "Test")
+        (self.repo / "a.md").write_text("committet\n")
+        (self.repo / "b.md").write_text("auch committet\n")
+        git(self.repo, "add", "a.md", "b.md")
+        git(self.repo, "commit", "-qm", "erster Commit")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def entry_for(self, path: str) -> ChangedFile:
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        for entry in st.files:
+            if entry.path == path:
+                return entry
+        self.fail(f"{path} steht nicht im Status: {st.files}")
+
+    def run_plan(self, plan) -> None:
+        subprocess.run(["git", "-C", str(self.repo), *plan.args],
+                       check=True, capture_output=True, text=True)
+
+    def test_worktree_change_returns_to_the_committed_content(self):
+        (self.repo / "a.md").write_text("kaputt\n")
+        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+        self.assertFalse(collect_status(self.repo, self.root, DEFAULT_CONFIG).dirty)
+
+    def test_staged_and_unstaged_change_both_disappear(self):
+        # MM: erst stagen, dann nochmal ändern. Ein blankes `git restore` hätte
+        # nur den Arbeitsbaum aus der Vormerkung geholt — die gestagete Änderung
+        # wäre geblieben und das Repo weiter schmutzig.
+        (self.repo / "a.md").write_text("stufe eins\n")
+        git(self.repo, "add", "a.md")
+        (self.repo / "a.md").write_text("stufe zwei\n")
+        entry = self.entry_for("a.md")
+        self.assertEqual(entry.xy, "MM")
+        self.run_plan(plan_discard(entry))
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+        self.assertFalse(collect_status(self.repo, self.root, DEFAULT_CONFIG).dirty)
+
+    def test_deleted_file_comes_back(self):
+        (self.repo / "a.md").unlink()
+        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+
+    def test_added_file_survives_on_disk_as_untracked(self):
+        # Der Fall, in dem "verwerfen" NICHT löschen darf: Die Datei steht in
+        # keinem Commit, ihr Inhalt existiert nur hier.
+        (self.repo / "neu.txt").write_text("nur hier\n")
+        git(self.repo, "add", "neu.txt")
+        self.run_plan(plan_discard(self.entry_for("neu.txt")))
+        self.assertEqual((self.repo / "neu.txt").read_text(), "nur hier\n")
+        self.assertEqual(self.entry_for("neu.txt").xy, "??")
+
+    def test_foreign_staging_of_other_files_survives(self):
+        # Zusage aus AGENTS.md: gmf fasst fremdes Staging nicht an. Hier ist b.md
+        # bewusst vorgemerkt, verworfen wird nur a.md.
+        (self.repo / "b.md").write_text("bewusst vorgemerkt\n")
+        git(self.repo, "add", "b.md")
+        (self.repo / "a.md").write_text("weg damit\n")
+        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.assertEqual((self.repo / "b.md").read_text(), "bewusst vorgemerkt\n")
+        self.assertEqual(self.entry_for("b.md").xy, "M ")
+
+    def test_discard_all_is_reversible_and_spares_untracked_files(self):
+        (self.repo / "a.md").write_text("geändert\n")
+        (self.repo / "neu.txt").write_text("unverfolgt\n")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.run_plan(plan_discard_all(st.files, has_head=True))
+        after = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
+        self.assertEqual(after.modified, 0)
+        self.assertEqual(len(after.stashes), 1)
+        # Unverfolgtes bleibt liegen — dieselbe Grenze wie bei der Einzeldatei.
+        self.assertEqual((self.repo / "neu.txt").read_text(), "unverfolgt\n")
+        # Und der Rückweg funktioniert wirklich, nicht nur auf dem Papier.
+        git(self.repo, "stash", "pop")
+        self.assertEqual((self.repo / "a.md").read_text(), "geändert\n")
+
+    def test_discard_all_refuses_in_a_repo_without_a_commit(self):
+        leer = self.root / "leer"
+        leer.mkdir()
+        git(leer, "init", "-q")
+        (leer / "x.txt").write_text("x\n")
+        git(leer, "add", "x.txt")
+        st = collect_status(leer, self.root, DEFAULT_CONFIG)
+        # Nicht behaupten, dass es keinen HEAD gibt — Git fragen.
+        head = subprocess.run(["git", "-C", str(leer), "rev-parse", "--verify", "-q",
+                               "HEAD"], capture_output=True, text=True)
+        self.assertNotEqual(head.returncode, 0)
+        plan = plan_discard_all(st.files, has_head=head.returncode == 0)
+        self.assertEqual(plan.refused, "no_head")
 
 
 class TestUpstreamDeltaTwoRemotes(unittest.TestCase):

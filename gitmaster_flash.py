@@ -864,6 +864,81 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]
     return m, d, u, c, files
 
 
+class DiscardPlan(NamedTuple):
+    """Wie eine Änderung zurückgenommen wird — oder warum gmf es ablehnt.
+
+    ``args`` sind die Git-Argumente ohne ``git`` selbst; bei einer Ablehnung
+    sind sie leer und ``refused`` nennt den Grund (Schlüssel für die Meldung).
+    ``kind`` sagt dem Dialog, welcher Fall vorliegt, damit er die Folgen richtig
+    beschreibt — „zurück auf den letzten Commit" ist etwas anderes als „bleibt
+    liegen, nur nicht mehr vorgemerkt".
+    """
+
+    args: tuple[str, ...] = ()
+    kind: str = ""
+    refused: str = ""
+
+
+def plan_discard(entry: ChangedFile) -> DiscardPlan:
+    """Für eine einzelne Datei entscheiden, was Verwerfen hier bedeutet.
+
+    Vier Fälle, die sich nur am rohen Status auseinanderhalten lassen:
+
+    * Merge-Konflikt: abgelehnt. Mitten in einem Merge ist „zurück auf den
+      letzten Commit" für eine einzelne Datei nicht eindeutig — man verlöre
+      womöglich die halbe Auflösung.
+    * Unverfolgt (``??``): abgelehnt. Diese Datei war nie in Git, es gibt keinen
+      Stand, auf den man zurückgeht. Das wäre Löschen, nicht Verwerfen.
+    * Umbenennung (``R…``): abgelehnt. Sie besteht aus zwei Einträgen (neuer und
+      alter Name); eine Hälfte allein zurückzunehmen ließe die andere als Rest
+      im Repo stehen.
+    * Neu hinzugefügt (``A…``) oder als Kopie erkannt (``C…``): Die Datei steht
+      in keinem Commit, ein früherer Stand existiert also nicht. gmf nimmt sie
+      nur aus der Vormerkung; die Datei selbst bleibt als unverfolgte Datei
+      liegen und wird NICHT gelöscht.
+    * Alles andere (geändert, gelöscht, Typwechsel — gestaget, im Arbeitsbaum
+      oder beides): zurück auf den Stand des letzten Commits. ``--source=HEAD``
+      mit ``--staged --worktree`` setzt Vormerkung und Arbeitsbaum gemeinsam
+      zurück; ein blankes ``git restore`` holte den Arbeitsbaum nur aus der
+      Vormerkung und ließe eine gestagete Änderung stehen.
+    """
+    xy = entry.xy
+    if xy in UNMERGED_CODES:
+        return DiscardPlan(refused="conflict")
+    if xy == "??":
+        return DiscardPlan(refused="untracked")
+    if "R" in xy:
+        return DiscardPlan(refused="rename")
+    if xy[:1] in ("A", "C"):
+        return DiscardPlan(("restore", "--staged", "--", entry.path), "unstage")
+    return DiscardPlan(
+        ("restore", "--source=HEAD", "--staged", "--worktree", "--", entry.path),
+        "restore")
+
+
+def plan_discard_all(files: list[ChangedFile], has_head: bool) -> DiscardPlan:
+    """Alle verfolgten Änderungen auf einmal — als Stash, nicht als Verlust.
+
+    Bei „alle" fehlt die Beurteilung der einzelnen Datei, die das harte
+    Zurücksetzen trägt. Deshalb wandert hier alles in einen Stash: Der Baum ist
+    genauso sauber, der Inhalt bleibt aber sichtbar (Stash-Zeile, ``S``
+    Vorschau) und mit ``U`` wieder anwendbar.
+
+    Bewusst ohne Pfadangabe und ohne ``--include-untracked``: ``git stash push``
+    nimmt genau die verfolgten Änderungen mit und lässt unverfolgte Dateien
+    liegen — dieselbe Grenze wie bei der Einzeldatei.
+    """
+    if any(f.xy in UNMERGED_CODES for f in files):
+        return DiscardPlan(refused="conflict")
+    if not has_head:
+        # Ohne einen einzigen Commit gibt es nichts, wogegen Git stashen könnte.
+        return DiscardPlan(refused="no_head")
+    if not any(f.xy != "??" for f in files):
+        return DiscardPlan(refused="only_untracked")
+    return DiscardPlan(("stash", "push", "-m", "gmf: discarded all changes"),
+                       "stash")
+
+
 def suggested_ignore(path: str) -> str | None:
     """Liefert die passende .gitignore-Zeile, wenn die Datei typischer Müll ist."""
     parts = path.rstrip("/").split("/")
