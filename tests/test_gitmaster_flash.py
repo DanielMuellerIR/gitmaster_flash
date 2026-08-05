@@ -1841,7 +1841,11 @@ class NonInteractiveGitTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         # Kein Warten auf eine Eingabe, die niemals kommt.
         self.assertLess(elapsed, 15)
-        self.assertTrue(gmf_module.credentials_missing(r), r.stderr)
+        # `keychain_session` festnageln, damit der Test den Auth-Pfad prüft und
+        # nicht an der Sitzung hängt: Über ssh (etwa der install.sh-Selbsttest
+        # auf einem anderen Mac) würde aus "auth" sonst "nokeychain".
+        with mock.patch.object(gmf_module, "keychain_session", return_value=True):
+            self.assertTrue(gmf_module.credentials_missing(r), r.stderr)
 
     def _repo_with_denying_remotes(self, root: Path, *names: str) -> Path:
         base = self._serving()
@@ -1861,7 +1865,11 @@ class NonInteractiveGitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = self._repo_with_denying_remotes(root, "faux", "zwei")
-            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+            # Sitzung festnageln (siehe oben): Die Klassifikation läuft hier
+            # INNERHALB von collect_status, deshalb um den Aufruf herum.
+            with mock.patch.object(gmf_module, "keychain_session",
+                                   return_value=True):
+                st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
         self.assertEqual(st.remote_state, "error")
         self.assertIn("faux", st.error)
         self.assertIn("zwei", st.error)
@@ -1872,7 +1880,9 @@ class NonInteractiveGitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = self._repo_with_denying_remotes(root, "faux")
-            st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+            with mock.patch.object(gmf_module, "keychain_session",
+                                   return_value=True):
+                st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
         self.assertEqual(st.remote_state, "error")
         self.assertIn("faux", st.error)
         self.assertIn("login", st.error.lower())
@@ -2073,9 +2083,14 @@ class RemoteCheckTests(unittest.TestCase):
                       "The requested URL returned error: 503",
             "unknown": "fatal: something entirely new happened",
         }
-        for expected, stderr in cases.items():
-            with self.subTest(expected):
-                self.assertEqual(classify_remote_check(self._result(stderr)), expected)
+        # `keychain_session` festnageln: In einer Sitzung ohne Schlüsselbund
+        # (ssh, cron) würde der "auth"-Fall sonst als "nokeychain" landen und
+        # der Test hinge an der Umgebung statt an der Meldung.
+        with mock.patch.object(gmf_module, "keychain_session", return_value=True):
+            for expected, stderr in cases.items():
+                with self.subTest(expected):
+                    self.assertEqual(classify_remote_check(self._result(stderr)),
+                                     expected)
 
     def test_unknown_host_key_is_not_reported_as_a_missing_login(self):
         result = self._result("Host key verification failed.")
