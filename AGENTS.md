@@ -89,6 +89,22 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,
   nicht in den Aufrufern.
+  - Seit 0.18.0 gibt es dort `nokeychain`: auf dem Mac hängt der
+    Login-Schlüsselbund an der GUI-Sitzung, und die verbreiteten
+    Credential-Helper (`osxkeychain`, `gh auth git-credential`) lesen daraus.
+    Eine ssh-Sitzung, ein LaunchDaemon oder ein cron-Lauf kommen nicht daran
+    und bekommen dieselbe Git-Meldung wie bei einem fehlenden Login — obwohl
+    der Login in Ordnung ist. `keychain_session()` erkennt das über
+    `launchctl managername` (nur „Aqua“ ist die GUI-Sitzung) und macht daraus
+    einen eigenen Fall, damit die Zeile nicht zum Neu-Anmelden auffordert.
+    Anlass war ein konkreter Fehlalarm am 2026-08-05.
+- Ein gescheiterter Fetch ist **kein** Unterschied zwischen zwei Rechnern. Er
+  beschreibt die Sitzung, die gemessen hat. `diff_status()` blendet deshalb
+  `error` und `remote_state` aus, sobald eine Seite `fetch_error` meldet, und
+  nennt die Seite stattdessen einmal als `lokal`. Ohne das erzeugte ein einziger
+  unerreichbarer Schlüsselbund auf der Gegenseite zwei DRIFT-Zeilen pro Repo —
+  am 2026-08-05 rund fünfzig Zeilen, die sich wie ein kaputter Login lasen.
+  `conflicts` und `stashes` bleiben davon unberührt und werden weiter verglichen.
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.

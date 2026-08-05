@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.17.2"
+__version__ = "0.18.0"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -160,6 +160,13 @@ TR = {
                     "de": "lokal  {rel}: [{ba}] {a}, [{bb}] {b}"},
     "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) {m}",
                    "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}"},
+    # Einmal je Lauf, nicht je Repo: sonst wiederholt ein einziger fehlgeschlagener
+    # Fetch dieselbe Zeile fuer jedes Repo des Rechners.
+    "diff_fetch_failed_side": {
+        "en": ("local  fetch failed {m} for {n} repo(s) — remote state not measurable "
+               "there, not a difference between the machines"),
+        "de": ("lokal  Fetch scheiterte {m} bei {n} Repo(s) — der Remote-Stand ist dort "
+               "nicht messbar, das ist kein Unterschied zwischen den Rechnern")},
     "diff_repo_field": {
         "en": "DRIFT  {rel}: {field} is {va} {a}, {vb} {b}",
         "de": "DRIFT  {rel}: {field} {a}={va}, {b}={vb}"},
@@ -507,6 +514,13 @@ TR = {
         "de": "{r}: erreichbar, aber dort kein Repo (oder kein Zugriff)."},
     "check_auth": {"en": "{r}: server wants a login (credential helper or SSH key missing).",
                    "de": "{r}: Server verlangt einen Login (Credential-Helper/SSH-Key fehlt)."},
+    "check_nokeychain": {
+        "en": ("{r}: not measurable from this session — the credential helper reads the "
+               "login keychain, which only the GUI session can open. The login itself is "
+               "fine; check it with the GUI session of that machine."),
+        "de": ("{r}: aus dieser Sitzung nicht messbar — der Credential-Helper liest den "
+               "Login-Schlüsselbund, und den öffnet nur die GUI-Sitzung. Der Login selbst "
+               "ist in Ordnung; prüfen in der GUI-Sitzung des Rechners.")},
     "check_hostkey": {
         "en": "{r}: host key unknown or changed — connect once in a terminal.",
         "de": "{r}: Hostschlüssel unbekannt/geändert — einmal im Terminal verbinden."},
@@ -524,6 +538,7 @@ TR = {
     # Stichworte für die Repo-Zeile (der ganze Satz steht auf der Info-Seite)
     "short_gone": {"en": "repository gone", "de": "Repo weg"},
     "short_auth": {"en": "login missing", "de": "Login fehlt"},
+    "short_nokeychain": {"en": "keychain unavailable", "de": "Schlüsselbund unerreichbar"},
     "short_hostkey": {"en": "host key unknown", "de": "Hostschlüssel unbekannt"},
     "short_dns": {"en": "host not found", "de": "Host nicht gefunden"},
     "short_unreachable": {"en": "no connection", "de": "keine Verbindung"},
@@ -1397,21 +1412,71 @@ REMOTE_CHECK_CAUSES = (
 )
 
 
+_KEYCHAIN_SESSION: bool | None = None
+
+
+def keychain_session() -> bool:
+    """Kann diese Sitzung an den macOS-Schlüsselbund?
+
+    Auf dem Mac hängt der Login-Schlüsselbund an der GUI-Sitzung ("Aqua"). Eine
+    ssh-Sitzung, ein LaunchDaemon oder ein cron-Lauf leben daneben und kommen
+    nicht daran — jeder Zugriff scheitert dort, obwohl der Login vollkommen in
+    Ordnung ist. `launchctl managername` benennt genau diesen Unterschied und
+    liefert "Aqua" nur in der GUI-Sitzung.
+
+    Wichtig für die Bewertung: Git holt seine GitHub-Zugangsdaten über einen
+    Credential-Helper, und die verbreiteten Helfer (`osxkeychain`,
+    `gh auth git-credential`) lesen aus genau diesem Schlüsselbund. Scheitert
+    ein Fetch hier an "Authentifizierung", ist deshalb nicht der Login kaputt,
+    sondern die Messung am falschen Ort gelaufen.
+
+    Außerhalb von macOS immer True: dort gibt es dieses Problem nicht, und ein
+    "nein" würde echte Auth-Fehler fälschlich entschuldigen. Das Ergebnis ändert
+    sich innerhalb eines Prozesses nicht und wird deshalb gemerkt.
+    """
+    global _KEYCHAIN_SESSION
+    if _KEYCHAIN_SESSION is None:
+        if sys.platform != "darwin":
+            _KEYCHAIN_SESSION = True
+        else:
+            try:
+                out = subprocess.run(["launchctl", "managername"],
+                                     capture_output=True, text=True, timeout=5)
+                _KEYCHAIN_SESSION = out.stdout.strip() == "Aqua"
+            except (OSError, subprocess.SubprocessError):
+                # Lieber echte Auth-Fehler zeigen als sie stillschweigend
+                # entschuldigen: im Zweifel gilt der Schlüsselbund als erreichbar.
+                _KEYCHAIN_SESSION = True
+    return _KEYCHAIN_SESSION
+
+
 def classify_remote_check(result: subprocess.CompletedProcess) -> str:
     """Warum ist der Zugriff auf das Remote gescheitert?
 
-    Liefert "dns", "unreachable", "server", "hostkey", "auth", "gone" oder
-    "unknown". Reine Textauswertung von Gits Meldung (deshalb LC_ALL=C).
+    Liefert "dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
+    "gone" oder "unknown". Reine Textauswertung von Gits Meldung (deshalb
+    LC_ALL=C).
+
+    "nokeychain" ist ein Sonderfall von "auth": Dieselbe Git-Meldung, aber die
+    Sitzung kommt gar nicht an den Schlüsselbund (siehe `keychain_session`).
+    Die Unterscheidung ist wichtig, weil "Login fehlt" zum Neu-Anmelden auffordert
+    und damit in die falsche Richtung schickt.
     """
     text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
     for cause, markers in REMOTE_CHECK_CAUSES:
         if any(marker in text for marker in markers):
+            if cause == "auth" and not keychain_session():
+                return "nokeychain"
             return cause
     return "unknown"
 
 
 def credentials_missing(result: subprocess.CompletedProcess) -> bool:
-    """Fehlen wirklich Zugangsdaten? (Ein unbekannter Hostschlüssel ist etwas anderes.)"""
+    """Fehlen wirklich Zugangsdaten? (Ein unbekannter Hostschlüssel ist etwas anderes.)
+
+    Bei "nokeychain" bewusst False: Dort fehlen keine Zugangsdaten, sie sind nur
+    aus dieser Sitzung nicht lesbar.
+    """
     return classify_remote_check(result) == "auth"
 
 
@@ -1496,7 +1561,8 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_empty", r=name)
     if outcome == "timeout":
         return t("check_timeout", r=name, s=timeout)
-    if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "gone"):
+    if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
+                   "gone"):
         return t("check_" + outcome, r=name)
     return t("check_unknown", r=name, e=detail or outcome)
 
@@ -2545,6 +2611,11 @@ def status_dict(st: RepoStatus) -> dict:
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
         "error": st.error,
         "error_long": st.error_long,
+        # Aus demselben Grund wie `fetch_failed` oben nicht als Wert verglichen,
+        # sondern als Schalter benutzt: Ein gescheiterter Fetch beschreibt die
+        # Sitzung, die gemessen hat (kein Netz, gesperrter Schlüsselbund), nicht
+        # das Repo. `diff_status` blendet damit `error` und `remote_state` aus.
+        "fetch_error": st.fetch_error,
     }
 
 
@@ -2633,12 +2704,23 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
     isn't (actionable); `SYNC` = both machines agree but sit ahead/behind the sync
     remote (invisible in a pure two-machine diff, yet exactly the number you care
     about); `local` = explainable (different branch checked out, dirty working
-    tree). A report that lists everything gets ignored."""
+    tree). A report that lists everything gets ignored.
+
+    Ein gescheiterter Fetch zaehlt ausdruecklich NICHT als Unterschied. Er
+    beschreibt die Sitzung, die gemessen hat — kein Netz, oder ein Schluesselbund,
+    an den nur die GUI-Sitzung kommt. Genau daran ist am 2026-08-05 ein ganzer
+    Bericht gescheitert: `gmf --diff` laeuft auf der Gegenseite per ssh, dort
+    verweigerte der Credential-Helper jedes GitHub-Remote, und das erschien als
+    zwei DRIFT-Zeilen (`error`, `remote_state`) je Repo. Deshalb blendet der
+    Vergleich diese beiden Felder aus, sobald eine Seite `fetch_error` meldet, und
+    nennt die betroffene Seite stattdessen EINMAL als `lokal`."""
     out = []
     if here.get("version") != there.get("version"):
         out.append(t("diff_version", a=here_name, va=here.get("version"),
                      b=there_name, vb=there.get("version")))
     here_at, there_at = _loc(here_name), _loc(there_name)
+    # Je Seite gezaehlt, damit die Erklaerung EINMAL erscheint und nicht je Repo.
+    fetch_gescheitert: dict[str, int] = {}
     ra = {r["rel"]: r for r in here.get("repos", [])}
     rb = {r["rel"]: r for r in there.get("repos", [])}
     for rel in sorted(set(ra) - set(rb)):
@@ -2689,15 +2771,27 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
         if x.get("branch") != y.get("branch"):
             out.append(t("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
                          b=there_at, bb=y.get("branch")))
-        for field_name in ("error", "conflicts", "stashes", "remote_state"):
+        # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
+        # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
+        # und Stashes sind davon unberuehrt und werden weiter verglichen.
+        messbar = not (x.get("fetch_error") or y.get("fetch_error"))
+        felder = (("error", "conflicts", "stashes", "remote_state") if messbar
+                  else ("conflicts", "stashes"))
+        for field_name in felder:
             va, vb = x.get(field_name), y.get(field_name)
             if va != vb:
                 out.append(t("diff_repo_field", rel=rel, field=field_name,
                              a=here_at, va=va, b=there_at, vb=vb))
         for name, r in ((here_at, x), (there_at, y)):
+            if r.get("fetch_error"):
+                fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
+        for name, r in ((here_at, x), (there_at, y)):
             n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
             if n:
                 out.append(t("diff_dirty", rel=rel, m=name, n=n))
+    for name in (here_at, there_at):
+        if fetch_gescheitert.get(name):
+            out.append(t("diff_fetch_failed_side", m=name, n=fetch_gescheitert[name]))
     return [terminal_text(line) for line in out]
 
 

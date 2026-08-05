@@ -981,10 +981,12 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
         )
 
 
-def _repo(rel, branch="main", remotes=(), modified=0, untracked=0):
+def _repo(rel, branch="main", remotes=(), modified=0, untracked=0,
+          error="", remote_state="ok", fetch_error=False):
     # remotes: (name, ahead, behind) oder (name, ahead, behind, is_sync)
     return {"rel": rel, "branch": branch, "modified": modified, "untracked": untracked,
-            "deleted": 0,
+            "deleted": 0, "error": error, "remote_state": remote_state,
+            "fetch_error": fetch_error,
             "remotes": [{"name": r[0], "ahead": r[1], "behind": r[2],
                          "sync": bool(r[3]) if len(r) > 3 else False}
                         for r in remotes]}
@@ -1063,6 +1065,46 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertIn("origin", out[0])   # Sync-Remote zuerst, github danach
         self.assertIn("github", out[1])
+
+    def test_failed_fetch_is_not_drift(self):
+        """Der Vorfall vom 2026-08-05: `gmf --diff` laeuft auf der Gegenseite per
+        ssh, dort kommt der Credential-Helper nicht an den Schluesselbund, und jedes
+        GitHub-Remote scheitert. Das erschien als zwei DRIFT-Zeilen (`error`,
+        `remote_state`) je Repo und las sich wie ein kaputter Login auf dem anderen
+        Mac. Es ist aber ein Merkmal der messenden Sitzung, kein Unterschied."""
+        a = _side(repos=[_repo("x"), _repo("y")])
+        b = _side(repos=[
+            _repo("x", error="github: Schlüsselbund unerreichbar",
+                  remote_state="error", fetch_error=True),
+            _repo("y", error="github: Schlüsselbund unerreichbar",
+                  remote_state="error", fetch_error=True)])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual([l for l in out if "DRIFT" in l], [])
+        # Verschwiegen wird es aber nicht: EINE Zeile nennt Seite und Anzahl.
+        erklaerung = [l for l in out if "there" in l]
+        self.assertEqual(len(erklaerung), 1, out)
+        self.assertIn("2", erklaerung[0])
+
+    def test_failed_fetch_still_compares_conflicts_and_stashes(self):
+        """Nur `error` und `remote_state` haengen am Fetch. Ein Merge-Konflikt oder
+        ein Stash auf genau einer Seite bleibt ein echter Unterschied — sonst wuerde
+        ein gescheiterter Fetch echte Befunde mitverschlucken."""
+        a = _side(repos=[_repo("x")])
+        b = _side(repos=[_repo("x", remote_state="error", fetch_error=True)])
+        b["repos"][0]["conflicts"] = 2
+        a["repos"][0]["conflicts"] = 0
+        out = diff_status(a, b, "here", "there")
+        drift = [l for l in out if "DRIFT" in l]
+        self.assertEqual(len(drift), 1, out)
+        self.assertIn("conflicts", drift[0])
+
+    def test_error_without_fetch_error_stays_drift(self):
+        """Gegenprobe: Ein Fehler, der NICHT vom Fetch kommt (kaputtes Repo, lokaler
+        Lesefehler), muss weiter als DRIFT erscheinen."""
+        a = _side(repos=[_repo("x")])
+        b = _side(repos=[_repo("x", error="kaputt", remote_state="error")])
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual(len([l for l in out if "DRIFT" in l]), 2, out)
 
     def test_different_branch_is_local_not_drift(self):
         a = _side(repos=[_repo("x", branch="main")])
@@ -1748,13 +1790,62 @@ class NonInteractiveGitTests(unittest.TestCase):
         def result(stderr):
             return subprocess.CompletedProcess(["git"], 128, "", stderr)
 
-        self.assertTrue(gmf_module.credentials_missing(result(
+        # `keychain_session` festnageln: Ohne das haengt der Test an der Sitzung,
+        # in der die Suite laeuft — in der GUI-Sitzung gruen, ueber ssh rot. Genau
+        # solche Geisterfehler will man nicht.
+        with mock.patch.object(gmf_module, "keychain_session",
+                                        return_value=True):
+            self.assertTrue(gmf_module.credentials_missing(result(
+                "fatal: could not read Username for 'https://github.com': "
+                "terminal prompts disabled")))
+            self.assertTrue(gmf_module.credentials_missing(result(
+                "git@github.com: Permission denied (publickey).")))
+            self.assertFalse(gmf_module.credentials_missing(result(
+                "fatal: couldn't find remote ref main")))
+
+    def test_auth_error_without_keychain_is_its_own_cause(self):
+        """Dieselbe Git-Meldung, zwei sehr verschiedene Ursachen. In einer Sitzung
+        ohne Schluesselbund (ssh, LaunchDaemon, cron) fehlen keine Zugangsdaten —
+        sie sind nur nicht lesbar. "Login fehlt" schickte am 2026-08-05 in die
+        falsche Richtung: Daniel sollte sich neu anmelden, obwohl alles in Ordnung war."""
+        r = subprocess.CompletedProcess(["git"], 128, "", (
             "fatal: could not read Username for 'https://github.com': "
-            "terminal prompts disabled")))
-        self.assertTrue(gmf_module.credentials_missing(result(
-            "git@github.com: Permission denied (publickey).")))
-        self.assertFalse(gmf_module.credentials_missing(result(
-            "fatal: couldn't find remote ref main")))
+            "terminal prompts disabled"))
+        with mock.patch.object(gmf_module, "keychain_session",
+                                        return_value=False):
+            self.assertEqual(gmf_module.classify_remote_check(r), "nokeychain")
+            # Und es gilt ausdruecklich NICHT als fehlender Login.
+            self.assertFalse(gmf_module.credentials_missing(r))
+            satz = gmf_module.remote_check_message("github", "nokeychain", 0, "", 30)
+            self.assertIn("github", satz)
+        with mock.patch.object(gmf_module, "keychain_session",
+                                        return_value=True):
+            self.assertEqual(gmf_module.classify_remote_check(r), "auth")
+
+    def test_keychain_session_only_true_in_gui_session(self):
+        """`launchctl managername` nennt den Unterschied: "Aqua" ist die GUI-Sitzung,
+        alles andere lebt daneben. Ausserhalb von macOS gibt es das Problem nicht."""
+        def lauf(name):
+            return subprocess.CompletedProcess(["launchctl"], 0, name + "\n", "")
+
+        for ausgabe, platform, erwartet in (("Aqua", "darwin", True),
+                                            ("Background", "darwin", False),
+                                            ("System", "darwin", False),
+                                            ("Background", "linux", True)):
+            with self.subTest(ausgabe=ausgabe, platform=platform):
+                gmf_module._KEYCHAIN_SESSION = None
+                with mock.patch.object(gmf_module.sys, "platform", platform), \
+                     mock.patch.object(gmf_module.subprocess, "run",
+                                                return_value=lauf(ausgabe)):
+                    self.assertIs(gmf_module.keychain_session(), erwartet)
+        # Faellt der Aufruf selbst aus, gilt der Schluesselbund als erreichbar —
+        # lieber einen echten Auth-Fehler zeigen als ihn stillschweigend entschuldigen.
+        gmf_module._KEYCHAIN_SESSION = None
+        with mock.patch.object(gmf_module.sys, "platform", "darwin"), \
+             mock.patch.object(gmf_module.subprocess, "run",
+                                        side_effect=OSError("weg")):
+            self.assertIs(gmf_module.keychain_session(), True)
+        gmf_module._KEYCHAIN_SESSION = None
 
     def test_failed_fetch_remotes_reads_the_names(self):
         r = subprocess.CompletedProcess(["git"], 1, "", (
