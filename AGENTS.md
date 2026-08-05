@@ -72,6 +72,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   (`_verify_hooks_kept_approved_tree`). Und ins Befehlsprotokoll kommt nicht das
   Temp-Index-Interna, sondern der terminal-äquivalente Befehl
   `git commit -m … -- <pfade>` — nur der wäre im Terminal gefahrlos wiederholbar.
+  Dieselbe Baumprüfung gilt seit 0.18.2 auch im Timeout-Zweig: `commit_selected`
+  hängt den freigegebenen Baum an die `TimeoutExpired`-Ausnahme
+  (`exc.approved_tree`), und `finish_interrupted_commit()` prüft damit — nicht
+  mehr nur über Pfadnamen — ob der doch noch entstandene Commit exakt dem
+  freigegebenen Stand entspricht; sonst Rollback wie im Normalweg.
 - Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
   Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
   vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen
@@ -85,6 +90,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 
+- Remote-Identität (`canonical_remote_target()`): Übertragungen (P/L/G) laufen
+  nur, wenn Fetch- und Push-Ziel identisch sind (`transfer_safe`). SCP-Pfade
+  ohne führenden `/` hängen am Home des SSH-Benutzers (`alice@host:repo` ≠
+  `bob@host:repo` ≠ `host:/repo`) — mit einer Ausnahme seit 0.18.2: Der
+  virtuelle Benutzer `git` der Hosting-Dienste (GitHub, GitLab, Gitea, …) hat
+  kein privates Home, `git@host:org/repo` und `https://host/org/repo` sind
+  dasselbe Repo. Ohne die Ausnahme blockierte der übliche Mix (Fetch per HTTPS,
+  Push per SSH) jede Übertragung. Ein ausdrückliches `~` im Pfad bleibt auch
+  bei `git@` benutzerabhängig.
 - Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,
@@ -128,6 +142,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Verwerfen. Eine Erweiterung darauf braucht einen eigenen Dialog mit eigenem
   Namen, nicht dieselbe Taste. Was eine Datei überhaupt braucht, hängt am rohen
   Status in `ChangedFile.xy`; die Anzeige-Buchstaben M/D/U/C reichen dafür nicht.
+  Submodule (Gitlinks) lehnt das Verwerfen seit 0.18.2 komplett ab:
+  `git restore` und `git stash` fassen den ausgecheckten Stand eines Submoduls
+  nicht an, melden aber Exit 0 — gmf hätte also „Verworfen" gemeldet, ohne dass
+  sich etwas ändert. Der Porcelain-v1-Status kennzeichnet Gitlinks nicht;
+  erst `mark_gitlinks()` (Mode 160000 in Index bzw. HEAD-Baum) setzt die
+  Kennung `ChangedFile.submodule`, an der `plan_discard()`/`plan_discard_all()`
+  entscheiden.
   Fürs Verwerfen gibt es bewusst keinen CLI-Schalter — die nicht-interaktive
   Schnittstelle bleibt lesend.
 - „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
@@ -162,20 +183,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       ohne den Stand noch einmal mit der Vorschau abzugleichen. Ändert sich die
       Datei währenddessen, verwirft gmf etwas anderes als gezeigt. Andere
       Aktionen prüfen an dieser Stelle erneut (Code-Review 2026-08-05).
-- [ ] `finish_interrupted_commit()` vergleicht nur `changed == set(paths)`. Der
-      Baumabgleich `_verify_hooks_kept_approved_tree()` samt Rollback wird im
-      Timeout-Zweig (`except subprocess.TimeoutExpired`) nie erreicht — ein
-      pre-commit-Hook, der im Timeout weitere Pfade stagt, kommt dort also
-      ungeprüft durch (Code-Review 2026-08-05).
-- [ ] Weder `plan_discard()` noch `parse_porcelain()` erkennen Submodule
-      (Gitlinks). Ein ` M sub` läuft in den generischen Restore; danach meldet
-      die TUI "Verworfen", obwohl im Submodul unverändert derselbe Commit
-      ausgecheckt sein kann (Code-Review 2026-08-05).
-- [ ] Der SCP-Benutzer-Qualifier blockiert den Mix aus HTTPS und SSH: Aus
-      `git@github.com:org/repo.git` wird home-relativ `github.com:~git/org/repo`,
-      aus `https://github.com/org/repo.git` dagegen `github.com:/org/repo`. Damit
-      wird `transfer_safe` False und P/L/G verweigern die Arbeit, obwohl beide
-      URLs dasselbe Repo meinen (Code-Review 2026-08-05).
 - [ ] `remote_restore_commands()` baut nur `remote add`, `set-url` und
       `--set-upstream-to`. Niemand liest die übrige `remote.<name>.*`-Config
       (eigene Refspecs, `tagOpt`, `mirror`); nach dem "Rückgängig" steht ein so

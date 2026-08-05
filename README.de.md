@@ -208,17 +208,22 @@ Was `Z` tut, hängt vom Zustand der Datei ab:
 - **Neu hinzugefügt:** Die Datei steht in keinem Commit, einen früheren Stand
   gibt es also nicht. Sie verliert nur die Vormerkung und bleibt als unverfolgte
   Datei liegen — gmf löscht sie nicht.
-- **Unverfolgt, Merge-Konflikt oder Umbenennung:** abgelehnt, mit Begründung in
-  der Zeile über der Fußleiste. Unverfolgte Dateien waren nie in Git; sie zu
-  entfernen wäre Löschen und nicht Verwerfen. Eine Umbenennung besteht aus zwei
-  Einträgen — eine Hälfte allein zurückzunehmen ließe die andere stehen.
+- **Unverfolgt, Merge-Konflikt, Umbenennung oder Submodul:** abgelehnt, mit
+  Begründung in der Zeile über der Fußleiste. Unverfolgte Dateien waren nie in
+  Git; sie zu entfernen wäre Löschen und nicht Verwerfen. Eine Umbenennung
+  besteht aus zwei Einträgen — eine Hälfte allein zurückzunehmen ließe die
+  andere stehen. Und bei einem Submodul checkt `git restore` nichts aus: Der
+  Befehl liefe ins Leere, das Submodul bliebe auf seinem Commit stehen —
+  zurücksetzen heißt hier, im Submodul selbst zu arbeiten (z.B.
+  `git submodule update`).
 
 Ab zwei geänderten verfolgten Dateien bietet derselbe Dialog mit `A` einen
 zweiten Weg an: **alle** Änderungen des Repos wandern in einen Stash statt ins
 Nichts, nach eigener Bestätigung. Das ist die Ausweitung für den Fall, dass man
 eben nicht jede Datei einzeln beurteilt hat. Der Inhalt bleibt danach sichtbar
 und greifbar: `S` zeigt ihn, `U` holt ihn zurück, `D` wirft ihn weg.
-Unverfolgte Dateien bleiben auch dabei liegen.
+Unverfolgte Dateien bleiben auch dabei liegen, und Submodule behalten ihren
+ausgecheckten Stand — `git stash` lässt beide aus.
 
 ## Repo-Info und Remotes (`I`)
 
@@ -499,6 +504,9 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
 Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
 divergente History. Fetch- und Push-URL müssen genau dasselbe zugangsdatenfreie
 Host-/Repo-Ziel bezeichnen; mehrere oder abweichende Push-URLs werden gesperrt.
+Der bei Hosting-Diensten übliche Mix — Fetch per HTTPS, Push per SSH über den
+virtuellen Benutzer `git` — gilt dabei als dasselbe Ziel:
+`git@host:org/repo` und `https://host/org/repo` meinen dasselbe Repo.
 Unmittelbar vor der bestätigten Mutation werden Branch, HEAD, Index, Arbeitsbaum,
 Remote-Identität und Ziel-OID nochmals geprüft. Pull übernimmt nur die freigegebene
 unveränderliche OID per Fast-forward. Push überträgt die freigegebene Commit-OID mit

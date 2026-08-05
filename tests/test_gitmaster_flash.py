@@ -154,6 +154,15 @@ class TestDiscardPlan(unittest.TestCase):
                 self.assertEqual(plan.refused, reason)
                 self.assertEqual(plan.args, ())
 
+    def test_submodule_is_refused(self):
+        # `git restore` checkt im Submodul nichts aus: Exit 0, aber es ändert
+        # sich nichts — gmf meldete "Verworfen" ins Leere. Deshalb lehnt die
+        # Entscheidungstabelle Gitlinks ausdrücklich ab.
+        entry = ChangedFile("M", "sub", " M", submodule=True)
+        plan = plan_discard(entry, has_head=True)
+        self.assertEqual(plan.refused, "submodule")
+        self.assertEqual(plan.args, ())
+
     def test_discard_all_stashes_without_pathspec(self):
         files = [ChangedFile("M", "a.py", " M"), ChangedFile("U", "neu.txt", "??")]
         plan = plan_discard_all(files, has_head=True)
@@ -170,6 +179,14 @@ class TestDiscardPlan(unittest.TestCase):
         self.assertEqual(plan_discard_all(normal, False).refused, "no_head")
         only_new = [ChangedFile("U", "neu.txt", "??")]
         self.assertEqual(plan_discard_all(only_new, True).refused, "only_untracked")
+        # Nur Submodul-Änderungen: `git stash push` legte gar keinen Stash an
+        # ("No local changes to save") und gmf meldete trotzdem Erfolg.
+        only_sub = [ChangedFile("M", "sub", " M", submodule=True),
+                    ChangedFile("U", "neu.txt", "??")]
+        self.assertEqual(plan_discard_all(only_sub, True).refused, "only_submodules")
+        # Mit einer echten Datei daneben bleibt der Stash-Weg offen.
+        mixed = only_sub + [ChangedFile("M", "a.py", " M")]
+        self.assertEqual(plan_discard_all(mixed, True).kind, "stash")
 
 
 class CountChangedLinesTests(unittest.TestCase):
@@ -617,6 +634,45 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         self.run_plan(plan_discard(self.entry_for("a.md"), has_head=True))
         self.assertEqual((self.repo / "b.md").read_text(), "bewusst vorgemerkt\n")
         self.assertEqual(self.entry_for("b.md").xy, "M ")
+
+    def test_changed_submodule_is_detected_and_refused(self):
+        """Ein geändertes Submodul sieht im Porcelain-Status wie eine Datei aus.
+
+        Gegenprobe zum alten Stand: der generische Restore lief mit Exit 0
+        durch, das Submodul blieb auf seinem Commit stehen — und gmf meldete
+        "Verworfen", obwohl sich nichts geändert hatte. Erst die
+        Gitlink-Kennung aus mark_gitlinks() macht den Fall erkennbar.
+        """
+        sub_src = self.root / "sub-src"
+        sub_src.mkdir()
+        git(sub_src, "init", "-q")
+        git(sub_src, "config", "user.email", "test@example.invalid")
+        git(sub_src, "config", "user.name", "Test")
+        (sub_src / "s").write_text("eins\n")
+        git(sub_src, "add", "s")
+        git(sub_src, "commit", "-qm", "eins")
+        (sub_src / "s").write_text("zwei\n")
+        git(sub_src, "add", "s")
+        git(sub_src, "commit", "-qm", "zwei")
+        # Seit Git 2.38 braucht ein Submodul aus einem lokalen Pfad diese Freigabe.
+        git(self.repo, "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", str(sub_src), "sub")
+        git(self.repo, "commit", "-qm", "Submodul dazu")
+        # Das Submodul auf einen anderen Commit stellen: im Superprojekt ` M sub`.
+        git(self.repo / "sub", "checkout", "-q", "HEAD~1")
+
+        entry = self.entry_for("sub")
+        self.assertTrue(entry.submodule)
+        self.assertEqual(plan_discard(entry, has_head=True).refused, "submodule")
+        # Auch "alle verwerfen" darf hier keinen leeren Stash versprechen.
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(plan_discard_all(st.files, has_head=True).refused,
+                         "only_submodules")
+        # Eine gewöhnliche Datei daneben bleibt eine gewöhnliche Datei.
+        (self.repo / "a.md").write_text("geändert\n")
+        entry = self.entry_for("a.md")
+        self.assertFalse(entry.submodule)
+        self.assertEqual(plan_discard(entry, has_head=True).kind, "restore")
 
     def test_discard_all_is_reversible_and_spares_untracked_files(self):
         (self.repo / "a.md").write_text("geändert\n")
@@ -1253,6 +1309,40 @@ class RemoteSecurityTests(unittest.TestCase):
         self.assertTrue(target.is_github)
         self.assertEqual(target.repo_id, "/example/demo")
 
+    def test_scp_git_user_matches_the_https_form_of_the_same_repo(self):
+        """Fetch per HTTPS, Push per SSH — der Standardfall bei GitHub & Co.
+
+        Der virtuelle SSH-Benutzer "git" hat kein privates Home-Verzeichnis:
+        sein SCP-Pfad ist derselbe Namensraum wie der HTTPS-Pfad. Vorher galten
+        beide URLs als verschiedene Ziele (transfer_safe False), und P/L/G
+        verweigerten die Übertragung, obwohl sie dasselbe Repo meinen.
+        """
+        ssh = canonical_remote_target("git@github.com:example/demo.git")
+        https = canonical_remote_target("https://github.com/example/demo.git")
+        self.assertEqual(ssh, https)
+        # Ein ausdrückliches "~" bleibt benutzerabhängig — auch beim Benutzer git.
+        self.assertNotEqual(canonical_remote_target("git@host:~/repo.git"),
+                            canonical_remote_target("host:/repo.git"))
+        # Andere Benutzernamen bleiben home-relativ und damit eigene Ziele.
+        self.assertNotEqual(canonical_remote_target("alice@host:repo.git"),
+                            canonical_remote_target("https://host/repo.git"))
+
+    def test_https_fetch_with_ssh_push_is_transfer_safe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); repo = root / "repo"; repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.email", "t@example.invalid")
+            git(repo, "config", "user.name", "T")
+            (repo / "a").write_text("a")
+            git(repo, "add", "a"); git(repo, "commit", "-qm", "base")
+            git(repo, "remote", "add", "origin", "https://github.com/example/one.git")
+            git(repo, "remote", "set-url", "--push", "origin",
+                "git@github.com:example/one.git")
+            st = collect_status(repo, root, DEFAULT_CONFIG)
+            remote = st.remotes[0]
+            self.assertFalse(remote.target_mismatch)
+            self.assertTrue(remote.transfer_safe)
+
     def test_sync_host_must_match_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -1632,11 +1722,13 @@ class SlowPreCommitHookTests(unittest.TestCase):
         hook.write_text("#!/bin/sh\nsleep 30\n")
         hook.chmod(0o755)
         head_before = gmf_module.current_head(self.repo, 10)
-        with self.assertRaises(subprocess.TimeoutExpired):
+        with self.assertRaises(subprocess.TimeoutExpired) as cm:
             commit_selected(self.repo, ["file.txt"], "haengt danach", 10,
                             commit_timeout=1)
+        # Die Ausnahme trägt den freigegebenen Baum — derselbe Weg, den auch
+        # der Timeout-Zweig der Commit-Hilfe nimmt.
         done = gmf_module.finish_interrupted_commit(
-            self.repo, head_before, ["file.txt"], 10)
+            self.repo, head_before, ["file.txt"], 10, cm.exception.approved_tree)
         self.assertTrue(done)
         self.assertNotEqual(gmf_module.current_head(self.repo, 10), head_before)
         status = subprocess.run(
@@ -1648,6 +1740,34 @@ class SlowPreCommitHookTests(unittest.TestCase):
         head_before = gmf_module.current_head(self.repo, 10)
         self.assertFalse(gmf_module.finish_interrupted_commit(
             self.repo, head_before, ["file.txt"], 10))
+
+    def test_hook_staged_extras_during_timeout_are_rolled_back(self):
+        """Der Timeout-Zweig prüft den Commit gegen den freigegebenen Baum.
+
+        Ein pre-commit-Hook stagt hier heimlich eine weitere Datei in den
+        geerbten temporären Index; der post-commit-Hook hängt, sodass der
+        Commit zwar entsteht, `git commit` aber in den Timeout läuft. Vorher
+        verglich finish_interrupted_commit nur Pfadnamen — der Commit mit der
+        geschmuggelten Datei blieb ungeprüft stehen. Jetzt gilt dieselbe
+        Zusage wie im Normalweg: Baumabgleich, Rollback, Fehler.
+        """
+        (self.repo / "geschmuggelt.txt").write_text("nicht freigegeben\n")
+        pre = self.repo / ".git" / "hooks" / "pre-commit"
+        pre.write_text("#!/bin/sh\ngit add geschmuggelt.txt\n")
+        pre.chmod(0o755)
+        post = self.repo / ".git" / "hooks" / "post-commit"
+        post.write_text("#!/bin/sh\nsleep 30\n")
+        post.chmod(0o755)
+        head_before = gmf_module.current_head(self.repo, 10)
+        with self.assertRaises(subprocess.TimeoutExpired) as cm:
+            commit_selected(self.repo, ["file.txt"], "schmuggelt", 10,
+                            commit_timeout=3)
+        with self.assertRaises(gmf_module.CommitSafetyError):
+            gmf_module.finish_interrupted_commit(
+                self.repo, head_before, ["file.txt"], 10,
+                cm.exception.approved_tree)
+        # Der Commit mit der geschmuggelten Datei wurde zurückgerollt.
+        self.assertEqual(gmf_module.current_head(self.repo, 10), head_before)
 
 
 class StashAndReadFailureTests(unittest.TestCase):

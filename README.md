@@ -196,17 +196,21 @@ What `Z` does depends on the state of the file:
 - **Newly added:** the file is in no commit, so there is no earlier state to go
   back to. It only loses its staging and stays on disk as an untracked file —
   gmf does not delete it.
-- **Untracked, merge conflict or rename:** refused, with the reason shown above
-  the footer. Untracked files were never in Git, so removing one would be
-  deleting, not discarding. A rename consists of two entries — taking back one
-  half would leave the other behind.
+- **Untracked, merge conflict, rename or submodule:** refused, with the reason
+  shown above the footer. Untracked files were never in Git, so removing one
+  would be deleting, not discarding. A rename consists of two entries — taking
+  back one half would leave the other behind. And for a submodule `git restore`
+  checks out nothing: the command would run into thin air and the submodule
+  would stay on its commit — resetting means working inside the submodule
+  itself (e.g. `git submodule update`).
 
 From two changed tracked files on, the same dialog offers a second route with
 `A`: **all** changes in the repository go into a stash instead of into nothing,
 after a confirmation of their own. That is the widening for the case where you
 did not judge every file individually. Afterwards the content stays visible and
 within reach: `S` shows it, `U` brings it back, `D` drops it. Untracked files
-are left alone here as well.
+are left alone here as well, and submodules keep their checked-out state —
+`git stash` skips both.
 
 ## Repository info and remotes (`I`)
 
@@ -477,7 +481,10 @@ starting the UI, so a pipe does the sensible thing.
 `P` and `L` are intentionally limited to a non-public sync remote. Both fetch
 first, require a clean working tree and reject divergent history. Fetch and push
 URLs must identify one identical credential-free host/repository target; multiple
-or differing push URLs are blocked. Immediately before a confirmed mutation the
+or differing push URLs are blocked. The mix that is common at hosting services —
+fetch over HTTPS, push over SSH through the virtual `git` user — counts as the
+same target: `git@host:org/repo` and `https://host/org/repo` mean the same
+repository. Immediately before a confirmed mutation the
 branch, HEAD, index, worktree, remote identity and target OID are checked again.
 Pull merges only the approved immutable OID by fast-forward; push sends the approved
 commit OID through an explicit refspec. An exact target-OID lease prevents a

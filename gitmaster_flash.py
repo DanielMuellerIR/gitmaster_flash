@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.1"
+__version__ = "0.18.2"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -620,6 +620,13 @@ TR = {
               "not discard half a rename.",
         "de": "Umbenannte Datei — neuer und alter Name gehören zusammen, und eine "
               "halbe Umbenennung verwirft gmf nicht."},
+    "discard_refused_submodule": {
+        "en": "Submodule — git restore does not touch its checked-out state, so "
+              "nothing would change. Reset it inside the submodule itself "
+              "(e.g. git submodule update).",
+        "de": "Submodul — git restore fasst dessen ausgecheckten Stand nicht an, es "
+              "würde sich also nichts ändern. Im Submodul selbst zurücksetzen "
+              "(z.B. git submodule update)."},
     # Alle Änderungen eines Repos (zweite Stufe desselben Dialogs)
     "discard_all_title": {"en": "Discard all changes · {rel}",
                           "de": "Alle Änderungen verwerfen · {rel}"},
@@ -632,6 +639,9 @@ TR = {
     "discard_all_effect_untracked": {
         "en": "· untracked files stay where they are",
         "de": "· unverfolgte Dateien bleiben liegen"},
+    "discard_all_effect_submodules": {
+        "en": "· submodules keep their checked-out state (git stash skips them)",
+        "de": "· Submodule behalten ihren ausgecheckten Stand (git stash lässt sie aus)"},
     "discard_all_effect_visible": {
         "en": "· the stash stays visible in the list: S shows it, D drops it",
         "de": "· der Stash bleibt in der Liste sichtbar: S zeigt ihn, D wirft ihn weg"},
@@ -652,6 +662,11 @@ TR = {
     "discard_all_refused_only_untracked": {
         "en": "Only untracked files here — gmf discards none of those.",
         "de": "Hier liegen nur unverfolgte Dateien — davon verwirft gmf keine."},
+    "discard_all_refused_only_submodules": {
+        "en": "Only submodule changes here — git stash does not touch those; "
+              "work inside the submodule instead.",
+        "de": "Hier sind nur Submodul-Änderungen — die fasst git stash nicht an; "
+              "stattdessen im Submodul selbst arbeiten."},
     "discard_all_refused_conflict": {
         "en": "Merge conflict — resolve it first; gmf discards nothing here.",
         "de": "Merge-Konflikt — erst auflösen; gmf verwirft hier nichts."},
@@ -917,11 +932,18 @@ class ChangedFile(NamedTuple):
     oder in beiden (``MM``) — und ob es eine neu hinzugefügte Datei (``A ``) ist,
     für die es gar keinen früheren Stand gibt. Ohne diese Unterscheidung lässt
     sich nicht sagen, was ein Zurücksetzen der Datei überhaupt bedeutet.
+
+    ``submodule`` markiert einen Gitlink (Submodul, Mode 160000). Der
+    Porcelain-Status kennzeichnet Submodule nicht — die Kennung setzt erst
+    ``mark_gitlinks()`` nach dem Parsen. Sie ist fürs Verwerfen entscheidend:
+    ``git restore`` und ``git stash`` fassen den ausgecheckten Stand eines
+    Submoduls nicht an, melden aber trotzdem Erfolg (Exit 0).
     """
 
     code: str
     path: str
     xy: str
+    submodule: bool = False
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -1001,11 +1023,17 @@ def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
     ``repo_has_head()``). Ohne HEAD gibt es keinen Stand, aus dem Git etwas
     zurückholen könnte — das ändert den Befehl, nicht die Zusage.
 
-    Vier Fälle, die sich nur am rohen Status auseinanderhalten lassen:
+    Fünf Fälle, die sich nur am rohen Status (plus Gitlink-Kennung)
+    auseinanderhalten lassen:
 
     * Merge-Konflikt: abgelehnt. Mitten in einem Merge ist „zurück auf den
       letzten Commit" für eine einzelne Datei nicht eindeutig — man verlöre
       womöglich die halbe Auflösung.
+    * Submodul (Gitlink): abgelehnt. ``git restore`` checkt im Submodul nichts
+      aus — der Befehl liefe mit Exit 0 durch, das Submodul stünde unverändert
+      auf seinem Commit, und gmf meldete trotzdem „Verworfen". Zurückgehen
+      heißt hier: im Submodul selbst arbeiten (z.B. ``git -C <pfad> checkout``
+      oder ``git submodule update``).
     * Unverfolgt (``??``): abgelehnt. Diese Datei war nie in Git, es gibt keinen
       Stand, auf den man zurückgeht. Das wäre Löschen, nicht Verwerfen.
     * Umbenennung (``R…``): abgelehnt. Sie besteht aus zwei Einträgen (neuer und
@@ -1031,6 +1059,8 @@ def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
         return DiscardPlan(refused="untracked")
     if "R" in xy:
         return DiscardPlan(refused="rename")
+    if entry.submodule:
+        return DiscardPlan(refused="submodule")
     if xy[:1] in ("A", "C") or xy[1:2] == "A":
         if not has_head:
             # `git restore --staged` holt die Vormerkung standardmäßig aus HEAD,
@@ -1054,7 +1084,11 @@ def plan_discard_all(files: list[ChangedFile], has_head: bool) -> DiscardPlan:
 
     Bewusst ohne Pfadangabe und ohne ``--include-untracked``: ``git stash push``
     nimmt genau die verfolgten Änderungen mit und lässt unverfolgte Dateien
-    liegen — dieselbe Grenze wie bei der Einzeldatei.
+    liegen — dieselbe Grenze wie bei der Einzeldatei. Submodule (Gitlinks)
+    bleiben ebenfalls draußen: ``git stash`` fasst deren ausgecheckten Stand
+    nicht an. Gibt es außer Submodulen nichts zu stashen, wird abgelehnt —
+    der Befehl legte sonst gar keinen Stash an (»No local changes to save«)
+    und gmf meldete trotzdem Erfolg.
     """
     if any(f.xy in UNMERGED_CODES for f in files):
         return DiscardPlan(refused="conflict")
@@ -1063,6 +1097,8 @@ def plan_discard_all(files: list[ChangedFile], has_head: bool) -> DiscardPlan:
         return DiscardPlan(refused="no_head")
     if not any(f.xy != "??" for f in files):
         return DiscardPlan(refused="only_untracked")
+    if not any(f.xy != "??" and not f.submodule for f in files):
+        return DiscardPlan(refused="only_submodules")
     return DiscardPlan(("stash", "push", "-m", "gmf: discarded all changes"),
                        "stash")
 
@@ -1224,8 +1260,13 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
             result = run_git(
                 repo, "commit", "-m", message, env=env,
                 timeout=timeout if commit_timeout is None else commit_timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             log_command(repo, logged_args, returncode=None)
+            # Der freigegebene Baum existiert nur hier in der Funktion. Die
+            # Ausnahme ist der einzige Kanal zum Timeout-Zweig des Aufrufers —
+            # nur mit dem Baum kann finish_interrupted_commit dort dieselbe
+            # Hook-Prüfung samt Rollback leisten wie der Normalweg unten.
+            exc.approved_tree = tree_after
             raise
         log_command(repo, logged_args, result.returncode)
     if result.returncode == 0:
@@ -1303,20 +1344,36 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
 
 
 def finish_interrupted_commit(repo: Path, head_before: str | None,
-                              paths: list[str], timeout: int) -> bool:
+                              paths: list[str], timeout: int,
+                              approved_tree: str | None = None) -> bool:
     """Nach einem Commit-Timeout klären, ob der Commit doch entstanden ist.
 
     `git commit` kann den Commit längst geschrieben haben und erst danach — etwa
     in einem hängenden post-commit-Hook — in den Timeout laufen. Dann existiert
     der Commit, aber der echte Index wurde noch nicht nachgezogen: `git status`
-    (und damit gmf) zeigte die committeten Dateien weiter als geändert. Ändert
-    der neue Commit exakt die freigegebenen Pfade, wird der Index hier
-    nachgezogen; sonst bleibt er unangetastet (die Meldung verweist auf git log).
+    (und damit gmf) zeigte die committeten Dateien weiter als geändert.
     Rückgabe: True, wenn ein neuer Commit existiert.
+
+    `approved_tree` ist der vor dem Commit festgeschriebene Baum (aus der
+    Timeout-Ausnahme von commit_selected). Damit gilt hier dieselbe Zusage wie
+    im Normalweg: Erst wenn der committete Baum exakt dem freigegebenen
+    entspricht, wird der Index nachgezogen. Weicht er ab — ein pre-commit-Hook
+    hat z.B. weitere Pfade in den Commit gestagt —, rollt
+    `_verify_hooks_kept_approved_tree` den Commit zurück und wirft
+    CommitSafetyError. Der frühere reine Namensvergleich (`changed ==
+    set(paths)`) ließ genau diesen Fall ungeprüft durch und übersah auch
+    inhaltlich veränderte, gleichnamige Pfade; er bleibt nur als vorsichtige
+    Rückfallebene, wenn kein Baum bekannt ist (Timeout vor dem eigentlichen
+    Commit-Aufruf) — dann wird der Index nie nachgezogen, ohne dass die Pfade
+    exakt stimmen.
     """
     head_after = current_head(repo, timeout)
     if head_after is None or head_after == head_before:
         return False
+    if approved_tree is not None:
+        _verify_hooks_kept_approved_tree(repo, head_before, approved_tree, timeout)
+        adopt_commit_in_real_index(repo, paths, timeout)
+        return True
     if head_before is None:
         r = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
                     "--root", head_after, timeout=timeout)
@@ -1753,6 +1810,16 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             # SSH-Benutzers — alice@host:repo und bob@host:repo sind also
             # verschiedene Repositories, host:repo und host:/repo ebenfalls.
             home_relative = not rest.startswith("/")
+            # Ausnahme: Hosting-Dienste (GitHub, GitLab, Gitea, …) routen alle
+            # SSH-Zugriffe über den virtuellen Benutzer "git". Dessen Pfad ist
+            # kein privates Home-Verzeichnis, sondern derselbe Namensraum wie
+            # der HTTPS-Pfad: git@host:org/repo und https://host/org/repo
+            # meinen dasselbe Repository. Ohne diese Ausnahme gälte der übliche
+            # Mix (Fetch per HTTPS, Push per SSH) als zwei verschiedene Ziele,
+            # und P/L/G verweigerten die Übertragung. Ein ausdrückliches "~" im
+            # Pfad bleibt benutzerabhängig (Prüfung unten).
+            if user == "git" and not rest.startswith("~"):
+                home_relative = False
     elif urllib.parse.urlsplit(raw).scheme:
         parsed = urllib.parse.urlsplit(raw)
         if parsed.scheme == "file":
@@ -2433,6 +2500,39 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     return up, int(ahead), int(behind)
 
 
+def mark_gitlinks(repo: Path, files: list[ChangedFile],
+                  timeout: int) -> list[ChangedFile]:
+    """Submodule (Gitlinks) in der Dateiliste kennzeichnen.
+
+    ``git status --porcelain=v1`` sieht für ein Submodul genauso aus wie für
+    eine Datei (`` M sub``). Erst der Modus 160000 im Index bzw. im HEAD-Baum
+    verrät den Gitlink. Beide Quellen sind nötig: ein geändertes oder neu
+    hinzugefügtes Submodul steht im Index, ein zum Löschen vorgemerktes
+    (``D ``) nur noch in HEAD. Unverfolgte Einträge (``??``) können keine
+    Gitlinks sein und bleiben außen vor.
+    """
+    tracked = [f.path for f in files if f.xy != "??"]
+    if not tracked:
+        return files
+    links: set[str] = set()
+    # Index: "MODE OID STAGE\tPFAD", NUL-getrennt (Pfade bleiben unmaskiert).
+    index = run_git(repo, "ls-files", "-s", "-z", "--", *tracked, timeout=timeout)
+    if index.returncode == 0:
+        for record in index.stdout.split("\0"):
+            if record.startswith("160000 "):
+                links.add(record.split("\t", 1)[1])
+    # HEAD-Baum: "MODE commit OID\tPFAD". In einem Repo ohne Commit scheitert der
+    # Aufruf — dann kann HEAD auch keine Submodule verzeichnen.
+    head = run_git(repo, "ls-tree", "-z", "HEAD", "--", *tracked, timeout=timeout)
+    if head.returncode == 0:
+        for record in head.stdout.split("\0"):
+            if record.startswith("160000 "):
+                links.add(record.split("\t", 1)[1])
+    if not links:
+        return files
+    return [f._replace(submodule=f.path in links) for f in files]
+
+
 def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> RepoStatus:
     """Kompletten Zustand eines Repos einsammeln (läuft parallel in Threads)."""
     rel = str(repo.relative_to(root)) if repo != root else repo.name
@@ -2461,6 +2561,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         r = _required_git(repo, "status", "--porcelain=v1", "-z", timeout=t_)
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
             r.stdout)
+        # Submodule kennzeichnen — das Verwerfen (Z) entscheidet daran.
+        st.files = mark_gitlinks(repo, st.files, t_)
 
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
@@ -3883,7 +3985,8 @@ class TUI:
             rows.append((0, "", 0))
         # Die Ausweitung nur anbieten, wenn sie mehr umfasst als diese eine Datei —
         # "alle 1 Dateien" wäre keine Wahl, sondern eine Stolperfalle.
-        stashable = [f for f in st.files if f.xy != "??"]
+        # Submodule zählen nicht mit: `git stash` lässt sie ohnehin liegen.
+        stashable = [f for f in st.files if f.xy != "??" and not f.submodule]
         extra_key = "A" if len(stashable) > 1 else ""
         if extra_key:
             rows.append((1, t("discard_offer_all", n=len(stashable)), dim))
@@ -3923,14 +4026,19 @@ class TUI:
             self.message = t("discard_all_refused_" + plan.refused)
             return False
         dim = curses.color_pair(C_DIM)
-        count = sum(1 for f in st.files if f.xy != "??")
-        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
-        rows.extend((3, line, 0) for line in (
+        count = sum(1 for f in st.files if f.xy != "??" and not f.submodule)
+        effects = [
             t("discard_all_effect_stash", n=count),
             t("discard_all_effect_tree"),
             t("discard_all_effect_untracked"),
-            t("discard_all_effect_visible"),
-        ))
+        ]
+        if any(f.submodule for f in st.files):
+            # Ehrlich bleiben: `git stash` fasst Submodule nicht an — der Baum
+            # ist danach also NICHT restlos sauber.
+            effects.append(t("discard_all_effect_submodules"))
+        effects.append(t("discard_all_effect_visible"))
+        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
+        rows.extend((3, line, 0) for line in effects)
         rows.append((0, "", 0))
         rows.append((1, t("discard_all_undo"), dim))
         rows.append((3, format_git_command(("stash", "pop")), dim))
@@ -4321,14 +4429,23 @@ class TUI:
         except (CommitSafetyError, GitReadError, OSError) as e:
             self.message = t("commit_failed", e=str(e)[:120])
             return True
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             # Git und der von ihm gestartete Hook wurden beendet. Ob der Commit
             # vorher noch fertig wurde (z.B. hing nur der post-commit-Hook), weiß
             # nur das Repo selbst — deshalb den HEAD vergleichen, statt zu raten.
-            # Existiert der Commit, zieht finish_interrupted_commit auch den
-            # echten Index nach; sonst zeigten Status und gmf die committeten
-            # Pfade weiter als geändert.
-            done = finish_interrupted_commit(st.path, head_before, approved, t_)
+            # Existiert der Commit, prüft finish_interrupted_commit ihn gegen
+            # den freigegebenen Baum (aus der Ausnahme) und zieht den echten
+            # Index nach; sonst zeigten Status und gmf die committeten Pfade
+            # weiter als geändert. Hat ein Hook den Baum verändert, wird der
+            # Commit zurückgerollt und der Fehler wie im Normalweg gemeldet.
+            try:
+                done = finish_interrupted_commit(
+                    st.path, head_before, approved, t_,
+                    getattr(exc, "approved_tree", None))
+            except (CommitSafetyError, GitReadError) as e:
+                self.message = t("commit_failed", e=str(e)[:120])
+                self.refresh_one(st)
+                return True
             self.message = t("commit_timeout_done" if done else "commit_timeout_none",
                              s=commit_t)
             self.refresh_one(st)
