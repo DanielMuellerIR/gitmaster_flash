@@ -105,6 +105,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   unerreichbarer Schlüsselbund auf der Gegenseite zwei DRIFT-Zeilen pro Repo —
   am 2026-08-05 rund fünfzig Zeilen, die sich wie ein kaputter Login lasen.
   `conflicts` und `stashes` bleiben davon unberührt und werden weiter verglichen.
+- Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
+  acht. Der verbreitete sshd-Default `MaxStartups 10:30:100` verwirft sonst beim
+  kalten Aufbau eines ControlMaster-Sockets zufällig einzelne der zwölf
+  Verbindungen. Eine Erhöhung braucht deshalb einen echten Kaltstart-Netztest,
+  nicht nur Unit-Tests mit gemocktem Git (bestätigter Praxisbefund 2026-08-05).
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.

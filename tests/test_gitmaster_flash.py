@@ -378,6 +378,24 @@ class TestAgainstRealRepo(unittest.TestCase):
         repos = find_repos(self.root, DEFAULT_CONFIG["skip_dirs"])
         self.assertEqual(repos, [self.repo])
 
+    def test_fetch_scan_stays_below_sshd_max_startups(self):
+        """Ein Kaltstart darf nicht zwölf SSH-Logins gleichzeitig eröffnen.
+
+        OpenSSH verwirft beim verbreiteten ``MaxStartups 10:30:100`` sonst
+        zufällig einzelne Verbindungen, bevor ControlMaster seinen gemeinsamen
+        Socket aufgebaut hat. Der normale lokale Scan darf parallel bleiben.
+        """
+        with mock.patch("gitmaster_flash.find_repos", return_value=[]), \
+                mock.patch("gitmaster_flash.concurrent.futures.ThreadPoolExecutor") as pool:
+            gmf_module.collect_all(self.root, DEFAULT_CONFIG, fetch=True)
+        pool.assert_called_once_with(max_workers=8)
+
+    def test_local_scan_keeps_full_parallelism(self):
+        with mock.patch("gitmaster_flash.find_repos", return_value=[]), \
+                mock.patch("gitmaster_flash.concurrent.futures.ThreadPoolExecutor") as pool:
+            gmf_module.collect_all(self.root, DEFAULT_CONFIG, fetch=False)
+        pool.assert_called_once_with(max_workers=12)
+
     def test_status_dirty_untracked_stash(self):
         (self.repo / "a.md").write_text("geändert\n")
         (self.repo / "neu.txt").write_text("neu\n")

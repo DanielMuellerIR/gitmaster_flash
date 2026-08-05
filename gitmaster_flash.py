@@ -68,7 +68,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
+
+# Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
+# dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
+# Beim ersten Kaltstart ist der ControlMaster-Socket noch nicht da, und zwölf
+# gleichzeitige SSH-Anmeldungen würden sonst zufällig einzelne Repos treffen.
+LOCAL_SCAN_WORKERS = 12
+FETCH_SCAN_WORKERS = 8
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -2572,7 +2579,8 @@ def collect_all(root: Path, cfg: dict, fetch: bool = False,
     """Alle Repos parallel einsammeln; optional Fortschritts-Callback (done, total)."""
     repos = find_repos(root, cfg["skip_dirs"])
     results: list[RepoStatus] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+    workers = FETCH_SCAN_WORKERS if fetch else LOCAL_SCAN_WORKERS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(collect_status, r, root, cfg, fetch) for r in repos]
         for done, fut in enumerate(concurrent.futures.as_completed(futures), 1):
             results.append(fut.result())
