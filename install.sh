@@ -56,11 +56,14 @@ resolve_sourced_path() {
   print -r -- "${path:A}"
 }
 
-# Nur Zeilen zählen, deren erstes Nicht-Leerzeichen KEIN "#" ist: eine
-# auskommentierte Zeile ("# source …/gmf.zsh") lädt den Wrapper in neuen Shells
-# nicht und darf nicht als bestehende Installation durchgehen — sonst meldet
-# das Skript Erfolg, obwohl `gmf` weiterhin fehlt.
-active_gmf_line='^[[:space:]]*[^#[:space:]].*gmf\.zsh'
+# Nur Zeilen zählen, die den Wrapper wirklich laden: "source" bzw. "." muss als
+# Kommando dastehen — am Zeilenanfang oder hinter einem Trenner (";", "&&",
+# "||", "("). Eine auskommentierte Zeile ("# source …/gmf.zsh"), ein
+# Inline-Kommentar ("echo ok # source …/gmf.zsh") und eine bloße Zuweisung
+# ("export GMF=…/gmf.zsh") laden in neuen Shells nichts und dürfen nicht als
+# bestehende Installation durchgehen — sonst meldet das Skript Erfolg, obwohl
+# `gmf` weiterhin fehlt.
+active_gmf_line='(^|[;&|(])[[:space:]]*(source|\.)[[:space:]].*gmf\.zsh'
 if [[ -f "$zshrc" ]] && grep -qE "$active_gmf_line" -- "$zshrc"; then
   existing="$(grep -E "$active_gmf_line" -- "$zshrc" | head -1)"
   if [[ "$existing" == "$source_line" ]]; then

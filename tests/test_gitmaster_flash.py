@@ -121,7 +121,7 @@ class TestDiscardPlan(unittest.TestCase):
         # lassen, deshalb --source=HEAD zusammen mit --staged --worktree.
         for xy in (" M", "M ", "MM", " D", "D ", " T"):
             with self.subTest(xy=xy):
-                plan = plan_discard(ChangedFile("M", "datei.py", xy))
+                plan = plan_discard(ChangedFile("M", "datei.py", xy), has_head=True)
                 self.assertEqual(plan.kind, "restore")
                 self.assertEqual(plan.args, ("restore", "--source=HEAD", "--staged",
                                              "--worktree", "--", "datei.py"))
@@ -129,18 +129,28 @@ class TestDiscardPlan(unittest.TestCase):
     def test_added_file_is_only_unstaged_never_deleted(self):
         # Eine neu hinzugefügte Datei steht in keinem Commit — es gibt keinen
         # Stand, auf den man zurückgeht. Sie darf nur aus der Vormerkung fallen.
-        for xy in ("A ", "AM", "C "):
+        # " A" ist derselbe Fall, nur in der Y-Spalte: `git add -N` (intent to
+        # add). Ein generisches `restore --worktree` LÖSCHT diese Datei.
+        for xy in ("A ", "AM", "C ", " A"):
             with self.subTest(xy=xy):
-                plan = plan_discard(ChangedFile("M", "neu.py", xy))
+                plan = plan_discard(ChangedFile("M", "neu.py", xy), has_head=True)
                 self.assertEqual(plan.kind, "unstage")
                 self.assertEqual(plan.args, ("restore", "--staged", "--", "neu.py"))
+
+    def test_without_a_commit_the_entry_leaves_the_index_directly(self):
+        # `restore --staged` holt die Vormerkung aus HEAD. Den gibt es vor dem
+        # ersten Commit nicht (Git: "could not resolve HEAD"), also muss der
+        # Eintrag über `rm --cached` aus dem Index — die Datei bleibt liegen.
+        plan = plan_discard(ChangedFile("M", "neu.py", "A "), has_head=False)
+        self.assertEqual(plan.kind, "unstage")
+        self.assertEqual(plan.args, ("rm", "--cached", "--", "neu.py"))
 
     def test_untracked_conflict_and_rename_are_refused(self):
         cases = {"??": "untracked", "UU": "conflict", "AA": "conflict",
                  "R ": "rename", "RM": "rename"}
         for xy, reason in cases.items():
             with self.subTest(xy=xy):
-                plan = plan_discard(ChangedFile("M", "x.py", xy))
+                plan = plan_discard(ChangedFile("M", "x.py", xy), has_head=True)
                 self.assertEqual(plan.refused, reason)
                 self.assertEqual(plan.args, ())
 
@@ -160,6 +170,66 @@ class TestDiscardPlan(unittest.TestCase):
         self.assertEqual(plan_discard_all(normal, False).refused, "no_head")
         only_new = [ChangedFile("U", "neu.txt", "??")]
         self.assertEqual(plan_discard_all(only_new, True).refused, "only_untracked")
+
+
+class CountChangedLinesTests(unittest.TestCase):
+    """Die Umfangszahl im Verwerfen-Dialog: Kopf und Inhalt auseinanderhalten."""
+
+    def test_plain_diff_counts_added_and_removed_lines(self):
+        diff = ("diff --git a/x.txt b/x.txt\n"
+                "index 1111111..2222222 100644\n"
+                "--- a/x.txt\n"
+                "+++ b/x.txt\n"
+                "@@ -1,2 +1,2 @@\n"
+                " unverändert\n"
+                "-alt\n"
+                "+neu\n")
+        self.assertEqual(gmf_module.count_changed_lines(diff), 2)
+
+    def test_a_checked_in_patch_file_counts_every_line(self):
+        """Gegenprobe zum alten Stand: Der Inhalt einer .patch-Datei beginnt
+        selbst mit ``---``/``+++``. Mit dem Diff-Vorzeichen davor (``++++``) sah
+        er wie eine Kopfzeile aus und fiel aus der Zählung — hier wurden aus
+        fünf neuen Zeilen vier."""
+        diff = ("diff --git a/neu.patch b/neu.patch\n"
+                "new file mode 100644\n"
+                "index 0000000..130e0ca\n"
+                "--- /dev/null\n"
+                "+++ b/neu.patch\n"
+                "@@ -0,0 +1,5 @@\n"
+                "+--- a/y\n"
+                "++++ b/y\n"
+                "+@@ -1 +1 @@\n"
+                "+-a\n"
+                "++b\n")
+        self.assertEqual(gmf_module.count_changed_lines(diff), 5)
+
+    def test_removed_patch_lines_count_too(self):
+        diff = ("diff --git a/alt.patch b/alt.patch\n"
+                "--- a/alt.patch\n"
+                "+++ /dev/null\n"
+                "@@ -1,2 +0,0 @@\n"
+                "---- a/y\n"
+                "-+++ b/y\n")
+        self.assertEqual(gmf_module.count_changed_lines(diff), 2)
+
+    def test_the_head_of_a_second_file_is_not_counted(self):
+        diff = ("diff --git a/x.txt b/x.txt\n"
+                "--- a/x.txt\n"
+                "+++ b/x.txt\n"
+                "@@ -1 +1 @@\n"
+                "-alt\n"
+                "+neu\n"
+                "diff --git a/y.txt b/y.txt\n"
+                "--- a/y.txt\n"
+                "+++ b/y.txt\n"
+                "@@ -1 +1 @@\n"
+                "-alt\n"
+                "+neu\n")
+        self.assertEqual(gmf_module.count_changed_lines(diff), 4)
+
+    def test_empty_diff_is_zero(self):
+        self.assertEqual(gmf_module.count_changed_lines(""), 0)
 
 
 class ConfirmDialogTests(unittest.TestCase):
@@ -448,7 +518,7 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
 
     def test_worktree_change_returns_to_the_committed_content(self):
         (self.repo / "a.md").write_text("kaputt\n")
-        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.run_plan(plan_discard(self.entry_for("a.md"), has_head=True))
         self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
         self.assertFalse(collect_status(self.repo, self.root, DEFAULT_CONFIG).dirty)
 
@@ -461,13 +531,13 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         (self.repo / "a.md").write_text("stufe zwei\n")
         entry = self.entry_for("a.md")
         self.assertEqual(entry.xy, "MM")
-        self.run_plan(plan_discard(entry))
+        self.run_plan(plan_discard(entry, has_head=True))
         self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
         self.assertFalse(collect_status(self.repo, self.root, DEFAULT_CONFIG).dirty)
 
     def test_deleted_file_comes_back(self):
         (self.repo / "a.md").unlink()
-        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.run_plan(plan_discard(self.entry_for("a.md"), has_head=True))
         self.assertEqual((self.repo / "a.md").read_text(), "committet\n")
 
     def test_added_file_survives_on_disk_as_untracked(self):
@@ -475,9 +545,50 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         # keinem Commit, ihr Inhalt existiert nur hier.
         (self.repo / "neu.txt").write_text("nur hier\n")
         git(self.repo, "add", "neu.txt")
-        self.run_plan(plan_discard(self.entry_for("neu.txt")))
+        self.run_plan(plan_discard(self.entry_for("neu.txt"), has_head=True))
         self.assertEqual((self.repo / "neu.txt").read_text(), "nur hier\n")
         self.assertEqual(self.entry_for("neu.txt").xy, "??")
+
+    def test_intent_to_add_file_survives_on_disk(self):
+        """`git add -N` meldet eine Datei nur an: Status " A", das A steht rechts.
+
+        Gegenprobe zum alten Stand: Der generische Weg (`restore --source=HEAD
+        --staged --worktree`) entfernte diese Datei vom Datenträger, weil HEAD
+        sie nicht kennt — aus "verwerfen" wurde Löschen.
+        """
+        (self.repo / "neu.txt").write_text("nur hier\n")
+        git(self.repo, "add", "-N", "neu.txt")
+        entry = self.entry_for("neu.txt")
+        self.assertEqual(entry.xy, " A")
+        self.run_plan(plan_discard(entry, has_head=True))
+        self.assertEqual((self.repo / "neu.txt").read_text(), "nur hier\n")
+        self.assertEqual(self.entry_for("neu.txt").xy, "??")
+
+    def test_staged_file_in_a_repo_without_a_commit_stays_on_disk(self):
+        """Vor dem ersten Commit gibt es kein HEAD — `restore --staged` bräche ab.
+
+        Gegenprobe: derselbe Aufruf mit has_head=True endet in Git mit
+        Exit 128 ("could not resolve HEAD"), die Datei bliebe vorgemerkt.
+        """
+        leer = self.root / "ohne-commit"
+        leer.mkdir()
+        git(leer, "init", "-q")
+        (leer / "neu.txt").write_text("nur hier\n")
+        git(leer, "add", "neu.txt")
+        entry = collect_status(leer, self.root, DEFAULT_CONFIG).files[0]
+        self.assertEqual(entry.xy, "A ")
+
+        gescheitert = subprocess.run(
+            ["git", "-C", str(leer), *plan_discard(entry, has_head=True).args],
+            capture_output=True, text=True)
+        self.assertNotEqual(gescheitert.returncode, 0)
+
+        subprocess.run(["git", "-C", str(leer),
+                        *plan_discard(entry, has_head=False).args],
+                       check=True, capture_output=True, text=True)
+        self.assertEqual((leer / "neu.txt").read_text(), "nur hier\n")
+        self.assertEqual(collect_status(leer, self.root, DEFAULT_CONFIG).files[0].xy,
+                         "??")
 
     def test_foreign_staging_of_other_files_survives(self):
         # Zusage aus AGENTS.md: gmf fasst fremdes Staging nicht an. Hier ist b.md
@@ -485,7 +596,7 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         (self.repo / "b.md").write_text("bewusst vorgemerkt\n")
         git(self.repo, "add", "b.md")
         (self.repo / "a.md").write_text("weg damit\n")
-        self.run_plan(plan_discard(self.entry_for("a.md")))
+        self.run_plan(plan_discard(self.entry_for("a.md"), has_head=True))
         self.assertEqual((self.repo / "b.md").read_text(), "bewusst vorgemerkt\n")
         self.assertEqual(self.entry_for("b.md").xy, "M ")
 
@@ -503,6 +614,41 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         # Und der Rückweg funktioniert wirklich, nicht nur auf dem Papier.
         git(self.repo, "stash", "pop")
         self.assertEqual((self.repo / "a.md").read_text(), "geändert\n")
+
+    def test_extent_of_a_checked_in_patch_file_comes_out_right(self):
+        """Die Umfangszahl des Dialogs gegen echtes Git, nicht gegen selbst
+        getippten Diff-Text. Eine .patch-Datei hat fünf Zeilen; der alte Stand
+        zählte vier, weil ihre ``+++``-Zeile wie ein Dateikopf aussah."""
+        (self.repo / "fix.patch").write_text(
+            "--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n")
+        git(self.repo, "add", "fix.patch")
+        entry = self.entry_for("fix.patch")
+        ok, text = file_diff(self.repo, entry.code, entry.path,
+                             DEFAULT_CONFIG["git_timeout"])
+        self.assertTrue(ok, text)
+        self.assertEqual(gmf_module.count_changed_lines(text), 5)
+
+    def test_the_undo_line_promises_only_what_stash_pop_delivers(self):
+        """Der Dialog zeigt `git stash pop` — ohne `--index`. Git schreibt dann
+        alles in den Arbeitsbaum zurück, die Vormerkung ist danach weg. Der Text
+        darf deshalb nicht "alles"/"everything" versprechen."""
+        (self.repo / "a.md").write_text("vorgemerkt\n")
+        git(self.repo, "add", "a.md")
+        (self.repo / "b.md").write_text("nur Arbeitsbaum\n")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.run_plan(plan_discard_all(st.files, has_head=True))
+        git(self.repo, "stash", "pop")
+        # Inhalte sind zurück …
+        self.assertEqual((self.repo / "a.md").read_text(), "vorgemerkt\n")
+        self.assertEqual((self.repo / "b.md").read_text(), "nur Arbeitsbaum\n")
+        # … die Aufteilung nicht: a.md war "M " (vorgemerkt), jetzt ist es " M".
+        self.assertEqual(self.entry_for("a.md").xy, " M")
+
+        undo = gmf_module.TR["discard_all_undo"]
+        self.assertNotIn("everything", undo["en"])
+        self.assertNotIn("alles", undo["de"])
+        self.assertIn("staging", undo["en"])
+        self.assertIn("Vormerkung", undo["de"])
 
     def test_discard_all_refuses_in_a_repo_without_a_commit(self):
         leer = self.root / "leer"
@@ -1648,6 +1794,27 @@ class ErrorRedactionTests(unittest.TestCase):
         line = gmf_module.last_error_line(self._result(stderr))
         self.assertIn("git@example.com", line)
 
+    def test_password_disappears_under_every_scheme(self):
+        """display_remote_url() wirft das Passwort bei JEDEM Schema weg; die
+        Fehlerzeile muss dieselbe Politik fahren, sonst steht ein
+        `ssh://user:passwort@host` weiter in error_long und in --json."""
+        for url in ("ssh://user:s3cr3t@example.com/x.git",
+                    "git://user:s3cr3t@example.com/x.git",
+                    "ftps://user:s3cr3t@example.com/x.git"):
+            with self.subTest(url=url):
+                line = gmf_module.last_error_line(
+                    self._result(f"fatal: unable to access '{url}'"))
+                self.assertNotIn("s3cr3t", line)
+                # Der Benutzer bleibt — er gehört zur hilfreichen Adresse.
+                self.assertIn("user@example.com", line)
+                # Und die Anzeige-Seite sagt dasselbe.
+                self.assertNotIn("s3cr3t", gmf_module.display_remote_url(url))
+
+    def test_a_port_is_not_mistaken_for_a_password(self):
+        stderr = "fatal: unable to access 'ssh://git@example.com:2222/x.git'"
+        line = gmf_module.last_error_line(self._result(stderr))
+        self.assertIn("git@example.com:2222/x.git", line)
+
     def test_plain_messages_pass_unchanged(self):
         stderr = "ssh: connect to host example.com port 22: Connection refused"
         self.assertEqual(gmf_module.last_error_line(self._result(stderr)), stderr)
@@ -1795,6 +1962,39 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         # Das Remote-Repo selbst bleibt bestehen — entfernt wird nur die Config.
         self.assertTrue(self.origin.exists())
 
+    def test_restore_commands_really_rebuild_the_upstream(self):
+        """Der gezeigte Rückgängig-Weg muss im Terminal auch durchlaufen.
+
+        Gegenprobe zum alten Stand: Ohne die Fetch-Zeile bricht
+        `--set-upstream-to=origin/main` ab, weil `git remote remove` die Ref
+        refs/remotes/origin/* mitgelöscht hat.
+        """
+        branches = gmf_module.read_branches(self.repo, DEFAULT_CONFIG)
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        upstream = branches[0].upstream
+        self.assertTrue(upstream.startswith("origin/"), branches)
+        commands = gmf_module.remote_restore_commands(remote, branches)
+
+        gmf_module.run_git_logged(self.repo, "remote", "remove", "origin", timeout=10)
+
+        # Ohne den Fetch scheitert die Upstream-Zeile — genau der gemeldete Fall.
+        ohne_fetch = [c for c in commands if not c.startswith("git fetch")]
+        self.assertNotEqual(len(ohne_fetch), len(commands))
+        for command in ohne_fetch:
+            r = subprocess.run(["git", "-C", str(self.repo), *shlex.split(command)[1:]],
+                               capture_output=True, text=True)
+            if "--set-upstream-to" in command:
+                self.assertNotEqual(r.returncode, 0, command)
+
+        # Mit Fetch läuft die ganze Liste durch und der Upstream steht wieder.
+        git(self.repo, "remote", "remove", "origin")
+        for command in commands:
+            r = subprocess.run(["git", "-C", str(self.repo), *shlex.split(command)[1:]],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"{command}: {r.stderr}")
+        wieder = gmf_module.read_branches(self.repo, DEFAULT_CONFIG)
+        self.assertEqual(wieder[0].upstream, upstream)
+
     def test_command_log_shows_the_real_git_syntax(self):
         gmf_module.run_git_logged(self.repo, "remote", "remove", "origin", timeout=10)
         self.assertEqual(len(gmf_module.COMMAND_LOG), 1)
@@ -1910,12 +2110,22 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         branches = [gmf_module.BranchInfo(name="main", upstream="origin/main"),
                     gmf_module.BranchInfo(name="dev", upstream="backup/dev")]
         commands = gmf_module.remote_restore_commands(remote, branches)
+        # Der Fetch steht VOR der Upstream-Zeile: `git remote remove` hat auch
+        # refs/remotes/origin/* gelöscht, und ohne diese Ref lehnt Git
+        # `--set-upstream-to=origin/main` ab.
         self.assertEqual(commands, [
             "git remote add origin ssh://example.invalid/a.git",
             "git remote set-url --add origin ssh://example.invalid/b.git",
             "git remote set-url --push origin ssh://example.invalid/push.git",
+            "git fetch origin",
             "git branch --set-upstream-to=origin/main main",
         ])
+        # Ohne verfolgenden Branch gibt es nichts zu holen — kein Fetch.
+        ohne = gmf_module.remote_restore_commands(
+            gmf_module.RemoteConfig("origin", ["ssh://example.invalid/a.git"],
+                                    ["ssh://example.invalid/a.git"], [], []),
+            [gmf_module.BranchInfo(name="dev", upstream="backup/dev")])
+        self.assertEqual(ohne, ["git remote add origin ssh://example.invalid/a.git"])
         # Eine URL mit eingebettetem Token erscheint nur redigiert.
         secret = gmf_module.RemoteConfig(
             "hub", ["https://user:s3cr3t@example.invalid/x.git"],
@@ -2702,6 +2912,41 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
                 ("overview.de.svg", "de"),
             },
         )
+
+    def test_demo_conflict_call_ignores_a_foreign_git_dir(self):
+        """Der Stash-Konflikt der Demo lief als rohes subprocess.run: ohne den
+        Env-Filter und ohne Blick auf den Exit-Code. Ein gesetztes GIT_DIR
+        schlägt `-C <repo>` durch — der Aufruf landete dann in einem fremden
+        Repo, und die Demo baute still ein falsches Bild."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _ = gmf_module._demo_repo(root, "konflikt")
+            (repo / "README.md").write_text("# konflikt\n\ngestasht\n")
+            gmf_module._dgit(repo, "stash")
+            (repo / "README.md").write_text("# konflikt\n\nim Commit\n")
+            gmf_module._dgit(repo, "commit", "-qam", "conflicting change")
+
+            fremd, _ = gmf_module._demo_repo(root, "fremd")
+            with mock.patch.dict(os.environ, {"GIT_DIR": str(fremd / ".git")}):
+                gmf_module._dgit_conflict(repo, "stash", "pop")
+
+            status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                                    capture_output=True, text=True).stdout
+            self.assertIn("UU README.md", status)          # Konflikt im richtigen Repo
+            stashes = subprocess.run(["git", "-C", str(repo), "stash", "list"],
+                                     capture_output=True, text=True).stdout
+            self.assertEqual(len(stashes.splitlines()), 1)  # Stash bleibt erhalten
+
+    def test_demo_conflict_call_reports_every_other_exit_code(self):
+        """Erwartet ist genau Exit 1 (Konflikt). Läuft der Aufruf glatt durch
+        oder scheitert er anders, ist die Demo-Szene kaputt und muss auffallen."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = gmf_module._demo_repo(Path(temp), "sauber")
+            with self.assertRaises(subprocess.CalledProcessError):
+                gmf_module._dgit_conflict(repo, "stash", "list")     # Exit 0
+            with self.assertRaises(subprocess.CalledProcessError):
+                gmf_module._dgit_conflict(repo, "rev-parse", "--verify",
+                                          "gibtesnicht")             # Exit 128
 
     def test_demo_commits_ignore_the_callers_git_environment(self):
         """Demo-Commit-IDs sind ein Vertrag (Bild-Check): GIT_*-Variablen der

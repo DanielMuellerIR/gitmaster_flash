@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.17.1"
+__version__ = "0.17.2"
 
 CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
@@ -613,8 +613,13 @@ TR = {
     "discard_all_effect_visible": {
         "en": "· the stash stays visible in the list: S shows it, D drops it",
         "de": "· der Stash bleibt in der Liste sichtbar: S zeigt ihn, D wirft ihn weg"},
-    "discard_all_undo": {"en": "Undo (brings everything back, U does the same):",
-                         "de": "Rückgängig (holt alles zurück, U tut dasselbe):"},
+    # Ehrlich bleiben: `git stash pop` (ohne --index, wie auch die Taste U)
+    # schreibt alles in den Arbeitsbaum zurück. Was vorher vorgemerkt war, ist
+    # danach nicht mehr vorgemerkt.
+    "discard_all_undo": {
+        "en": "Undo (brings the contents back, U does the same; the staging is lost):",
+        "de": "Rückgängig (holt die Inhalte zurück, U tut dasselbe; "
+              "die Vormerkung geht verloren):"},
     "discard_all_confirm": {"en": "Move all changes in '{rel}' into a stash?",
                             "de": "Alle Änderungen in '{rel}' in einen Stash legen?"},
     "discard_all_done": {"en": "All changes stashed in {rel} — U brings them back.",
@@ -967,8 +972,12 @@ class DiscardPlan(NamedTuple):
     refused: str = ""
 
 
-def plan_discard(entry: ChangedFile) -> DiscardPlan:
+def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
     """Für eine einzelne Datei entscheiden, was Verwerfen hier bedeutet.
+
+    ``has_head`` sagt, ob das Repo überhaupt schon einen Commit hat (siehe
+    ``repo_has_head()``). Ohne HEAD gibt es keinen Stand, aus dem Git etwas
+    zurückholen könnte — das ändert den Befehl, nicht die Zusage.
 
     Vier Fälle, die sich nur am rohen Status auseinanderhalten lassen:
 
@@ -980,10 +989,13 @@ def plan_discard(entry: ChangedFile) -> DiscardPlan:
     * Umbenennung (``R…``): abgelehnt. Sie besteht aus zwei Einträgen (neuer und
       alter Name); eine Hälfte allein zurückzunehmen ließe die andere als Rest
       im Repo stehen.
-    * Neu hinzugefügt (``A…``) oder als Kopie erkannt (``C…``): Die Datei steht
-      in keinem Commit, ein früherer Stand existiert also nicht. gmf nimmt sie
-      nur aus der Vormerkung; die Datei selbst bleibt als unverfolgte Datei
-      liegen und wird NICHT gelöscht.
+    * Neu hinzugefügt (``A…``), als Kopie erkannt (``C…``) oder nur angemeldet
+      (Status ``" A"``, das Ergebnis von ``git add -N``): Die Datei steht in keinem
+      Commit, ein früherer Stand existiert also nicht. gmf nimmt sie nur aus der
+      Vormerkung; die Datei selbst bleibt als unverfolgte Datei liegen und wird
+      NICHT gelöscht. Die Y-Spalte muss hier mitgeprüft werden: Bei ``git add -N``
+      steht das ``A`` rechts, und der generische ``git restore --worktree`` unten
+      LÖSCHT einen verfolgten Pfad, den die Quelle nicht kennt.
     * Alles andere (geändert, gelöscht, Typwechsel — gestaget, im Arbeitsbaum
       oder beides): zurück auf den Stand des letzten Commits. ``--source=HEAD``
       mit ``--staged --worktree`` setzt Vormerkung und Arbeitsbaum gemeinsam
@@ -997,7 +1009,13 @@ def plan_discard(entry: ChangedFile) -> DiscardPlan:
         return DiscardPlan(refused="untracked")
     if "R" in xy:
         return DiscardPlan(refused="rename")
-    if xy[:1] in ("A", "C"):
+    if xy[:1] in ("A", "C") or xy[1:2] == "A":
+        if not has_head:
+            # `git restore --staged` holt die Vormerkung standardmäßig aus HEAD,
+            # den es hier noch nicht gibt — Git bräche ab. `rm --cached` nimmt
+            # den Eintrag direkt aus dem Index und lässt die Datei liegen; genau
+            # das sagt der Dialog zu.
+            return DiscardPlan(("rm", "--cached", "--", entry.path), "unstage")
         return DiscardPlan(("restore", "--staged", "--", entry.path), "unstage")
     return DiscardPlan(
         ("restore", "--source=HEAD", "--staged", "--worktree", "--", entry.path),
@@ -1400,6 +1418,12 @@ def credentials_missing(result: subprocess.CompletedProcess) -> bool:
 # Git zitiert in Fehlermeldungen die komplette Remote-URL — inklusive eines
 # eingebetteten Logins (https://user:token@host/…) und der Query-Parameter
 # (?token=…). Beides sind potenzielle Zugangsdaten.
+# _URL_PASSWORD greift bei JEDEM Schema und wirft nur den Teil nach dem
+# Doppelpunkt weg (ssh://user:geheim@host → ssh://user@host); der Benutzername
+# bleibt, weil er Teil der hilfreichen Adresse ist. _HTTP_USERINFO nimmt bei
+# HTTP(S) danach auch noch den Benutzernamen, denn dort steht an seiner Stelle
+# regelmäßig ein Token.
+_URL_PASSWORD = re.compile(r"(?i)\b(\w+://[^/@\s:]*):[^/@\s]*@")
 _HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
 _URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(\w+://[^\s'?#]*)[?#][^\s']*")
 
@@ -1407,13 +1431,15 @@ _URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(\w+://[^\s'?#]*)[?#][^\s']*")
 def redact_remote_error(line: str) -> str:
     """Zugangsdaten-Anteile aus einer Git-/SSH-Fehlerzeile entfernen.
 
-    Dieselbe Politik wie display_remote_url(): bei HTTP(S) fällt die gesamte
-    Userinfo weg (genau dort stehen Personal Access Tokens), Query und Fragment
-    fallen bei jedem Schema weg. Der SSH-Benutzer (git@…) bleibt stehen — er ist
-    Teil der hilfreichen Adresse, kein Geheimnis. Diese Zeilen erscheinen in der
-    TUI, auf der Info-Seite und über error_long auch in --json; deshalb wird
-    schon an der Eingangsgrenze redigiert, nicht erst bei der Anzeige.
+    Dieselbe Politik wie display_remote_url(): das Passwort fällt bei jedem
+    Schema weg, bei HTTP(S) zusätzlich der ganze Benutzername (genau dort stehen
+    Personal Access Tokens), Query und Fragment fallen ebenfalls bei jedem Schema
+    weg. Der SSH-Benutzer (git@…) bleibt stehen — er ist Teil der hilfreichen
+    Adresse, kein Geheimnis. Diese Zeilen erscheinen in der TUI, auf der
+    Info-Seite und über error_long auch in --json; deshalb wird schon an der
+    Eingangsgrenze redigiert, nicht erst bei der Anzeige.
     """
+    line = _URL_PASSWORD.sub(r"\1@", line)
     line = _HTTP_USERINFO.sub(r"\1", line)
     return _URL_QUERY_FRAGMENT.sub(r"\1", line)
 
@@ -1825,7 +1851,8 @@ def remote_restore_commands(remote: RemoteConfig,
     Zusage — gerade abweichende Push-Ziele würden danach still auf die Fetch-URL
     zeigen. Die URLs laufen durch display_remote_url(): der Befehl ist Anzeige,
     ein eingebettetes Token gehört nicht auf den Bildschirm. (Die gelöschten
-    Tracking-Refs holt der nächste Fetch zurück; das erklärt der Dialog.)
+    Tracking-Refs holt der eingefügte Fetch zurück — ohne sie scheitert die
+    Upstream-Zeile.)
     """
     name = remote.name
     commands = [format_git_command(("remote", "add", name,
@@ -1838,10 +1865,16 @@ def remote_restore_commands(remote: RemoteConfig,
             option = ("--push",) if index == 0 else ("--add", "--push")
             commands.append(format_git_command(
                 ("remote", "set-url", *option, name, display_remote_url(url))))
-    for branch in branches:
-        if branch.upstream.startswith(name + "/"):
-            commands.append(format_git_command(
-                ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
+    tracking = [b for b in branches if b.upstream.startswith(name + "/")]
+    if tracking:
+        # `git remote remove` hat auch refs/remotes/<name>/* gelöscht, und
+        # `--set-upstream-to=<name>/<branch>` verlangt genau diese Ref: ohne sie
+        # bricht Git ab ("the requested upstream branch does not exist"). Der
+        # Fetch holt sie zurück und muss deshalb VOR den Upstream-Zeilen stehen.
+        commands.append(format_git_command(("fetch", name)))
+    for branch in tracking:
+        commands.append(format_git_command(
+            ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
     return commands
 
 
@@ -1875,10 +1908,26 @@ def count_changed_lines(diff_text: str) -> int:
     Die Zahl steht im Verwerfen-Dialog: An ihr merkt man, ob dort echte Arbeit
     hängt oder nur eine Datei, die ein Programm beim Start angefasst hat. Die
     Kopfzeilen (``+++``/``---``) gehören nicht dazu, sie nennen nur Dateinamen.
+
+    ``in_hunk`` trennt Kopf von Inhalt: Erst ab der ersten ``@@``-Zeile stehen
+    echte Zeilen der Datei da. Ohne diese Trennung verschwanden die Änderungen an
+    einer eingecheckten ``.patch``-Datei aus der Zählung — deren Inhalt beginnt
+    selbst mit ``+++``/``---``, und mit dem Diff-Vorzeichen davor (``++++``,
+    ``----``) sah jede solche Zeile wie eine Kopfzeile aus.
     """
     count = 0
+    in_hunk = False
     for line in diff_text.splitlines():
-        if line.startswith(("+++", "---")):
+        # Eine neue Datei beginnt wieder mit einem Kopf. Im Inhalt eines Hunks
+        # trägt jede Zeile ein Vorzeichen (" ", "+", "-"), am Zeilenanfang kann
+        # "diff " deshalb nur eine echte Kopfzeile sein.
+        if line.startswith("diff "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
             continue
         if line.startswith(("+", "-")):
             count += 1
@@ -3708,7 +3757,7 @@ class TUI:
         `self.message`, warum nichts passiert ist: Eine Taste, die wortlos nichts
         tut, sieht aus wie ein kaputtes Programm.
         """
-        plan = plan_discard(entry)
+        plan = plan_discard(entry, repo_has_head(st.path, self.cfg["git_timeout"]))
         if plan.refused:
             self.message = t("discard_refused_" + plan.refused)
             return False
@@ -4351,15 +4400,17 @@ def init_colors():
 DEMO_DATE = "2026-01-02T10:00:00+00:00"
 
 
-def _dgit(repo: Path, *args: str) -> None:
-    """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen).
+def _demo_env() -> dict[str, str]:
+    """Umgebung für jeden git-Aufruf der Demo-Sandbox.
 
-    Die Umgebung wird von allen GIT_*-Variablen befreit: GIT_AUTHOR_NAME,
-    GIT_COMMITTER_*, GIT_CONFIG_* oder GIT_DEFAULT_HASH der aufrufenden Shell
-    würden sonst Identität, Config oder Hashformat übersteuern — und damit die
+    Sie wird von allen GIT_*-Variablen befreit: GIT_AUTHOR_NAME, GIT_COMMITTER_*,
+    GIT_CONFIG_* oder GIT_DEFAULT_HASH der aufrufenden Shell würden sonst
+    Identität, Config oder Hashformat übersteuern — und damit die
     maschinenunabhängigen Demo-Commit-IDs brechen, auf denen der Bild-Check
-    (`docs/make-screens.py --check`) beruht. Identität und Datum stehen deshalb
-    hier explizit; globale und System-Gitconfig bleiben außen vor.
+    (`docs/make-screens.py --check`) beruht. GIT_DIR wäre sogar schlimmer als
+    das: Es schlägt `-C <repo>` durch, der Aufruf landete also in einem ganz
+    anderen Repo. Identität und Datum stehen deshalb hier explizit; globale und
+    System-Gitconfig bleiben außen vor.
     """
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("GIT_")}
@@ -4367,8 +4418,28 @@ def _dgit(repo: Path, *args: str) -> None:
                GIT_AUTHOR_NAME="Demo", GIT_AUTHOR_EMAIL="demo@example.invalid",
                GIT_COMMITTER_NAME="Demo", GIT_COMMITTER_EMAIL="demo@example.invalid",
                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
+def _dgit(repo: Path, *args: str) -> None:
+    """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen)."""
     subprocess.run(["git", "-C", str(repo), *args], check=True,
-                   capture_output=True, text=True, env=env)
+                   capture_output=True, text=True, env=_demo_env())
+
+
+def _dgit_conflict(repo: Path, *args: str) -> None:
+    """Demo-git-Aufruf, dessen erwartetes Ergebnis ein Konflikt ist (Exit 1).
+
+    Bruder von `_dgit()`: dieselbe bereinigte Umgebung, aber `check=False`.
+    Genau Exit 1 geht durch — das ist der Konflikt, den die Demo zeigen will.
+    Exit 0 (kein Konflikt entstanden) und jeder andere Code sind ein Fehler und
+    fliegen auf, statt still ein falsches Demo-Bild zu bauen.
+    """
+    result = subprocess.run(["git", "-C", str(repo), *args], check=False,
+                            capture_output=True, text=True, env=_demo_env())
+    if result.returncode != 1:
+        raise subprocess.CalledProcessError(result.returncode, result.args,
+                                            result.stdout, result.stderr)
 
 
 def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]:
@@ -4498,8 +4569,7 @@ def build_demo_sandbox(base: Path) -> Path:
     (repo / "b.txt").write_text("b-head\n")
     _dgit(repo, "commit", "-qam", "conflicting change")
     _dgit(repo, "push", "-q", "origin", "main")
-    subprocess.run(["git", "-C", str(repo), "stash", "pop"],  # erzeugt Konflikt, behält Stash
-                   capture_output=True, text=True)
+    _dgit_conflict(repo, "stash", "pop")       # erzeugt Konflikt, behält Stash
 
     # 7) nur ein Stash (Baum sonst sauber)
     repo, _ = _demo_repo(root, "game-jam")
@@ -4586,8 +4656,7 @@ def build_demo_sandbox(base: Path) -> Path:
     (repo / "case.txt").write_text("head\n")
     _dgit(repo, "commit", "-qam", "conflicting change")
     _dgit(repo, "push", "-q", "origin", "master")
-    subprocess.run(["git", "-C", str(repo), "stash", "pop"],
-                   capture_output=True, text=True)
+    _dgit_conflict(repo, "stash", "pop")       # erzeugt Konflikt, behält Stash
 
     # 25) Änderung + Stash gleichzeitig
     repo, _ = _demo_repo(root, "vpn-config")

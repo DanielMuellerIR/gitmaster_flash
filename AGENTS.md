@@ -136,6 +136,29 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
       im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
       Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
+- [ ] Der Verwerfen-Dialog liest Diff und Zeilenzahl VOR der Bestätigung
+      (`action_discard_file`), führt danach aber `run_git_logged(*plan.args)` aus,
+      ohne den Stand noch einmal mit der Vorschau abzugleichen. Ändert sich die
+      Datei währenddessen, verwirft gmf etwas anderes als gezeigt. Andere
+      Aktionen prüfen an dieser Stelle erneut (Code-Review 2026-08-05).
+- [ ] `finish_interrupted_commit()` vergleicht nur `changed == set(paths)`. Der
+      Baumabgleich `_verify_hooks_kept_approved_tree()` samt Rollback wird im
+      Timeout-Zweig (`except subprocess.TimeoutExpired`) nie erreicht — ein
+      pre-commit-Hook, der im Timeout weitere Pfade stagt, kommt dort also
+      ungeprüft durch (Code-Review 2026-08-05).
+- [ ] Weder `plan_discard()` noch `parse_porcelain()` erkennen Submodule
+      (Gitlinks). Ein ` M sub` läuft in den generischen Restore; danach meldet
+      die TUI "Verworfen", obwohl im Submodul unverändert derselbe Commit
+      ausgecheckt sein kann (Code-Review 2026-08-05).
+- [ ] Der SCP-Benutzer-Qualifier blockiert den Mix aus HTTPS und SSH: Aus
+      `git@github.com:org/repo.git` wird home-relativ `github.com:~git/org/repo`,
+      aus `https://github.com/org/repo.git` dagegen `github.com:/org/repo`. Damit
+      wird `transfer_safe` False und P/L/G verweigern die Arbeit, obwohl beide
+      URLs dasselbe Repo meinen (Code-Review 2026-08-05).
+- [ ] `remote_restore_commands()` baut nur `remote add`, `set-url` und
+      `--set-upstream-to`. Niemand liest die übrige `remote.<name>.*`-Config
+      (eigene Refspecs, `tagOpt`, `mirror`); nach dem "Rückgängig" steht ein so
+      eingerichtetes Remote anders da als vorher (Code-Review 2026-08-05).
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
 - [ ] `fetch --all` klassifiziert bei mehreren gescheiterten Remotes nur den

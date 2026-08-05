@@ -222,20 +222,57 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Already installed", result.stdout)
         self.assertEqual(zshrc.read_text(), f"source ~/{self.repo.name}/gmf.zsh\n")
 
-    def test_commented_source_line_is_not_an_installation(self):
-        """Eine auskommentierte Zeile lädt den Wrapper nicht — der Installer darf
-        sie nicht als bestehende Installation werten und Erfolg melden."""
+    def test_lines_that_do_not_load_the_wrapper_are_no_installation(self):
+        """Drei Zeilen, die gmf.zsh nur erwähnen: ein ganz auskommentierter
+        `source`, ein Inline-Kommentar hinter einem echten Befehl und eine bloße
+        Zuweisung. Keine davon lädt den Wrapper in einer neuen Shell; der
+        Installer darf sie nicht als bestehende Installation werten und Erfolg
+        melden, während `gmf` weiterhin fehlt."""
         zshrc = self.home / ".zshrc"
-        zshrc.write_text("# source ~/irgendwo/gmf.zsh\n")
+        zshrc.write_text("# source ~/irgendwo/gmf.zsh\n"
+                         "echo ok # source ~/irgendwo/gmf.zsh\n"
+                         "export GMF_WRAPPER=~/irgendwo/gmf.zsh\n")
 
         result = self._install()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Already installed", result.stdout)
         content = zshrc.read_text()
-        # Der Kommentar bleibt stehen, die echte source-Zeile kommt dazu.
+        # Die drei Zeilen bleiben stehen, die echte source-Zeile kommt dazu.
         self.assertIn("# source ~/irgendwo/gmf.zsh", content)
+        self.assertIn("echo ok # source ~/irgendwo/gmf.zsh", content)
+        self.assertIn("export GMF_WRAPPER=~/irgendwo/gmf.zsh", content)
         self.assertIn(f'source -- "{self.repo}/gmf.zsh"', content)
+
+    def _is_active_line(self, line: str) -> bool:
+        """Nur die Erkennungsregel aus install.sh anwenden — ohne Selbsttest."""
+        script = (
+            'source <(sed -n "/^active_gmf_line=/p" %s)\n'
+            'print -r -- "$1" | grep -qE "$active_gmf_line"\n'
+            % shlex.quote(str(self.repo / "install.sh"))
+        )
+        result = subprocess.run(["zsh", "-c", script, "zsh", line],
+                                capture_output=True, text=True)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return result.returncode == 0
+
+    def test_only_a_real_source_command_counts_as_installed(self):
+        """`source` muss als Kommando dastehen. Die alte Regel verlangte nur ein
+        Nicht-`#` am Zeilenanfang und nahm deshalb auch einen Inline-Kommentar
+        oder eine Zuweisung für eine Installation."""
+        aktiv = ("source -- '/x/gmf.zsh'",
+                 "  source ~/x/gmf.zsh",
+                 ". ~/x/gmf.zsh",
+                 "[[ -f ~/x/gmf.zsh ]] && source ~/x/gmf.zsh")
+        passiv = ("# source ~/x/gmf.zsh",
+                  "echo ok # source ~/x/gmf.zsh",
+                  "export GMF_WRAPPER=~/x/gmf.zsh")
+        for line in aktiv:
+            with self.subTest(line=line):
+                self.assertTrue(self._is_active_line(line))
+        for line in passiv:
+            with self.subTest(line=line):
+                self.assertFalse(self._is_active_line(line))
 
     def _resolve(self, line: str) -> str:
         """Nur die Pfadauflösung aus install.sh laden — ohne den langen Selbsttest."""
