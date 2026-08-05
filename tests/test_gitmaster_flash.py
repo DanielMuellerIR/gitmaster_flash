@@ -1825,7 +1825,8 @@ class NonInteractiveGitTests(unittest.TestCase):
         """Dieselbe Git-Meldung, zwei sehr verschiedene Ursachen. In einer Sitzung
         ohne Schluesselbund (ssh, LaunchDaemon, cron) fehlen keine Zugangsdaten —
         sie sind nur nicht lesbar. "Login fehlt" schickte am 2026-08-05 in die
-        falsche Richtung: Daniel sollte sich neu anmelden, obwohl alles in Ordnung war."""
+        falsche Richtung: Eine erneute Anmeldung würde empfohlen, obwohl alles in
+        Ordnung war."""
         r = subprocess.CompletedProcess(["git"], 128, "", (
             "fatal: could not read Username for 'https://github.com': "
             "terminal prompts disabled"))
@@ -1964,7 +1965,7 @@ class RemoteCheckTests(unittest.TestCase):
         self.assertNotIn("login", message.lower())
 
     def test_fetch_failure_reports_the_real_cause_per_remote(self):
-        # Genau Daniels Fall: das GitHub-Repo ist weg, der Fetch soll das sagen —
+        # Konkreter Regressionfall: Das GitHub-Repo ist weg, der Fetch soll das sagen —
         # nicht pauschal "Login fehlt".
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
