@@ -43,7 +43,17 @@ resolve_sourced_path() {
   # extended_glob nur hier: `##` steht dann für "ein oder mehr" (Leerzeichen).
   setopt local_options extended_glob
   local line="$1" path
-  path="${line#*source}"           # alles nach dem ersten "source"
+  # Kommando und Argument mit derselben Regel trennen, die auch über "aktiv oder
+  # nicht" entscheidet (active_gmf_line unten): Vor dem Pfad steht "source" oder
+  # der gleichbedeutende Punkt, davor höchstens ein Trenner. Ein reines
+  # "alles nach dem Wort source" ließ die Punkt-Schreibweise komplett stehen —
+  # ". /pfad/gmf.zsh" galt dann als fremder Pfad, und der Installer brach bei
+  # einer Zeile ab, die er selbst als Installation anerkennt.
+  if [[ "$line" =~ "(^|[;&|(])[[:space:]]*(source|\.)[[:space:]]+(.*)$" ]]; then
+    path="${match[3]}"
+  else
+    path="$line"
+  fi
   path="${path##[[:space:]]##}"
   path="${path#-- }"
   path="${path##[[:space:]]##}"
@@ -56,6 +66,21 @@ resolve_sourced_path() {
   print -r -- "${path:A}"
 }
 
+# Kommentare vor der Prüfung wegschneiden. Ein "#" am Zeilenanfang oder hinter
+# einem Leerzeichen beginnt in der Shell einen Kommentar; was danach steht, führt
+# nichts aus. Ohne diesen Schritt genügte ein Semikolon IM Kommentar
+# ("# erst aufräumen; source …/gmf.zsh"), damit die Zeile wie ein echter Aufruf
+# hinter einem Trenner aussieht — und ein Kommentar hinter einer fremden
+# source-Zeile ("source ~/anderes.zsh # ersetzt gmf.zsh") ließ den Installer mit
+# "fremder Pfad" abbrechen. Grenze: Ein Trenner INNERHALB von Anführungszeichen
+# ("echo 'a; source …/gmf.zsh'") bleibt unerkannt; dafür bräuchte es einen
+# echten Shell-Parser, und die .zshrc darf hier nicht ausgeführt werden.
+uncommented_lines() {
+  # Ohne "--": das sed von macOS kennt den Trenner nicht. Der Dateiname kommt
+  # hier ausschließlich aus $zshrc und beginnt nie mit "-".
+  sed -E 's/(^|[[:space:]])#.*$//' "$1"
+}
+
 # Nur Zeilen zählen, die den Wrapper wirklich laden: "source" bzw. "." muss als
 # Kommando dastehen — am Zeilenanfang oder hinter einem Trenner (";", "&&",
 # "||", "("). Eine auskommentierte Zeile ("# source …/gmf.zsh"), ein
@@ -64,8 +89,8 @@ resolve_sourced_path() {
 # bestehende Installation durchgehen — sonst meldet das Skript Erfolg, obwohl
 # `gmf` weiterhin fehlt.
 active_gmf_line='(^|[;&|(])[[:space:]]*(source|\.)[[:space:]].*gmf\.zsh'
-if [[ -f "$zshrc" ]] && grep -qE "$active_gmf_line" -- "$zshrc"; then
-  existing="$(grep -E "$active_gmf_line" -- "$zshrc" | head -1)"
+if [[ -f "$zshrc" ]] && uncommented_lines "$zshrc" | grep -qE "$active_gmf_line"; then
+  existing="$(uncommented_lines "$zshrc" | grep -E "$active_gmf_line" | head -1)"
   if [[ "$existing" == "$source_line" ]]; then
     print "Already installed: $zshrc sources gmf.zsh — nothing to do."
   elif [[ "$(resolve_sourced_path "$existing")" == "${wrapper_path:A}" ]]; then

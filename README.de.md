@@ -249,6 +249,7 @@ Antwort trennt die Fälle, die sonst gleich aussehen:
 | antwortet, hat aber keine Branches | erreichbar, Repo noch leer |
 | Adresse erreichbar, aber dort ist kein Repo | gelöscht, umbenannt oder kein Zugriff |
 | Server verlangt einen Login | Credential-Helper oder SSH-Key fehlt |
+| aus dieser Sitzung nicht messbar | der Credential-Helper braucht den Login-Schlüsselbund, den nur die GUI-Sitzung öffnet |
 | SSH-Hostschlüssel unbekannt oder geändert | einmal im Terminal verbinden und prüfen |
 | Hostname nicht auflösbar | kein Netz oder DNS-Problem |
 | keine Verbindung zum Host | offline, Firewall oder Server aus |

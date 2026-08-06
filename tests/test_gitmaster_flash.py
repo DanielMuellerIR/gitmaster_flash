@@ -141,9 +141,13 @@ class TestDiscardPlan(unittest.TestCase):
         # `restore --staged` holt die Vormerkung aus HEAD. Den gibt es vor dem
         # ersten Commit nicht (Git: "could not resolve HEAD"), also muss der
         # Eintrag über `rm --cached` aus dem Index — die Datei bleibt liegen.
+        # `-f` gehört dazu: Bei "AM" (nach dem `git add` weiterbearbeitet)
+        # verweigert Git das Entfernen sonst, weil die vorgemerkte Fassung weder
+        # in der Datei noch in HEAD steht. `--cached` schützt den Arbeitsbaum
+        # weiterhin, auch mit `-f`.
         plan = plan_discard(ChangedFile("M", "neu.py", "A "), has_head=False)
         self.assertEqual(plan.kind, "unstage")
-        self.assertEqual(plan.args, ("rm", "--cached", "--", "neu.py"))
+        self.assertEqual(plan.args, ("rm", "--cached", "-f", "--", "neu.py"))
 
     def test_untracked_conflict_and_rename_are_refused(self):
         cases = {"??": "untracked", "UU": "conflict", "AA": "conflict",
@@ -407,6 +411,26 @@ class TestAgainstRealRepo(unittest.TestCase):
             gmf_module.collect_all(self.root, DEFAULT_CONFIG, fetch=True)
         pool.assert_called_once_with(max_workers=8)
 
+    def test_each_fetch_opens_only_one_connection_at_a_time(self):
+        """Die acht Repo-Worker helfen nichts, wenn Git INNERHALB eines Aufrufs
+        weitere Verbindungen aufmacht. Mit `fetch.parallel` oder
+        `submodule.fetchJobs` in der Benutzerkonfiguration taete es genau das,
+        und der sshd-Default MaxStartups verwuerfe wieder einzelne davon.
+        `--jobs=1` deckt beide Faelle ab."""
+        git(self.repo, "remote", "add", "origin", str(self.root / "gibtsnicht.git"))
+        aufrufe = []
+        echt = gmf_module.run_git_logged
+
+        def merken(repo, *args, **kwargs):
+            aufrufe.append(args)
+            return echt(repo, *args, **kwargs)
+
+        with mock.patch.object(gmf_module, "run_git_logged", side_effect=merken):
+            collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        fetches = [a for a in aufrufe if a and a[0] == "fetch"]
+        self.assertEqual(len(fetches), 1, aufrufe)
+        self.assertIn("--jobs=1", fetches[0])
+
     def test_local_scan_keeps_full_parallelism(self):
         with mock.patch("gitmaster_flash.find_repos", return_value=[]), \
                 mock.patch("gitmaster_flash.concurrent.futures.ThreadPoolExecutor") as pool:
@@ -624,6 +648,68 @@ class DiscardAgainstRealRepoTests(unittest.TestCase):
         self.assertEqual((leer / "neu.txt").read_text(), "nur hier\n")
         self.assertEqual(collect_status(leer, self.root, DEFAULT_CONFIG).files[0].xy,
                          "??")
+
+    def test_staged_file_edited_after_add_can_still_be_unstaged(self):
+        """Ohne ersten Commit und nach einer Änderung SEIT dem `git add`.
+
+        Der Index hält dann eine Zwischenfassung, die weder in der Datei noch in
+        HEAD steht (Status ``AM``). Genau da verweigert `git rm --cached` ohne
+        ``-f`` die Arbeit ("staged content different from both the file and the
+        HEAD") — die bestätigte Aktion scheiterte also ausgerechnet bei einer
+        weiterbearbeiteten neuen Datei. Die Zusage an die Datei bleibt: Sie liegt
+        danach unverfolgt und mit ihrem NEUEN Inhalt auf dem Datenträger.
+        """
+        leer = self.root / "ohne-commit-am"
+        leer.mkdir()
+        git(leer, "init", "-q")
+        (leer / "neu.txt").write_text("erste Fassung\n")
+        git(leer, "add", "neu.txt")
+        (leer / "neu.txt").write_text("zweite Fassung\n")
+        entry = collect_status(leer, self.root, DEFAULT_CONFIG).files[0]
+        self.assertEqual(entry.xy, "AM")
+
+        plan = plan_discard(entry, has_head=False)
+        subprocess.run(["git", "-C", str(leer), *plan.args],
+                       check=True, capture_output=True, text=True)
+
+        self.assertEqual((leer / "neu.txt").read_text(), "zweite Fassung\n")
+        self.assertEqual(collect_status(leer, self.root, DEFAULT_CONFIG).files[0].xy,
+                         "??")
+
+    def test_a_failing_gitlink_check_stops_instead_of_guessing(self):
+        """`mark_gitlinks()` ist eine Schutzprüfung, kein Komfort.
+
+        Fällt `git ls-files` unerwartet aus, hieß "keine Gitlinks gefunden"
+        vorher stillschweigend "keine Submodule dabei" — und ein Submodul wäre
+        als gewöhnliche Datei zum Verwerfen freigegeben worden. Jetzt bricht die
+        Prüfung geschlossen ab.
+        """
+        (self.repo / "a.md").write_text("geändert\n")
+        echt = gmf_module.run_git
+
+        def kaputt(repo, *args, **kwargs):
+            if args and args[0] == "ls-files":
+                return subprocess.CompletedProcess(["git", *args], 128, "", "kaputt")
+            return echt(repo, *args, **kwargs)
+
+        with mock.patch.object(gmf_module, "run_git", side_effect=kaputt):
+            with self.assertRaises(gmf_module.GitReadError):
+                gmf_module.mark_gitlinks(
+                    self.repo, [ChangedFile("M", "a.md", "M ")],
+                    DEFAULT_CONFIG["git_timeout"])
+
+    def test_a_repo_without_a_commit_keeps_the_gitlink_check_quiet(self):
+        # Gegenprobe: Dort MUSS `git ls-tree HEAD` scheitern — das ist der eine
+        # geduldete Fall und darf keinen Fehler auslösen.
+        leer = self.root / "ohne-commit-gitlink"
+        leer.mkdir()
+        git(leer, "init", "-q")
+        (leer / "neu.txt").write_text("nur hier\n")
+        git(leer, "add", "neu.txt")
+        files = gmf_module.mark_gitlinks(
+            leer, [ChangedFile("M", "neu.txt", "A ")],
+            DEFAULT_CONFIG["git_timeout"])
+        self.assertFalse(files[0].submodule)
 
     def test_foreign_staging_of_other_files_survives(self):
         # Zusage aus AGENTS.md: gmf fasst fremdes Staging nicht an. Hier ist b.md
@@ -881,6 +967,43 @@ class DiscardKeyTests(unittest.TestCase):
         self.assertIn(gmf_module.t("discard_no_undo"), drawn)
         # Eine Zeile raus, drei rein.
         self.assertIn(gmf_module.t("discard_extent", n=4), drawn)
+
+    def test_the_stash_result_repeats_that_submodules_stayed_behind(self):
+        """Der Dialog kündigt an, dass `git stash` Submodule auslässt.
+
+        Die Erfolgsmeldung sagte danach trotzdem "Alle Änderungen gestasht" —
+        man hielt den Arbeitsbaum für restlos sauber, obwohl die
+        Submoduländerung unverändert dasteht.
+        """
+        sub_src = self.root / "sub-src"
+        sub_src.mkdir()
+        git(sub_src, "init", "-q")
+        git(sub_src, "config", "user.email", "test@example.invalid")
+        git(sub_src, "config", "user.name", "Test")
+        (sub_src / "s").write_text("eins\n")
+        git(sub_src, "add", "s")
+        git(sub_src, "commit", "-qm", "eins")
+        (sub_src / "s").write_text("zwei\n")
+        git(sub_src, "add", "s")
+        git(sub_src, "commit", "-qm", "zwei")
+        # Seit Git 2.38 braucht ein Submodul aus einem lokalen Pfad diese Freigabe.
+        git(self.repo, "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", str(sub_src), "sub")
+        git(self.repo, "commit", "-qm", "Submodul dazu")
+        git(self.repo / "sub", "checkout", "-q", "HEAD~1")
+        # Daneben eine gewöhnliche Änderung, sonst lehnt gmf gleich ganz ab.
+        (self.repo / "a.md").write_text("geändert\n")
+
+        ui = self.make_ui([ord("j")])
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            changed = ui.action_discard_all(ui.statuses[0])
+
+        self.assertTrue(changed)
+        self.assertEqual(ui.message,
+                         gmf_module.t("discard_all_done_submodules", rel="demo"))
+        # Und der Grund für die eigene Meldung stimmt wirklich: Das Submodul
+        # steht unverändert da, `git stash` hat es nicht angefasst.
+        self.assertEqual((self.repo / "sub" / "s").read_text(), "eins\n")
 
 
 class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
@@ -1179,6 +1302,39 @@ class DiffTests(unittest.TestCase):
         b = _side(repos=[_repo("x", error="kaputt", remote_state="error")])
         out = diff_status(a, b, "here", "there")
         self.assertEqual(len([l for l in out if "DRIFT" in l]), 2, out)
+
+    def test_a_stale_tracking_ref_after_a_failed_fetch_is_no_drift(self):
+        """Der Fetch dieses Remotes scheiterte auf einer Seite.
+
+        Dort steht der Tracking-Ref vom letzten gelungenen Lauf, drueben der
+        frische — und schon meldete gmf eine DRIFT-Zeile mit zwei
+        Ahead/Behind-Paaren, direkt neben dem Satz, der Stand sei gar nicht
+        messbar. Genau dieser Widerspruch war der Fehlalarm."""
+        a = _side(repos=[_repo("x", remotes=[("origin", 0, 7, True)],
+                               error="origin: Schlüsselbund unerreichbar",
+                               remote_state="error", fetch_error=True)])
+        b = _side(repos=[_repo("x", remotes=[("origin", 0, 0, True)])])
+        a["repos"][0]["remotes"][0]["fetch_failed"] = True
+        out = diff_status(a, b, "here", "there")
+        self.assertEqual([l for l in out if "DRIFT" in l or "SYNC" in l], [], out)
+        # Nur die eine Zeile, die die betroffene Seite benennt, bleibt uebrig.
+        self.assertEqual(len(out), 1, out)
+
+    def test_a_local_error_survives_a_failed_fetch_on_the_other_side(self):
+        """Kreuzfall: hier ein gescheiterter Fetch, drueben ein echter lokaler
+        Schaden (unlesbarer Index). Vorher blendete der Fetch-Fehler das Feld
+        `error` auf BEIDEN Seiten aus — das Fetch-Problem hier versteckte den
+        Repo-Schaden dort."""
+        a = _side(repos=[_repo("x", error="origin: kein Netz",
+                               remote_state="error", fetch_error=True)])
+        b = _side(repos=[_repo("x", error="cannot read Git index")])
+        out = diff_status(a, b, "here", "there")
+        drift = [l for l in out if "DRIFT" in l]
+        self.assertEqual(len(drift), 1, out)
+        self.assertIn("error", drift[0])
+        self.assertIn("cannot read Git index", drift[0])
+        # Der fetchbedingte Fehler DIESER Seite bleibt trotzdem draussen.
+        self.assertNotIn("kein Netz", drift[0])
 
     def test_different_branch_is_local_not_drift(self):
         a = _side(repos=[_repo("x", branch="main")])
@@ -1769,6 +1925,43 @@ class SlowPreCommitHookTests(unittest.TestCase):
         # Der Commit mit der geschmuggelten Datei wurde zurückgerollt.
         self.assertEqual(gmf_module.current_head(self.repo, 10), head_before)
 
+    def test_the_rollback_uses_the_head_base_of_the_commit_itself(self):
+        """Der Aufrufer liest HEAD, BEVOR er commit_selected startet.
+
+        Bewegt sich HEAD dazwischen — ein anderes Programm committet im selben
+        Repo —, passt sein Wert nicht mehr zum Elternteil unseres Commits. Der
+        atomare Rollback prüft aber genau diesen Elternwert: Er unterblieb, und
+        ein vom Hook erweiterter Commit blieb trotz erkanntem Fehler stehen.
+        Deshalb hängt commit_selected seine EIGENE HEAD-Basis an die Ausnahme.
+        """
+        veralteter_stand = gmf_module.current_head(self.repo, 10)
+        # Der fremde Commit dazwischen.
+        (self.repo / "fremd.txt").write_text("von woanders\n")
+        git(self.repo, "add", "fremd.txt")
+        git(self.repo, "commit", "-qm", "fremder Commit")
+        fremder_stand = gmf_module.current_head(self.repo, 10)
+        self.assertNotEqual(fremder_stand, veralteter_stand)
+
+        (self.repo / "geschmuggelt.txt").write_text("nicht freigegeben\n")
+        pre = self.repo / ".git" / "hooks" / "pre-commit"
+        pre.write_text("#!/bin/sh\ngit add geschmuggelt.txt\n")
+        pre.chmod(0o755)
+        post = self.repo / ".git" / "hooks" / "post-commit"
+        post.write_text("#!/bin/sh\nsleep 30\n")
+        post.chmod(0o755)
+        with self.assertRaises(subprocess.TimeoutExpired) as cm:
+            commit_selected(self.repo, ["file.txt"], "schmuggelt", 10,
+                            commit_timeout=3)
+
+        # Genau der Ausdruck, den der Timeout-Zweig der Commit-Hilfe benutzt.
+        basis = getattr(cm.exception, "approved_head", veralteter_stand)
+        self.assertEqual(basis, fremder_stand)
+        with self.assertRaises(gmf_module.CommitSafetyError):
+            gmf_module.finish_interrupted_commit(
+                self.repo, basis, ["file.txt"], 10, cm.exception.approved_tree)
+        # Zurückgerollt wird auf den Stand, auf dem der Commit wirklich saß.
+        self.assertEqual(gmf_module.current_head(self.repo, 10), fremder_stand)
+
 
 class StashAndReadFailureTests(unittest.TestCase):
     def test_stash_preview_includes_untracked_binary(self):
@@ -1971,6 +2164,22 @@ class NonInteractiveGitTests(unittest.TestCase):
                                         return_value=True):
             self.assertEqual(gmf_module.classify_remote_check(r), "auth")
 
+    def test_a_rejected_ssh_key_is_never_excused_as_a_keychain_problem(self):
+        """Gegenprobe zum Fall darueber: "Permission denied (publickey)" kommt von
+        SSH und nicht von einem Credential-Helper. Ohne Helfer ist auch kein
+        Schluesselbund im Spiel — die Meldung "Login ist in Ordnung, nur aus dieser
+        Sitzung nicht messbar" schickte die Fehlersuche in die falsche Richtung,
+        obwohl der Schluessel wirklich fehlt oder abgelehnt wird."""
+        r = subprocess.CompletedProcess(["git"], 128, "", (
+            "git@example.com: Permission denied (publickey).\n"
+            "fatal: Could not read from remote repository."))
+        for sitzung in (True, False):
+            with self.subTest(keychain=sitzung):
+                with mock.patch.object(gmf_module, "keychain_session",
+                                                return_value=sitzung):
+                    self.assertEqual(gmf_module.classify_remote_check(r), "auth")
+                    self.assertTrue(gmf_module.credentials_missing(r))
+
     def test_keychain_session_only_true_in_gui_session(self):
         """`launchctl managername` nennt den Unterschied: "Aqua" ist die GUI-Sitzung,
         alles andere lebt daneben. Ausserhalb von macOS gibt es das Problem nicht."""
@@ -1993,6 +2202,16 @@ class NonInteractiveGitTests(unittest.TestCase):
         with mock.patch.object(gmf_module.sys, "platform", "darwin"), \
              mock.patch.object(gmf_module.subprocess, "run",
                                         side_effect=OSError("weg")):
+            self.assertIs(gmf_module.keychain_session(), True)
+        # Dasselbe fuer einen Aufruf, der zwar startet, aber mit Fehler endet:
+        # Sein leeres stdout ist nicht "nicht Aqua", sondern gar keine Antwort.
+        # Der Wert wird gemerkt — sonst gaelte fuer den REST des Prozesses jeder
+        # Auth-Fehler als entschuldigt.
+        gmf_module._KEYCHAIN_SESSION = None
+        with mock.patch.object(gmf_module.sys, "platform", "darwin"), \
+             mock.patch.object(gmf_module.subprocess, "run",
+                                        return_value=subprocess.CompletedProcess(
+                                            ["launchctl"], 1, "", "nope")):
             self.assertIs(gmf_module.keychain_session(), True)
         gmf_module._KEYCHAIN_SESSION = None
 
@@ -2049,6 +2268,24 @@ class ErrorRedactionTests(unittest.TestCase):
                 self.assertIn("user@example.com", line)
                 # Und die Anzeige-Seite sagt dasselbe.
                 self.assertNotIn("s3cr3t", gmf_module.display_remote_url(url))
+
+    def test_a_scheme_with_punctuation_still_loses_its_password(self):
+        """Git-Remote-Helper duerfen "+", "-" und "." im Schema tragen
+        (`git+ssh://`, `foo+://`). Die Redaktion erkannte vorher nur \\w+ vor dem
+        "://" — endete das Schema auf einem Satzzeichen, blieb das Passwort in
+        error_long stehen und damit auch in der --json-Ausgabe."""
+        for url in ("git+ssh://user:s3cr3t@example.com/x.git",
+                    "foo+://user:s3cr3t@example.com/x.git",
+                    "my-helper://user:s3cr3t@example.com/x.git"):
+            with self.subTest(url=url):
+                line = gmf_module.last_error_line(
+                    self._result(f"fatal: unable to access '{url}'"))
+                self.assertNotIn("s3cr3t", line)
+                self.assertIn("user@example.com", line)
+        # Query und Fragment fallen unter denselben Schemata ebenfalls weg.
+        line = gmf_module.last_error_line(self._result(
+            "fatal: unable to access 'foo+://example.com/x.git?token=abc123'"))
+        self.assertNotIn("abc123", line)
 
     def test_a_port_is_not_mistaken_for_a_password(self):
         stderr = "fatal: unable to access 'ssh://git@example.com:2222/x.git'"

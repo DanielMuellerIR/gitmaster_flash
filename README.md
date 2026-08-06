@@ -236,6 +236,7 @@ The answer distinguishes the cases that otherwise look identical:
 | answers but has no branches | reachable, repository still empty |
 | address reachable, but no repository there | deleted, renamed, or no access |
 | server wants a login | credential helper or SSH key missing |
+| not measurable from this session | the credential helper needs the login keychain, which only the GUI session opens |
 | SSH host key unknown or changed | connect once in a terminal and verify it |
 | host name does not resolve | no network or DNS problem |
 | no connection to the host | offline, firewall, or the server is down |

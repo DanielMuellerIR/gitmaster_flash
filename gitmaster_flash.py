@@ -68,12 +68,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.2"
+__version__ = "0.18.3"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
 # Beim ersten Kaltstart ist der ControlMaster-Socket noch nicht da, und zwölf
 # gleichzeitige SSH-Anmeldungen würden sonst zufällig einzelne Repos treffen.
+# Die zweite Hälfte der Zusage steht am Fetch selbst (``--jobs=1`` in
+# ``collect_status``): Ohne sie könnte ein einzelner Aufruf intern weitere
+# Verbindungen aufmachen, und die Obergrenze hier wäre nur die halbe Wahrheit.
 LOCAL_SCAN_WORKERS = 12
 FETCH_SCAN_WORKERS = 8
 
@@ -656,6 +659,12 @@ TR = {
                             "de": "Alle Änderungen in '{rel}' in einen Stash legen?"},
     "discard_all_done": {"en": "All changes stashed in {rel} — U brings them back.",
                          "de": "Alle Änderungen in {rel} gestasht — U holt sie zurück."},
+    # Eigene Meldung, wenn Submodule im Spiel waren: "alle Änderungen" wäre dann
+    # gelogen — der Dialog hat es vorher angekündigt, das Ergebnis muss es auch
+    # sagen, sonst hält man den Baum für restlos sauber.
+    "discard_all_done_submodules": {
+        "en": "Stashed in {rel} except the submodules — U brings it back.",
+        "de": "In {rel} gestasht, außer den Submodulen — U holt es zurück."},
     "discard_all_refused_no_head": {
         "en": "This repository has no commit yet — Git cannot stash here.",
         "de": "Dieses Repo hat noch keinen Commit — Git kann hier nicht stashen."},
@@ -1067,7 +1076,15 @@ def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
             # den es hier noch nicht gibt — Git bräche ab. `rm --cached` nimmt
             # den Eintrag direkt aus dem Index und lässt die Datei liegen; genau
             # das sagt der Dialog zu.
-            return DiscardPlan(("rm", "--cached", "--", entry.path), "unstage")
+            # `-f` ist hier nötig, nicht großzügig: Wurde die neue Datei nach dem
+            # `git add` weiterbearbeitet (Status ``AM``), verweigert `rm --cached`
+            # den Dienst, weil der vorgemerkte Inhalt weder in der Datei noch in
+            # HEAD steht. Aufgegeben wird dabei nur diese Zwischenfassung — genau
+            # das, was "Vormerkung entfernen" bedeutet, und dasselbe, was
+            # `git restore --staged` im Repo MIT Commit ohne Nachfrage tut.
+            # `--cached` bleibt die Zusage an die Datei: Der Arbeitsbaum wird
+            # nicht angefasst, auch nicht mit `-f`.
+            return DiscardPlan(("rm", "--cached", "-f", "--", entry.path), "unstage")
         return DiscardPlan(("restore", "--staged", "--", entry.path), "unstage")
     return DiscardPlan(
         ("restore", "--source=HEAD", "--staged", "--worktree", "--", entry.path),
@@ -1267,6 +1284,13 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
             # nur mit dem Baum kann finish_interrupted_commit dort dieselbe
             # Hook-Prüfung samt Rollback leisten wie der Normalweg unten.
             exc.approved_tree = tree_after
+            # Dazu gehört die HEAD-Basis DIESER Funktion: Der Aufrufer hat sein
+            # eigenes `head_before` schon vorher gelesen. Rückt HEAD dazwischen
+            # weiter (ein anderes Programm committet im selben Repo), passt der
+            # alte Wert nicht mehr zum Elternteil unseres Commits — der atomare
+            # Rollback in `_verify_hooks_kept_approved_tree` griffe dann nicht,
+            # und ein von einem Hook erweiterter Commit bliebe stehen.
+            exc.approved_head = head_before
             raise
         log_command(repo, logged_args, result.returncode)
     if result.returncode == 0:
@@ -1372,6 +1396,17 @@ def finish_interrupted_commit(repo: Path, head_before: str | None,
         return False
     if approved_tree is not None:
         _verify_hooks_kept_approved_tree(repo, head_before, approved_tree, timeout)
+        # Der Baum stimmt — aber ist es überhaupt UNSER Commit? Nur wenn er
+        # direkt auf der freigegebenen Basis sitzt, gehört er zu diesem Lauf.
+        # Ein fremder Commit mit zufällig gleichem Baum darf den echten Index
+        # nicht nachziehen; das verschöbe Index-Einträge, die niemand hier
+        # freigegeben hat.
+        parent = run_git(repo, "rev-parse", "--verify", "-q", head_after + "^",
+                         timeout=timeout)
+        parent_oid = parent.stdout.strip() if parent.returncode == 0 else None
+        if parent_oid != head_before:
+            raise CommitSafetyError(
+                "the new commit does not sit on the approved base; check git log")
         adopt_commit_in_real_index(repo, paths, timeout)
         return True
     if head_before is None:
@@ -1475,6 +1510,19 @@ REMOTE_CHECK_CAUSES = (
               "no such file or directory")),
 )
 
+# Die Teilmenge der "auth"-Marker, die den Weg ueber einen Credential-Helper
+# belegt (HTTPS: Git fragt nach Benutzername/Passwort). Nur dieser Weg liest den
+# Login-Schluesselbund — und nur er kann deshalb an einer Sitzung ohne
+# Schluesselbund scheitern (siehe keychain_session). Ein abgelehnter SSH-Schluessel
+# ("permission denied (publickey)") benutzt keinen Helfer; ihn als "nokeychain"
+# zu entschuldigen behauptete, der Login sei in Ordnung, und schickte die
+# Fehlersuche in die falsche Richtung.
+CREDENTIAL_HELPER_MARKERS = (
+    "terminal prompts disabled", "could not read username",
+    "could not read password", "authentication failed",
+    "invalid username or password",
+)
+
 
 _KEYCHAIN_SESSION: bool | None = None
 
@@ -1506,7 +1554,14 @@ def keychain_session() -> bool:
             try:
                 out = subprocess.run(["launchctl", "managername"],
                                      capture_output=True, text=True, timeout=5)
-                _KEYCHAIN_SESSION = out.stdout.strip() == "Aqua"
+                # Nur eine erfolgreiche Abfrage ist auswertbar. Bei jedem anderen
+                # Exit-Code ist stdout meist leer — das ergäbe "nicht Aqua" und
+                # damit dauerhaft (der Wert wird gemerkt) die Ausrede
+                # "Schlüsselbund unerreichbar" für jeden echten Auth-Fehler.
+                if out.returncode != 0:
+                    _KEYCHAIN_SESSION = True
+                else:
+                    _KEYCHAIN_SESSION = out.stdout.strip() == "Aqua"
             except (OSError, subprocess.SubprocessError):
                 # Lieber echte Auth-Fehler zeigen als sie stillschweigend
                 # entschuldigen: im Zweifel gilt der Schlüsselbund als erreichbar.
@@ -1524,12 +1579,15 @@ def classify_remote_check(result: subprocess.CompletedProcess) -> str:
     "nokeychain" ist ein Sonderfall von "auth": Dieselbe Git-Meldung, aber die
     Sitzung kommt gar nicht an den Schlüsselbund (siehe `keychain_session`).
     Die Unterscheidung ist wichtig, weil "Login fehlt" zum Neu-Anmelden auffordert
-    und damit in die falsche Richtung schickt.
+    und damit in die falsche Richtung schickt. Sie gilt nur für die Meldungen des
+    Credential-Helpers (`CREDENTIAL_HELPER_MARKERS`); ein abgelehnter
+    SSH-Schlüssel bleibt "auth", denn dort ist gar kein Schlüsselbund im Spiel.
     """
     text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
     for cause, markers in REMOTE_CHECK_CAUSES:
         if any(marker in text for marker in markers):
-            if cause == "auth" and not keychain_session():
+            if (cause == "auth" and not keychain_session()
+                    and any(m in text for m in CREDENTIAL_HELPER_MARKERS)):
                 return "nokeychain"
             return cause
     return "unknown"
@@ -1552,9 +1610,14 @@ def credentials_missing(result: subprocess.CompletedProcess) -> bool:
 # bleibt, weil er Teil der hilfreichen Adresse ist. _HTTP_USERINFO nimmt bei
 # HTTP(S) danach auch noch den Benutzernamen, denn dort steht an seiner Stelle
 # regelmäßig ein Token.
-_URL_PASSWORD = re.compile(r"(?i)\b(\w+://[^/@\s:]*):[^/@\s]*@")
+# `_SCHEME` ist die vollständige Schema-Grammatik aus RFC 3986: Buchstabe, dann
+# beliebig viele Buchstaben, Ziffern, "+", "-" und ".". Ein bloßes \w+ deckte
+# genau die Schemata NICHT ab, deren letztes Zeichen ein Satzzeichen ist
+# (z.B. ein Remote-Helper "foo+://") — dort bliebe das Passwort stehen.
+_SCHEME = r"[A-Za-z][A-Za-z0-9+.-]*"
+_URL_PASSWORD = re.compile(r"(?i)\b(%s://[^/@\s:]*):[^/@\s]*@" % _SCHEME)
 _HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
-_URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(\w+://[^\s'?#]*)[?#][^\s']*")
+_URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(%s://[^\s'?#]*)[?#][^\s']*" % _SCHEME)
 
 
 def redact_remote_error(line: str) -> str:
@@ -2515,15 +2578,22 @@ def mark_gitlinks(repo: Path, files: list[ChangedFile],
     if not tracked:
         return files
     links: set[str] = set()
+    # Beide Abfragen sind eine SCHUTZprüfung: Fällt eine still aus, gilt ein
+    # Submodul als gewöhnliche Datei und das Verwerfen (Z) gäbe es frei. Ein
+    # unerwarteter Fehler bricht deshalb geschlossen ab (GitReadError), statt
+    # "keine Gitlinks" zu behaupten.
     # Index: "MODE OID STAGE\tPFAD", NUL-getrennt (Pfade bleiben unmaskiert).
-    index = run_git(repo, "ls-files", "-s", "-z", "--", *tracked, timeout=timeout)
-    if index.returncode == 0:
-        for record in index.stdout.split("\0"):
-            if record.startswith("160000 "):
-                links.add(record.split("\t", 1)[1])
+    index = _required_git(repo, "ls-files", "-s", "-z", "--", *tracked,
+                          timeout=timeout)
+    for record in index.stdout.split("\0"):
+        if record.startswith("160000 "):
+            links.add(record.split("\t", 1)[1])
     # HEAD-Baum: "MODE commit OID\tPFAD". In einem Repo ohne Commit scheitert der
-    # Aufruf — dann kann HEAD auch keine Submodule verzeichnen.
+    # Aufruf — dann kann HEAD auch keine Submodule verzeichnen. Genau dieser eine
+    # Fall wird geduldet, und zwar erst nachdem er belegt ist.
     head = run_git(repo, "ls-tree", "-z", "HEAD", "--", *tracked, timeout=timeout)
+    if head.returncode != 0 and repo_has_head(repo, timeout):
+        raise GitReadError("git ls-tree failed (exit %d)" % head.returncode)
     if head.returncode == 0:
         for record in head.stdout.split("\0"):
             if record.startswith("160000 "):
@@ -2577,8 +2647,14 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
             # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
             try:
+                # `--jobs=1`: Die Begrenzung auf acht Repos gleichzeitig hilft
+                # nichts, wenn Git INNERHALB eines Aufrufs weitere Verbindungen
+                # aufmacht. Genau das täte es mit `fetch.parallel` oder
+                # `submodule.fetchJobs` in der Benutzerkonfiguration — und der
+                # sshd-Default MaxStartups verwürfe wieder zufällig einzelne.
+                # Der Schalter gilt für Remotes UND Submodule.
                 fetched = run_git_logged(repo, "fetch", "--all", "--prune", "--quiet",
-                                         timeout=cfg["fetch_timeout"])
+                                         "--jobs=1", timeout=cfg["fetch_timeout"])
             except subprocess.TimeoutExpired:
                 st.error = t("git_timeout")
                 st.remote_state = "error"
@@ -2858,6 +2934,14 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             if tuple(pa.get(k) for k in security_fields) != tuple(
                     pb.get(k) for k in security_fields):
                 out.append(t("diff_remote_security", rel=rel, r=rn))
+            if pa.get("fetch_failed") or pb.get("fetch_failed"):
+                # Scheiterte der Fetch dieses Remotes auf einer Seite, steht dort
+                # ein veralteter Tracking-Ref. Ahead/Behind und "kennt den Branch"
+                # beschrieben dann die misslungene Messung, nicht die Rechner —
+                # genau der Fehlalarm, den dieser Vergleich vermeiden soll. Die
+                # Sicherheitsfelder oben bleiben vergleichbar: sie stammen aus der
+                # Konfiguration und nicht aus dem Fetch.
+                continue
             sa = (pa.get("ahead"), pa.get("behind"))
             sb = (pb.get("ahead"), pb.get("behind"))
             if (x.get("branch") == y.get("branch")
@@ -2884,11 +2968,26 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
         # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
         # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
         # und Stashes sind davon unberuehrt und werden weiter verglichen.
+        #
+        # Die beiden Felder werden dabei unterschiedlich behandelt:
+        # `error` wird nur auf DER Seite geleert, deren Fetch scheiterte. Sonst
+        # verdeckte ein Fetch-Problem hier einen echten lokalen Schaden drueben
+        # (unlesbarer Index z.B.) — der haette mit dem Fetch nichts zu tun.
+        # `remote_state` beschreibt dagegen den Stand gegenueber dem Remote und
+        # ist ohne gelungenen Fetch auf KEINER Seite vergleichbar; er faellt
+        # deshalb ganz aus dem Vergleich.
         messbar = not (x.get("fetch_error") or y.get("fetch_error"))
-        felder = (("error", "conflicts", "stashes", "remote_state") if messbar
-                  else ("conflicts", "stashes"))
-        for field_name in felder:
-            va, vb = x.get(field_name), y.get(field_name)
+        werte = {
+            # "" heisst hier "kein (messbarer) Fehler" — dieselbe Schreibweise,
+            # die ein fehlerfreies Repo ohnehin liefert.
+            "error": ("" if x.get("fetch_error") else (x.get("error") or ""),
+                      "" if y.get("fetch_error") else (y.get("error") or "")),
+            "conflicts": (x.get("conflicts"), y.get("conflicts")),
+            "stashes": (x.get("stashes"), y.get("stashes")),
+        }
+        if messbar:
+            werte["remote_state"] = (x.get("remote_state"), y.get("remote_state"))
+        for field_name, (va, vb) in werte.items():
             if va != vb:
                 out.append(t("diff_repo_field", rel=rel, field=field_name,
                              a=here_at, va=va, b=there_at, vb=vb))
@@ -4027,12 +4126,13 @@ class TUI:
             return False
         dim = curses.color_pair(C_DIM)
         count = sum(1 for f in st.files if f.xy != "??" and not f.submodule)
+        submodule_bleibt = any(f.submodule for f in st.files)
         effects = [
             t("discard_all_effect_stash", n=count),
             t("discard_all_effect_tree"),
             t("discard_all_effect_untracked"),
         ]
-        if any(f.submodule for f in st.files):
+        if submodule_bleibt:
             # Ehrlich bleiben: `git stash` fasst Submodule nicht an — der Baum
             # ist danach also NICHT restlos sauber.
             effects.append(t("discard_all_effect_submodules"))
@@ -4056,7 +4156,10 @@ class TUI:
         if r.returncode != 0:
             self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
             return False
-        self.message = t("discard_all_done", rel=st.rel)
+        # Der Dialog hat die ausgelassenen Submodule angekündigt; die
+        # Erfolgsmeldung darf sie nicht wieder verschweigen.
+        self.message = t("discard_all_done_submodules" if submodule_bleibt
+                         else "discard_all_done", rel=st.rel)
         return True
 
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
@@ -4439,9 +4542,13 @@ class TUI:
             # weiter als geändert. Hat ein Hook den Baum verändert, wird der
             # Commit zurückgerollt und der Fehler wie im Normalweg gemeldet.
             try:
+                # `approved_head` ist die HEAD-Basis, die commit_selected selbst
+                # gelesen hat; nur sie passt zum Elternteil des Commits. Fehlt
+                # sie (Timeout schon vor dem Commit-Aufruf), bleibt es beim hier
+                # gelesenen Wert.
                 done = finish_interrupted_commit(
-                    st.path, head_before, approved, t_,
-                    getattr(exc, "approved_tree", None))
+                    st.path, getattr(exc, "approved_head", head_before),
+                    approved, t_, getattr(exc, "approved_tree", None))
             except (CommitSafetyError, GitReadError) as e:
                 self.message = t("commit_failed", e=str(e)[:120])
                 self.refresh_one(st)

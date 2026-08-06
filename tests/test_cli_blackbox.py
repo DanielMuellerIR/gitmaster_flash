@@ -244,6 +244,42 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("export GMF_WRAPPER=~/irgendwo/gmf.zsh", content)
         self.assertIn(f'source -- "{self.repo}/gmf.zsh"', content)
 
+    def test_the_dot_form_counts_as_already_installed(self):
+        """`.` ist in der Shell dasselbe Kommando wie `source`, und die
+        Erkennungsregel akzeptiert es ausdrücklich. Die Pfadauflösung schnitt
+        aber nur die Zeichenfolge "source" weg — bei ". /pfad/gmf.zsh" blieb die
+        ganze Zeile als vermeintlicher Pfad stehen, und der Installer brach mit
+        "fremder Pfad" ab. Also nicht idempotent für eine Schreibweise, die er
+        selbst anerkennt."""
+        zshrc = self.home / ".zshrc"
+        zeile = f". {self.repo}/gmf.zsh\n"
+        zshrc.write_text(zeile)
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Already installed", result.stdout)
+        self.assertEqual(zshrc.read_text(), zeile)
+
+    def test_a_separator_inside_a_comment_is_no_installation(self):
+        """Die Erkennung sucht "source" hinter einem Trenner (";", "&&", …).
+        Steht der Trenner in einem KOMMENTAR, führt die Zeile trotzdem nichts
+        aus — sie galt aber als bestehende Installation, und der Installer
+        meldete Erfolg, während `gmf` weiterhin fehlte. Ebenso umgekehrt: ein
+        Kommentar, der nur `gmf.zsh` erwähnt, machte aus einer fremden
+        source-Zeile einen vermeintlich falschen Pfad und brach ab."""
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text("# erst aufräumen; source ~/irgendwo/gmf.zsh\n"
+                         "source ~/irgendwo/anderes.zsh # ersetzt gmf.zsh\n")
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Already installed", result.stdout)
+        content = zshrc.read_text()
+        self.assertIn("# erst aufräumen; source ~/irgendwo/gmf.zsh", content)
+        self.assertIn(f'source -- "{self.repo}/gmf.zsh"', content)
+
     def _is_active_line(self, line: str) -> bool:
         """Nur die Erkennungsregel aus install.sh anwenden — ohne Selbsttest."""
         script = (
@@ -299,6 +335,13 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertEqual(self._resolve(line), target)
         # Ein wirklich anderes Repo bleibt unterscheidbar.
         self.assertNotEqual(self._resolve("source ~/git/woanders/gmf.zsh"), target)
+        # Und der Punkt bedeutet dasselbe wie "source".
+        for line in (f". {target}",
+                     ". ~/git/gitmaster_flash/gmf.zsh",
+                     "[[ -f ~/git/gitmaster_flash/gmf.zsh ]] && "
+                     ". ~/git/gitmaster_flash/gmf.zsh"):
+            with self.subTest(line):
+                self.assertEqual(self._resolve(line), target)
 
 
 if __name__ == "__main__":

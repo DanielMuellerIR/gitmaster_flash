@@ -98,7 +98,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   kein privates Home, `git@host:org/repo` und `https://host/org/repo` sind
   dasselbe Repo. Ohne die Ausnahme blockierte der übliche Mix (Fetch per HTTPS,
   Push per SSH) jede Übertragung. Ein ausdrückliches `~` im Pfad bleibt auch
-  bei `git@` benutzerabhängig.
+  bei `git@` benutzerabhängig. Bewusst in Kauf genommener Rest: Auf einem
+  gewöhnlichen SSH-Host mit einem echten Unix-Benutzer `git` gälten dessen
+  Home-Pfad und ein gleichnamiger HTTPS-Pfad ebenfalls als dasselbe Ziel. Dazu
+  müsste derselbe Host beides anbieten — dann ist er ein Hosting-Dienst
+  (Code-Review 2026-08-06 geprüft, Entscheidung bleibt).
 - Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,
@@ -111,7 +115,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
     der Login in Ordnung ist. `keychain_session()` erkennt das über
     `launchctl managername` (nur „Aqua“ ist die GUI-Sitzung) und macht daraus
     einen eigenen Fall, damit die Zeile nicht zum Neu-Anmelden auffordert.
-    Anlass war ein konkreter Fehlalarm am 2026-08-05.
+    Anlass war ein konkreter Fehlalarm am 2026-08-05. Seit 0.18.3 gilt das nur
+    noch für die Meldungen des Credential-Helpers
+    (`CREDENTIAL_HELPER_MARKERS`); ein abgelehnter SSH-Schlüssel
+    („permission denied (publickey)“) bleibt `auth`, denn dort ist gar kein
+    Schlüsselbund im Spiel.
 - Ein gescheiterter Fetch ist **kein** Unterschied zwischen zwei Rechnern. Er
   beschreibt die Sitzung, die gemessen hat. `diff_status()` blendet deshalb
   `error` und `remote_state` aus, sobald eine Seite `fetch_error` meldet, und
@@ -119,11 +127,19 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   unerreichbarer Schlüsselbund auf der Gegenseite zwei DRIFT-Zeilen pro Repo —
   am 2026-08-05 rund fünfzig Zeilen, die sich wie ein kaputter Login lasen.
   `conflicts` und `stashes` bleiben davon unberührt und werden weiter verglichen.
+  Seit 0.18.3 gehören zwei Feinheiten dazu: Ahead/Behind und „kennt den Branch“
+  eines Remotes fallen ebenfalls aus dem Vergleich, sobald für dieses Remote auf
+  einer Seite `fetch_failed` steht — sein Tracking-Ref ist dort veraltet. Und
+  `error` wird nur auf DER Seite geleert, deren Fetch scheiterte; sonst versteckt
+  ein Fetch-Problem hier einen echten lokalen Schaden drüben.
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
-  acht. Der verbreitete sshd-Default `MaxStartups 10:30:100` verwirft sonst beim
-  kalten Aufbau eines ControlMaster-Sockets zufällig einzelne der zwölf
-  Verbindungen. Eine Erhöhung braucht deshalb einen echten Kaltstart-Netztest,
-  nicht nur Unit-Tests mit gemocktem Git (bestätigter Praxisbefund 2026-08-05).
+  acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
+  `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
+  ControlMaster-Sockets zufällig einzelne der zwölf Verbindungen; ohne `--jobs=1`
+  könnte zudem `fetch.parallel` oder `submodule.fetchJobs` aus der
+  Benutzerkonfiguration innerhalb jedes Aufrufs weitere Verbindungen öffnen. Eine
+  Erhöhung braucht deshalb einen echten Kaltstart-Netztest, nicht nur Unit-Tests
+  mit gemocktem Git (bestätigter Praxisbefund 2026-08-05).
 - Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
   Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
   zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
@@ -145,10 +161,21 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Submodule (Gitlinks) lehnt das Verwerfen seit 0.18.2 komplett ab:
   `git restore` und `git stash` fassen den ausgecheckten Stand eines Submoduls
   nicht an, melden aber Exit 0 — gmf hätte also „Verworfen" gemeldet, ohne dass
-  sich etwas ändert. Der Porcelain-v1-Status kennzeichnet Gitlinks nicht;
+  sich etwas ändert. Bei `git stash push` kommt hinzu: Bleiben nur
+  Submoduländerungen übrig, legt es gar keinen Stash an („No local changes to
+  save“) und endet trotzdem mit Exit 0 — deshalb lehnt `plan_discard_all()`
+  diesen Fall vorher ab (`only_submodules`), und blieben Submodule neben echten
+  Änderungen liegen, sagt das auch die Erfolgsmeldung
+  (`discard_all_done_submodules`, seit 0.18.3). Weder aus dem Exit-Code von
+  `git restore` noch aus dem von `git stash push` darf gmf also schließen, dass
+  eine Submoduländerung verworfen oder gesichert wurde. Der Porcelain-v1-Status
+  kennzeichnet Gitlinks nicht;
   erst `mark_gitlinks()` (Mode 160000 in Index bzw. HEAD-Baum) setzt die
   Kennung `ChangedFile.submodule`, an der `plan_discard()`/`plan_discard_all()`
-  entscheiden.
+  entscheiden. `mark_gitlinks()` ist damit eine Schutzprüfung: Scheitert eine
+  ihrer beiden Git-Abfragen unerwartet, bricht sie geschlossen ab
+  (`GitReadError`), statt „keine Submodule“ zu behaupten. Geduldet wird nur der
+  belegte Fall ohne ersten Commit, in dem `git ls-tree HEAD` scheitern MUSS.
   Fürs Verwerfen gibt es bewusst keinen CLI-Schalter — die nicht-interaktive
   Schnittstelle bleibt lesend.
 - „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
