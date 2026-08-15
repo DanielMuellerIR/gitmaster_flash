@@ -6,7 +6,7 @@
     "token_budget": 1500000,
     "status": "active",
     "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 379375
+    "tokens_spent": 453001
   },
   "campaign_history": [],
   "scope": {
@@ -59,7 +59,20 @@
       "risk": "high",
       "priority": 2,
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
-      "state": "pending"
+      "state": "completed",
+      "last_run": {
+        "campaign_id": "20260815T134622757620+0200",
+        "completed_at": "2026-08-15T14:47:39+02:00",
+        "observed_head": "410e75d389a51c6afb8718289480cc0e9e750520",
+        "content_sha256": "a1aa0d982cf609cad46186d0cf11700fe46db70c245c10a3b2c87794ab5d34b3",
+        "file_count": 3,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Installer repariert eine fehlende abschliessende Zeilenschaltung der bestehenden .zshrc, bevor er die source-Anweisung anhaengt; Regressionstest belegt den vorher zusammengeklebten Shell-Befehl. Wrapper und Remote-CLI-Grenze vollstaendig geprueft, ohne weitere Korrektheitsfunde.",
+        "tests": [
+          "python3 -m unittest tests.test_cli_blackbox (12 Tests, OK); zsh -n install.sh gmf.zsh; python3 -m compileall -q gitmaster_flash.py tests/test_cli_blackbox.py; python3 docs/make-screens.py --check; gitmaster_flash.py --version = 0.18.5; kein verbleibender Demo-Prozess"
+        ]
+      }
     },
     {
       "id": "screen-generator",
