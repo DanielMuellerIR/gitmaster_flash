@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.6"
+__version__ = "0.18.7"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -318,8 +318,8 @@ TR = {
         "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen."},
     # Der Rückgängig-Befehl steht bewusst in der Meldung: Wer gerade committet hat,
     # soll nicht suchen müssen, wie er es zurücknimmt.
-    "committed_in": {"en": "Committed in {rel}. Undo: git reset --soft HEAD~1",
-                     "de": "Committet in {rel}. Rückgängig: git reset --soft HEAD~1"},
+    "committed_in": {"en": "Committed in {rel}. Undo: {undo}",
+                     "de": "Committet in {rel}. Rückgängig: {undo}"},
     "confirm_push": {"en": "Push {n} commit(s) to {r} now?",
                      "de": "Jetzt {n} Commit(s) zu {r} pushen?"},
     "committed_pushed": {"en": "Committed & pushed ({r}).", "de": "Committet & gepusht ({r})."},
@@ -1325,12 +1325,18 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
             exc.approved_head = head_before
             raise
         log_command(repo, logged_args, result.returncode)
+    committed_head = None
     if result.returncode == 0:
-        _verify_hooks_kept_approved_tree(repo, head_before, tree_after, timeout)
+        committed_head = _verify_hooks_kept_approved_tree(
+            repo, head_before, tree_after, timeout)
     if _real_index_signature(repo, timeout) != real_before:
         raise CommitSafetyError("Git changed the real index unexpectedly")
     if result.returncode == 0:
         adopt_commit_in_real_index(repo, paths, timeout)
+        # Der Aufrufer braucht die ungekürzte neue OID für einen sicheren
+        # Rückgängig-Befehl beim Erst-Commit. CompletedProcess bleibt dabei
+        # rückwärtskompatibel für alle bisherigen Aufrufer.
+        result.committed_head = committed_head
     return result
 
 
@@ -1364,7 +1370,7 @@ def _stage_approved(repo: Path, paths: list[str], timeout: int,
 
 
 def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
-                                     approved_tree: str, timeout: int) -> None:
+                                     approved_tree: str, timeout: int) -> str:
     """Nach dem Commit prüfen, dass kein Hook den freigegebenen Baum verändert hat.
 
     `git commit` erbt GIT_INDEX_FILE — ein pre-commit-Hook kann darüber mit
@@ -1381,7 +1387,7 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
     committed_tree = _required_git(repo, "rev-parse", "HEAD^{tree}",
                                    timeout=timeout).stdout.strip()
     if committed_tree == approved_tree:
-        return
+        return head_after
     parent = run_git(repo, "rev-parse", "--verify", "-q", head_after + "^",
                      timeout=timeout)
     parent_oid = parent.stdout.strip() if parent.returncode == 0 else None
@@ -1867,6 +1873,19 @@ COMMAND_LOG_MAX = 200
 def format_git_command(args: tuple[str, ...] | list[str]) -> str:
     """Den Befehl so schreiben, wie man ihn im Repo-Ordner selbst eintippen würde."""
     return "git " + " ".join(shlex.quote(a) for a in args)
+
+
+def commit_undo_command(head_before: str | None, head_after: str) -> str:
+    """Passenden Rückgängig-Befehl für einen gerade erzeugten Commit liefern.
+
+    Ein normaler Commit hat einen Eltern-Commit und kann weich auf ``HEAD~1``
+    zurückgesetzt werden. Beim Erst-Commit existiert dieser Name nicht. Dort
+    löscht ``update-ref`` nur dann den neuen Branch-Ref, wenn er noch exakt auf
+    der gerade erzeugten OID steht; Index und Arbeitsbaum bleiben erhalten.
+    """
+    if head_before is None:
+        return format_git_command(("update-ref", "-d", "HEAD", head_after))
+    return "git reset --soft HEAD~1"
 
 
 def log_command(repo: Path, args: tuple[str, ...] | list[str],
@@ -4885,7 +4904,8 @@ class TUI:
             self.message = t("commit_failed", e=r.stderr.strip()[:120])
             return True
         new = self.refresh_one(st)
-        self.message = t("committed_in", rel=st.rel)
+        undo = commit_undo_command(head_before, r.committed_head)
+        self.message = t("committed_in", rel=st.rel, undo=undo)
         # Nach einem Commit denselben abgesicherten privaten Sync-Push anbieten wie P.
         # Ein öffentlicher `origin` kann dadurch nie über die alte Kurzstrecke rutschen.
         if new.remote and new.behind == 0 and new.ahead > 0:

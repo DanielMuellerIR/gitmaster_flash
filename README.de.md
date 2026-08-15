@@ -49,8 +49,8 @@ Drei Tasten tragen durch die erste Sitzung:
 - `↑`/`↓` wählt ein Repo (`←`/`→` springen in der Kompaktansicht eine ganze
   Spalte weiter); die mit offenen Punkten stehen schon oben.
 - `A` zeigt, was sich in einer Datei geändert hat, `C` committet sie geführt.
-- `H` listet jeden Git-Befehl, den gmf für dich ausgeführt hat — so lernt man
-  die Syntax nebenbei mit, ohne sie auswendig zu lernen.
+- `H` listet jeden zustandsändernden Git-Befehl, den gmf für dich ausgeführt hat —
+  so lernt man die Syntax nebenbei mit, ohne sie auswendig zu lernen.
 
 Nichts wird gepusht, verworfen oder gelöscht, ohne dass vorher eine Rückfrage den
 genauen Befehl nennt. Die Details stehen weiter unten; zum Loslegen braucht man
@@ -367,8 +367,11 @@ Lokale Branches:
    `git commit -- <pfad>`; sonst meldete `git status` sie weiterhin als geändert.
    Danach kann der
    Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
-   werden. Nach einem lokalen Commit nennt die Ergebniszeile
-   `git reset --soft HEAD~1` als Rückgängig-Befehl.
+   werden. Nach einem gewöhnlichen lokalen Commit nennt die Ergebniszeile
+   `git reset --soft HEAD~1` als Rückgängig-Befehl. Nach dem allerersten Commit
+   steht dort stattdessen `git update-ref -d HEAD <neue-OID>`: Die erwartete OID
+   verhindert das Löschen eines inzwischen weiterbewegten Branches, während die
+   committeten Dateien vorgemerkt und auf der Festplatte bleiben.
 
 ## Installation
 
@@ -384,7 +387,9 @@ Der Grund: Ein Kindprozess kann das Arbeitsverzeichnis der aufrufenden Shell
 nicht ändern — das muss eine kleine Shell-Funktion übernehmen. `install.sh`
 erledigt das: Es führt den Selbsttest aus und registriert den sicher gequoteten
 absoluten Pfad zu `gmf.zsh` in der `~/.zshrc` (idempotent — ein zweiter Lauf ändert
-nichts, auch bei Clone-Pfaden mit Leerzeichen oder Shell-Metazeichen):
+nichts, auch bei Clone-Pfaden mit Leerzeichen oder Shell-Metazeichen). Beim
+Anhängen schließt es außerdem eine vorhandene letzte Zeile ohne Zeilenschaltung
+ab, damit der `source`-Befehl nicht mit ihr verschmilzt:
 
 ```sh
 gitmaster_flash/install.sh
@@ -397,7 +402,7 @@ hält die Installation an und verlangt Handarbeit.
 Oder die Zeile von Hand eintragen:
 
 ```sh
-echo 'source /pfad/zu/gitmaster_flash/gmf.zsh' >> ~/.zshrc
+printf '\n%s\n' 'source /pfad/zu/gitmaster_flash/gmf.zsh' >> ~/.zshrc
 ```
 
 In einer neuen Shell startet dann `gmf` das Tool (und wechselt am Ende dorthin,
@@ -462,10 +467,11 @@ und der allererste Lauf legt `~/.config/gitmaster_flash/config.json` an, auf dem
 befragten Rechner ebenso, weil dort dasselbe Skript läuft.
 
 **Tipp:** Rechner in `~/.ssh/config` eintragen und `ControlMaster auto` /
-`ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s` setzen. Beim Scannen vieler Repos
-gehen viele ssh-Verbindungen gleichzeitig auf, und der sshd-Default
-(`MaxStartups 10:30:100`) wirft davon zufällig welche weg — das sieht aus wie ein
-kaputtes Repo, ist aber keins.
+`ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s` setzen. Ein `--fetch`-Scan kann
+repoübergreifend bis zu acht ssh-Verbindungen gleichzeitig öffnen (jeder Git-Fetch
+selbst nutzt genau einen Job), und der sshd-Default (`MaxStartups 10:30:100`) kann
+sonst zufällig welche davon verwerfen — das sieht aus wie ein kaputtes Repo, ist
+aber keins.
 
 ## Nicht-interaktiv (Skripte, CI, Agenten)
 
@@ -476,7 +482,7 @@ gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
 
 # Jede Ausgabe nennt die Version — so zeigt ein Diff zweier Rechner-Ausgaben,
 # ob dieselbe Fassung dahintersteckt:
-#   --list-Kopfzeile: gitmaster_flash 0.6.0 · /Users/du/git · 61 Repos
+#   --list-Kopfzeile: gitmaster_flash 0.6.0 · $HOME/git · 61 Repos
 #   --json (ab 0.6.0): {"version": "0.6.0", "root": "…", "repos": [ … ]}
 #                      (vor 0.6.0 gab --json ein nacktes Array aus)
 ```
@@ -544,7 +550,8 @@ abgefangene Ausgabe — im curses-Bild zerstört das die Anzeige und Git wartet 
 auf eine Eingabe, die nie kommt. Ein Remote, das einen Login braucht, scheitert
 deshalb sofort mit `<Remote> braucht einen Login (kein Credential-Helper/SSH-Key).`
 statt zu fragen. HTTPS-Zugangsdaten gehören in einen
-Credential-Helper (macOS: `git config --global credential.helper osxkeychain`),
+Credential-Helper (in einer angemeldeten macOS-GUI-Sitzung:
+`git config --global credential.helper osxkeychain`),
 oder man nutzt SSH mit einem Key im Agenten; beides läuft ohne Rückfrage.
 
 ## Tests
@@ -562,6 +569,9 @@ python3 docs/make-screens.py --check   # passen die Bilder noch zur Oberfläche?
 
 `--check` schlägt fehl, wenn die Bilder in `docs/` anders herauskämen — nach einer
 UI-Änderung also `docs/make-screens.py` laufen lassen und das Ergebnis mitcommitten.
+Die Aufnahme wartet auf die vollständige Demo-Kopfzeile und nach jeder bestätigten
+Git-Aktion auf deren Eintrag im Befehlsprotokoll; bloße Ausgaberuhe gilt nicht als
+Abschluss.
 
 ## Name
 

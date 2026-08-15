@@ -47,8 +47,8 @@ Three keys carry you through the first session:
 - `↑`/`↓` picks a repository (`←`/`→` jump a whole column in the compact view);
   the ones needing attention are already at the top.
 - `A` shows what changed in a file, `C` commits it with a guided helper.
-- `H` lists every Git command gmf ran for you — that is how you pick up the
-  syntax without memorizing it.
+- `H` lists every state-changing Git command gmf ran for you — that is how you
+  pick up the syntax without memorizing it.
 
 Nothing is ever pushed, dropped or deleted without a confirmation that names the
 exact command first. Details are further down; you do not need them to start.
@@ -344,8 +344,11 @@ Local branches:
    but excluded work, stays intact. For the committed paths the real index adopts
    the new commit, exactly as `git commit -- <path>` does — otherwise `git status`
    would keep reporting them as modified. Optionally the commit is pushed through the same
-   guarded private sync path as `P` afterwards. After a local commit, the result
-   line includes `git reset --soft HEAD~1` as the undo command.
+   guarded private sync path as `P` afterwards. After an ordinary local commit,
+   the result line includes `git reset --soft HEAD~1` as the undo command. After
+   the very first commit it instead shows `git update-ref -d HEAD <new-oid>`:
+   the expected OID prevents it from deleting a branch that has moved, while the
+   committed files stay staged and on disk.
 
 ## Installation
 
@@ -361,7 +364,9 @@ process cannot change the working directory of the shell that started it, so a
 small function has to do it. `install.sh` does that for you: it runs the
 self-test, then registers the safely quoted absolute path to `gmf.zsh` in your
 `~/.zshrc` (idempotent — a second run changes nothing, including from clone paths
-with spaces or shell metacharacters):
+with spaces or shell metacharacters). When appending, it also terminates an
+existing final line that has no newline, so the `source` command cannot merge
+with it:
 
 ```sh
 gitmaster_flash/install.sh
@@ -374,7 +379,7 @@ installer and asks you to sort it out by hand.
 Or add the line manually:
 
 ```sh
-echo 'source /path/to/gitmaster_flash/gmf.zsh' >> ~/.zshrc
+printf '\n%s\n' 'source /path/to/gitmaster_flash/gmf.zsh' >> ~/.zshrc
 ```
 
 In a new shell, `gmf` then starts the tool (and `cd`s where you asked it to):
@@ -438,9 +443,10 @@ updates remote-tracking refs — and the very first run creates
 same script runs there.
 
 **Tip:** put your machines in `~/.ssh/config` and add
-`ControlMaster auto` / `ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s`. Scanning many
-repos opens many ssh connections at once, and the sshd default (`MaxStartups 10:30:100`)
-drops some of them at random — which looks like a broken repo but isn't.
+`ControlMaster auto` / `ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s`. A `--fetch`
+scan may open up to eight ssh connections across repositories at once (each Git fetch
+itself uses one job), and the sshd default (`MaxStartups 10:30:100`) can otherwise drop
+some of them at random — which looks like a broken repo but isn't.
 
 ## Non-interactive use (scripts, CI, agents)
 
@@ -451,7 +457,7 @@ gitmaster_flash.py --json --fetch  # fetch each repo first
 
 # Every output carries the version — so a diff of two machines' output shows
 # whether the same build produced them:
-#   --list header:  gitmaster_flash 0.6.0 · /Users/you/git · 61 repos
+#   --list header:  gitmaster_flash 0.6.0 · $HOME/git · 61 repos
 #   --json (0.6.0+): {"version": "0.6.0", "root": "…", "repos": [ … ]}
 #                    (before 0.6.0 --json printed a bare array)
 ```
@@ -502,8 +508,8 @@ remote deletion or concurrent move from turning it into an unreviewed update;
 tags are never sent.
 
 GitHub uses the separate `G` path. It works only when the same branch already
-exists on one GitHub remote and the histories are related. Before publishing it
-shows every outgoing commit and changed file name. The exact phrase
+exists on exactly one GitHub remote and the histories are related. Before
+publishing it shows every outgoing commit and changed file name. The exact phrase
 `PUSH <remote>` must then be typed. The final command still sends only the current
 branch: approved source OID, exact target lease, no tags, no new branch. A remote
 with multiple or differing fetch/push targets is blocked entirely, even if both
@@ -515,7 +521,7 @@ askpass disabled and in its own session, because Git writes such a question
 captured output — inside the curses screen that destroys the display and then waits
 for input that never arrives. A remote that needs a login therefore fails right away
 with `<remote> needs a login (no credential helper or SSH key).` instead of asking.
-Store HTTPS credentials in a credential helper (macOS:
+Store HTTPS credentials in a credential helper (in a logged-in macOS GUI session:
 `git config --global credential.helper osxkeychain`) or use SSH with a key in the
 agent; both work without any prompt.
 
@@ -533,7 +539,9 @@ python3 docs/make-screens.py --check   # do the pictures still match the UI?
 ```
 
 `--check` fails when the screens in `docs/` would come out different — after a UI
-change, run `docs/make-screens.py` and commit the result.
+change, run `docs/make-screens.py` and commit the result. The capture waits for the
+complete demo header and for the command-log entry of each confirmed Git action;
+output silence alone is not treated as completion.
 
 ## Name
 

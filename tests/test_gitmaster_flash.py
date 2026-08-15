@@ -1627,9 +1627,15 @@ class CommitSafetyTests(unittest.TestCase):
         die Datei als `MM`, obwohl Arbeitsbaum und HEAD längst identisch waren — in
         gmf sah es aus, als wäre der Commit gar nicht passiert.
         """
+        head_before = gmf_module.current_head(self.repo, 10)
         (self.repo / "include.txt").write_text("approved\n")
         r = commit_selected(self.repo, ["include.txt"], "selected", 10)
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.committed_head, gmf_module.current_head(self.repo, 10))
+        self.assertEqual(
+            gmf_module.commit_undo_command(head_before, r.committed_head),
+            "git reset --soft HEAD~1",
+        )
         self.assertEqual(self._status(), "")
         st = collect_status(self.repo, self.repo.parent, DEFAULT_CONFIG)
         self.assertEqual((st.modified, st.deleted, st.untracked), (0, 0, 0))
@@ -1697,12 +1703,25 @@ class CommitSafetyTests(unittest.TestCase):
         (fresh / "erste.txt").write_text("hallo\n")
         r = commit_selected(fresh, ["erste.txt"], "initial", 10)
         self.assertEqual(r.returncode, 0, r.stderr)
+        committed_head = gmf_module.current_head(fresh, 10)
+        self.assertEqual(r.committed_head, committed_head)
         log = subprocess.run(["git", "-C", str(fresh), "log", "--format=%s"],
                              check=True, capture_output=True, text=True).stdout
         self.assertEqual(log.strip(), "initial")
         status = subprocess.run(["git", "-C", str(fresh), "status", "--porcelain"],
                                 check=True, capture_output=True, text=True).stdout
         self.assertEqual(status, "")
+
+        undo = gmf_module.commit_undo_command(None, r.committed_head)
+        git(fresh, *shlex.split(undo)[1:])
+        self.assertIsNone(gmf_module.current_head(fresh, 10))
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(fresh), "status", "--porcelain"],
+                check=True, capture_output=True, text=True,
+            ).stdout,
+            "A  erste.txt\n",
+        )
 
     def test_command_log_shows_the_terminal_equivalent_commit(self):
         """Das Protokoll verspricht terminal-ausführbare Zeilen. Ein nacktes
@@ -3590,7 +3609,7 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertIn(b"action finished", output)
 
     def test_pty_reader_does_not_hide_unexpected_read_errors(self):
-        """Nur das fuer ein beendetes PTY uebliche EIO darf wie EOF gelten."""
+        """Nur das für ein beendetes PTY übliche EIO darf wie EOF gelten."""
         module, _ = self._make_screens_module()
         read_error = OSError(9, "bad file descriptor")
         with mock.patch.object(module.select, "select",
