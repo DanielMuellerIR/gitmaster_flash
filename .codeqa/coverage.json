@@ -6,7 +6,7 @@
     "token_budget": 1500000,
     "status": "active",
     "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 551771
+    "tokens_spent": 556753
   },
   "campaign_history": [],
   "scope": {
@@ -35,15 +35,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T14:48:30+02:00",
-        "observed_head": "d1c2e7b7374b57ab70c7fc0ecde33b235aea4cbf",
-        "content_sha256": "b90a3f31da2397858a68056f4c66c700e741202fa187842fc13f897fe9c6cded",
+        "completed_at": "2026-08-15T15:08:01+02:00",
+        "observed_head": "bf87b082f7207601758db3fc2057a63e74f66190",
+        "content_sha256": "69edda32973ec99551ab939509c4910506cb38f60150ad0dc3cd3a7341d8bd34",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Delta seit dem Vollreview besteht ausschliesslich aus dem vorgeschriebenen Versionssprung 0.18.4 auf 0.18.5; Ableitungen in Versions-CLI, Listen-Kopfzeile und JSON-Grenze geprueft, keine weiteren Aenderungen oder Funde.",
+        "summary": "Delta seit dem letzten Review umfasst nur Version 0.18.6 und zwei isolierte Tests der importierten Generator-Hilfslogik samt angepasster Mock-Signatur; keine Produktionslogik des Anwendungskerns geaendert, Grenzen vollstaendig geprueft.",
         "tests": [
-          "python3 -m unittest tests.test_gitmaster_flash.VersionInOutputTests.test_version_flag tests.test_gitmaster_flash.VersionInOutputTests.test_list_kopfzeile_nennt_version tests.test_gitmaster_flash.VersionInOutputTests.test_json_traegt_version_und_root (3 Tests, OK); python3 docs/make-screens.py --check (OK)"
+          "python3 -m unittest tests.test_gitmaster_flash.VersionInOutputTests plus drei direkte PTY-Hilfstests (7 Tests, OK); python3 docs/make-screens.py --check (Exit 0)"
         ]
       }
     },
