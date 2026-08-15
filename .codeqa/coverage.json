@@ -6,7 +6,7 @@
     "token_budget": 1500000,
     "status": "active",
     "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 462328
+    "tokens_spent": 551771
   },
   "campaign_history": [],
   "scope": {
@@ -80,7 +80,20 @@
       "risk": "medium",
       "priority": 3,
       "reason": "PTY-Steuerung und reproduzierbare Dokumentbilder koennen Prozesse hinterlassen oder UI-Drift verdecken",
-      "state": "pending"
+      "state": "completed",
+      "last_run": {
+        "campaign_id": "20260815T134622757620+0200",
+        "completed_at": "2026-08-15T15:07:30+02:00",
+        "observed_head": "68464ded775faa5757bf0a384a7f0d93e47cf0ea",
+        "content_sha256": "c77c6ddfdd127d8378dc1a05c5bf52adeceb780b584cda0b6ef67a1881025ca1",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "PTY-Aufnahme wartet nach bestaetigten Demo-Aktionen auf stabile Kopf- und Befehlsprotokollmarker statt nur auf Ausgaberuhe; unerwartete Lesefehler bleiben sichtbar, waehrend Linux-PTY-EIO als regulaeres Ende gilt. Dokumentierter Timing-Fund erledigt.",
+        "tests": [
+          "6 direkte Generator-/Replay-Tests OK; python3 docs/make-screens.py --check mehrfach mit allen sechs Sprach-/Ansichtenpaaren Exit 0; python3 -m compileall -q docs/make-screens.py tests/test_gitmaster_flash.py gitmaster_flash.py; git diff --check; keine verbleibenden Demo-/Generatorprozesse"
+        ]
+      }
     },
     {
       "id": "documentation-contract",
