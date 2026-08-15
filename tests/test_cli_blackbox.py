@@ -249,6 +249,24 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("export GMF_WRAPPER=~/irgendwo/gmf.zsh", content)
         self.assertIn(f'source -- "{self.repo}/gmf.zsh"', content)
 
+    def test_missing_final_newline_is_repaired_before_source_line(self):
+        """Eine vorhandene letzte Zeile darf nicht mit ``source`` verschmelzen.
+
+        Konfigurationsdateien ohne abschliessenden Zeilenumbruch sind zwar
+        ungewoehnlich, aber gueltig. Der Installer muss seine Registrierung in
+        diesem Fall trotzdem als eigene Shell-Anweisung anhaengen.
+        """
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text("export DEMO_SETTING=1")
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            zshrc.read_text(),
+            f'export DEMO_SETTING=1\nsource -- "{self.repo}/gmf.zsh"\n',
+        )
+
     def test_the_dot_form_counts_as_already_installed(self):
         """`.` ist in der Shell dasselbe Kommando wie `source`, und die
         Erkennungsregel akzeptiert es ausdrücklich. Die Pfadauflösung schnitt

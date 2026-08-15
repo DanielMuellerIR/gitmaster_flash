@@ -106,6 +106,12 @@ if [[ -f "$zshrc" ]] && uncommented_lines "$zshrc" | grep -qE "$active_gmf_line"
     exit 1
   fi
 else
+  # Endet eine vorhandene .zshrc nicht mit einem Zeilenumbruch, wuerde die
+  # source-Anweisung sonst direkt mit ihrer letzten Anweisung verschmelzen.
+  # `tail -c 1 | wc -l` ergibt genau dann 1, wenn das letzte Byte ein \n ist.
+  if [[ -s "$zshrc" ]] && [[ "$(tail -c 1 "$zshrc" | wc -l)" -eq 0 ]]; then
+    printf '\n' >> "$zshrc"
+  fi
   printf '%s\n' "$source_line" >> "$zshrc"
   print "Registered wrapper: added '$source_line' to $zshrc"
 fi
