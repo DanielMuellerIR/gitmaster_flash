@@ -6,7 +6,7 @@
     "token_budget": 1500000,
     "status": "active",
     "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 556753
+    "tokens_spent": 663543
   },
   "campaign_history": [],
   "scope": {
@@ -104,7 +104,20 @@
       "risk": "low",
       "priority": 4,
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
-      "state": "pending"
+      "state": "completed",
+      "last_run": {
+        "campaign_id": "20260815T134622757620+0200",
+        "completed_at": "2026-08-15T15:25:51+02:00",
+        "observed_head": "7a7de836330387fd0de5070e967f86ea23c3d81d",
+        "content_sha256": "37864f280de28f7da9f2e059557a6fd5ef129714cc3dc78a0b3d0b505da0e97d",
+        "file_count": 2,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Beide READMEs vollstaendig auf Struktur, CLI-Vertrag, Nebenwirkungen und Sicherheitszusagen abgeglichen. Befehlsprotokoll auf zustandsaendernde Git-Aufrufe praezisiert, Installer-Anhaengen und --fetch-Parallelitaet korrekt beschrieben, GitHub-Eindeutigkeit und macOS-GUI-Schluesselbundgrenze synchronisiert. Der Abgleich deckte den ungueltigen Undo-Befehl nach einem Erst-Commit auf; Implementierung und beide Sprachfassungen verwenden nun einen OID-gebundenen update-ref-Befehl.",
+        "tests": [
+          "python3 -m unittest discover -s tests (243 Tests in 249.759s, OK); python3 docs/make-screens.py --check (sechs Aufnahmen, Exit 0); README-Link- und Codeblockpruefung OK; python3 -m compileall -q gitmaster_flash.py tests docs/make-screens.py; git diff --check; keine verbleibenden Demo-/Generatorprozesse"
+        ]
+      }
     }
   ],
   "architecture": {
