@@ -30,6 +30,8 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   still — die alten PNGs zeigten zuletzt eine Kopfzeile ohne Version.
   `--check` schlägt fehl, wenn sie neu erzeugt werden müssten (nach UI-Änderungen also
   `make-screens.py` laufen lassen und das Ergebnis mitcommitten).
+  Nach bestätigten Demo-Aktionen wartet der Generator auf deren konkrete Zeile im
+  Befehlsprotokoll; bloße Ruhe auf dem PTY belegt keinen fertigen Git-Aufruf.
   **Weiterhin gilt:** keine globalen synthetischen Tastendrücke — die Eingaben gehen
   ausschließlich in den eigenen pty-Kindprozess, nie an das Fenstersystem.
   Der Generator erzeugt jedes Bild als Sprachpaar: die Dateien ohne Sprachsuffix
@@ -222,11 +224,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
-- [ ] `docs/make-screens.py` wertet Ruhe auf dem PTY als „fertig“: läuft nach dem
-      letzten Tastendruck noch eine stille Git-Aktion, kann auf langsamen Maschinen
-      ein Zwischenzustand aufgenommen werden und `--check` wird timingabhängig.
-      Auf einen erwarteten Bildschirm-/Protokollmarker warten statt nur auf Ruhe
-      (Code-Review 2026-08-02).
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).

@@ -23,6 +23,7 @@ German.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import os
 import pty
@@ -117,8 +118,59 @@ def _cell_width(ch: str) -> int:
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
+def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
+                    first_wait: float = 60.0, marker: bytes | None = None) -> bytes:
+    """Read a pty until its output has reached ``marker`` and then settled.
+
+    A quiet period alone is not enough after a confirmed Git action: a hook or Git
+    itself may still be working without writing anything. When a marker is supplied,
+    silence therefore only counts after that marker appeared in the new output.
+    """
+    got = b""
+    start = time.monotonic()
+    last = None
+    marker_seen = marker is None
+    ended = False
+    while time.monotonic() - start < cap:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError as exc:
+                # Linux reports EIO after the pty child closes its side. Other
+                # read errors indicate a broken capture and must stay visible.
+                if exc.errno != errno.EIO:
+                    raise
+                ended = True
+                break
+            if not chunk:
+                ended = True
+                break
+            got += chunk
+            last = time.monotonic()
+            if marker is not None and marker in got:
+                marker_seen = True
+            continue
+        now = time.monotonic()
+        if last is None:
+            if now - start > first_wait:
+                break                            # nothing ever came
+            continue
+        if marker_seen and now - last >= quiet:
+            return got                           # expected state has settled
+
+    if marker is not None and not marker_seen:
+        shown = marker.decode("utf-8", "backslashreplace")
+        raise TimeoutError(f"pty capture did not reach marker: {shown}")
+    if not ended and last is not None:
+        raise TimeoutError("pty capture did not settle before its time limit")
+    return got
+
+
 def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
-                   cols: int = COLS, rows: int = ROWS) -> list:
+                   cols: int = COLS, rows: int = ROWS,
+                   ready_marker: bytes | None = None,
+                   key_markers: dict[int, bytes] | None = None) -> list:
     """Run the program in a pty, feed `keys`, return the final screen as a Cell grid."""
     pid, fd = pty.fork()
     if pid == 0:                                    # child
@@ -129,45 +181,16 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
     # Window size on the pty master. curses also honours LINES/COLUMNS (set in the
     # child env above) — belt and braces, because initscr() may run before we get here.
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    def read_until_quiet(quiet: float = 0.5, cap: float = 90.0,
-                         first_wait: float = 60.0) -> bytes:
-        """Read until the program stops drawing for `quiet` seconds.
-
-        `first_wait` is generous on purpose: before the first byte appears, `--demo`
-        builds a sandbox of 27 git repos, which takes seconds. Giving up after
-        `quiet` there captured an empty screen."""
-        got = b""
-        start = time.time()
-        last = None
-        while time.time() - start < cap:
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if r:
-                try:
-                    chunk = os.read(fd, 65536)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                got += chunk
-                last = time.time()
-                continue
-            if last is None:
-                if time.time() - start > first_wait:
-                    break                            # nothing ever came
-                continue
-            if time.time() - last >= quiet:
-                break                                # drawing has settled
-        return got
-
     # Phase 1: let it draw the first screen. Phase 2: type, let it redraw. Doing this
     # explicitly (instead of "send keys whenever select is idle") is what makes the
     # capture reliable — the earlier version raced the drawing and caught a blank screen.
     buf = b""
     try:
-        buf = read_until_quiet(quiet=settle)
-        for chunk in _split_keys(keys):
+        buf = _read_pty_until(fd, quiet=settle, marker=ready_marker)
+        for index, chunk in enumerate(_split_keys(keys)):
             os.write(fd, chunk)
-            buf += read_until_quiet(quiet=settle)
+            marker = (key_markers or {}).get(index)
+            buf += _read_pty_until(fd, quiet=settle, marker=marker)
     finally:
         try:
             os.write(fd, b"q")                      # quit the TUI
@@ -321,12 +344,15 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
 
 
 def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8,
-                  cols: int = COLS, rows: int = ROWS) -> list:
+                  cols: int = COLS, rows: int = ROWS,
+                  ready_marker: bytes | None = None,
+                  key_markers: dict[int, bytes] | None = None) -> list:
     """Render inside one owned TMPDIR and clean exactly that directory in all cases."""
     # Keep the securely created unique path short enough that the complete demo
     # root and status summary both fit into the captured header before _tidy().
     with tempfile.TemporaryDirectory(prefix="gmfs-", dir="/tmp") as owned_tmp:
-        return _render_in_pty(args, keys, settle, owned_tmp, cols, rows)
+        return _render_in_pty(args, keys, settle, owned_tmp, cols, rows,
+                              ready_marker, key_markers)
 
 
 def _set_line(row: list, text: str) -> None:
@@ -431,6 +457,14 @@ def to_svg(grid: list, title: str) -> str:
 # leased push line would be cut off mid-hash at the right edge.
 ACTIONS = DOWN + DOWN + b"Uy" + RIGHT + RIGHT + UP + b"Ly"
 
+# A quiet pty does not prove that the two confirmed Git actions are done. Wait for
+# their stable command-log lines before sending another key or terminating the child.
+# The indexes refer to the individual keypresses returned by _split_keys(ACTIONS).
+ACTION_MARKERS = {
+    3: b"git stash pop",
+    8: b"git merge --ff-only --",
+}
+
 # Die Demo-Sandbox hat mehr Repos als `compact_from`, startet also kompakt. Für das
 # Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein. Die
 # Höhe je Bild ist bewusst knapp gewählt: das Fenster soll gefüllt aussehen, nicht
@@ -460,7 +494,10 @@ def main() -> int:
     rc = 0
     for name, lang, extra, keys, title, cols, rows in SCREENS:
         grid = render_in_pty(["--demo", "--lang", lang] + extra, keys=keys,
-                             cols=cols, rows=rows)
+                             cols=cols, rows=rows,
+                             ready_marker=(b"27 repos" if lang == "en"
+                                           else b"27 Repos"),
+                             key_markers=ACTION_MARKERS)
         _tidy(grid)
         svg = to_svg(_trim(grid), title)
         if len([1 for row in grid for c in row if c.ch.strip()]) < 50:

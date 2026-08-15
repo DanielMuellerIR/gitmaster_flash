@@ -3548,9 +3548,12 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         module, source = self._make_screens_module()
         owned = []
 
-        def fake_render(args, keys, settle, tmpdir, cols, rows):
+        def fake_render(args, keys, settle, tmpdir, cols, rows,
+                        ready_marker, key_markers):
             self.assertEqual(settle, 0.123)
             self.assertTrue(Path(tmpdir).is_dir())
+            self.assertIsNone(ready_marker)
+            self.assertIsNone(key_markers)
             owned.append(Path(tmpdir))
             return []
 
@@ -3559,6 +3562,42 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertEqual(len(owned), 1)
         self.assertFalse(owned[0].exists())
         self.assertNotIn('glob("gmf-demo-', source.read_text())
+
+    def test_pty_reader_waits_for_marker_across_a_quiet_period(self):
+        """Ausgaberuhe darf eine noch laufende, stille Aktion nicht beenden."""
+        module, _ = self._make_screens_module()
+        read_fd, write_fd = os.pipe()
+
+        def delayed_finish():
+            try:
+                os.write(write_fd, b"first draw")
+                time.sleep(0.08)  # deutlich laenger als das Ruhefenster unten
+                os.write(write_fd, b"action finished")
+            finally:
+                os.close(write_fd)
+
+        writer = threading.Thread(target=delayed_finish)
+        writer.start()
+        try:
+            output = module._read_pty_until(
+                read_fd, quiet=0.01, cap=1.0, first_wait=0.2,
+                marker=b"action finished",
+            )
+        finally:
+            os.close(read_fd)
+            writer.join()
+
+        self.assertIn(b"action finished", output)
+
+    def test_pty_reader_does_not_hide_unexpected_read_errors(self):
+        """Nur das fuer ein beendetes PTY uebliche EIO darf wie EOF gelten."""
+        module, _ = self._make_screens_module()
+        read_error = OSError(9, "bad file descriptor")
+        with mock.patch.object(module.select, "select",
+                               return_value=([123], [], [])), \
+                mock.patch.object(module.os, "read", side_effect=read_error):
+            with self.assertRaisesRegex(OSError, "bad file descriptor"):
+                module._read_pty_until(123, cap=0.1, first_wait=0.1)
 
     def test_readme_screens_exist_in_both_languages(self):
         module, _ = self._make_screens_module()
