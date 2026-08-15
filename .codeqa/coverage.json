@@ -6,7 +6,7 @@
     "token_budget": 1500000,
     "status": "active",
     "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 453001
+    "tokens_spent": 462328
   },
   "campaign_history": [],
   "scope": {
@@ -35,17 +35,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T14:30:31+02:00",
-        "observed_head": "87474360f7fd8cef51f8f545d03a744d1cb4339f",
-        "content_sha256": "27acffe9ffcec7e0463064bfa98290e51ef8acc3b45702947cbe74747162d7e0",
+        "completed_at": "2026-08-15T14:48:30+02:00",
+        "observed_head": "d1c2e7b7374b57ab70c7fc0ecde33b235aea4cbf",
+        "content_sha256": "b90a3f31da2397858a68056f4c66c700e741202fa187842fc13f897fe9c6cded",
         "file_count": 2,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Destruktive Datei-, Stash-, Remote- und Branch-Aktionen an die bestaetigte Vorschau gebunden; vollstaendige Remote-Konfiguration wiederherstellbar; gemischte Fetch-Fehler je Remote klassifiziert; unerwartete HEAD-Lesefehler brechen geschlossen ab.",
+        "review": "delta-plus-boundaries",
+        "outcome": "reviewed-clean",
+        "summary": "Delta seit dem Vollreview besteht ausschliesslich aus dem vorgeschriebenen Versionssprung 0.18.4 auf 0.18.5; Ableitungen in Versions-CLI, Listen-Kopfzeile und JSON-Grenze geprueft, keine weiteren Aenderungen oder Funde.",
         "tests": [
-          "python3 -m unittest discover -s tests: 240 tests passed",
-          "python3 docs/make-screens.py --check: passed",
-          "python3 -m compileall -q gitmaster_flash.py tests docs/make-screens.py: passed"
+          "python3 -m unittest tests.test_gitmaster_flash.VersionInOutputTests.test_version_flag tests.test_gitmaster_flash.VersionInOutputTests.test_list_kopfzeile_nennt_version tests.test_gitmaster_flash.VersionInOutputTests.test_json_traegt_version_und_root (3 Tests, OK); python3 docs/make-screens.py --check (OK)"
         ]
       }
     },
