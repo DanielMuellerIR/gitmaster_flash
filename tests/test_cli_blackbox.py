@@ -168,6 +168,11 @@ exit "$rc"
         self.assertTrue(repo["error"])
         self.assertEqual(repo["remote_state"], "error")
         self.assertEqual([remote["name"] for remote in repo["remotes"]], ["origin"])
+        remote = repo["remotes"][0]
+        self.assertTrue(remote["fetch_failed"])
+        self.assertEqual(remote["fetch_outcome"], "unknown")
+        self.assertTrue(remote["fetch_error_long"])
+        self.assertTrue(remote["fetch_error_detail"])
         self.assertNotIn("remote 'origin' only", result.stdout)
         self.assertNotIn("Cannot reach", result.stderr)
 

@@ -101,7 +101,8 @@ keystrokes. Expanding files and stashes stays in the detail view.
   remote first, other remotes next, and GitHub at the far right.
 - **↑n / ↓n next to a remote** — commits ahead of / behind that exact remote for
   the current branch, based on the last fetch. `R` refreshes every remote in every
-  repository with `git fetch --all` without changing a working tree.
+  repository with `git fetch --all` without changing a working tree. If several
+  remotes fail for different reasons, each keeps its own diagnosis and Git error.
 - **M / D / U** — number of modified, deleted and untracked files.
 - **⚑Stash:n** — stashes that exist in the repo (easy to forget, so it is shown).
 - **⚠conflict:n** — unmerged files, e.g. after a `git stash pop` that did not
@@ -204,6 +205,10 @@ What `Z` does depends on the state of the file:
   would stay on its commit — resetting means working inside the submodule
   itself (e.g. `git submodule update`).
 
+Immediately before the confirmed `git restore`, gmf reads the Porcelain status,
+index entry, HEAD entry and raw file content again. If any of them changed since
+the preview, nothing is discarded and the file must be reviewed again.
+
 From two changed tracked files on, the same dialog offers a second route with
 `A`: **all** changes in the repository go into a stash instead of into nothing,
 after a confirmation of their own. That is the widening for the case where you
@@ -254,7 +259,9 @@ loses its upstream setting. Commits, files, branches and stashes stay untouched,
 and nothing is sent to or changed on the server. The dialog shows both the exact
 command it will run and the commands that restore the local configuration —
 including extra fetch/push URLs and the upstream link of every branch that
-tracked the remote, because `git remote remove` deletes those too. (The
+tracked the remote, plus custom remote settings such as refspecs, `tagOpt` and
+`mirror`, because `git remote remove` deletes those too. The configuration is
+checked again after confirmation; a changed preview is never removed. (The
 remote-tracking branches themselves come back with the next fetch.)
 
 Useful together: repositories deleted on GitHub keep their now-dead remote
@@ -271,7 +278,9 @@ with the reason and the terminal command that would force it. The confirmation
 shows both the exact delete command and the commands that restore the branch —
 `git branch <name> <oid>` plus, if an upstream was set, the
 `git branch --set-upstream-to …` line, because `git branch -d` deletes that
-link as well.
+link as well. The branch OID and metadata are checked again after confirmation;
+if the branch moved, it stays in place. The same state binding protects the
+latest stash before `U` applies it or `D` permanently drops it.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ

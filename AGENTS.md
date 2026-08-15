@@ -132,6 +132,12 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   einer Seite `fetch_failed` steht — sein Tracking-Ref ist dort veraltet. Und
   `error` wird nur auf DER Seite geleert, deren Fetch scheiterte; sonst versteckt
   ein Fetch-Problem hier einen echten lokalen Schaden drüben.
+- Seit 0.18.4 wird ein fehlgeschlagenes `fetch --all` nicht mehr aus dem
+  kombinierten stderr pauschal klassifiziert. `diagnose_failed_fetches()` prüft
+  nur die von Git genannten Kandidaten einzeln nach und speichert Ursache,
+  Erklärung und redigierten Git-Beleg am jeweiligen `RemoteStatus`. Ein beim
+  Nachprüfen erfolgreicher transienter Fehler gilt als geheilt; ein anderes,
+  erfolgreiches Remote bekommt weder rotes Badge noch fremde Diagnose.
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
   acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
   `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
@@ -148,7 +154,12 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   nirgends mehr steht. An seiner Stelle sagt der Dialog ausdrücklich, dass es
   kein Zurück gibt, und nennt den Umfang der Änderung in Zeilen — daran
   unterscheidet sich eine Datei mit echter Arbeit von einer, die nur ein
-  Programm beim Start angefasst hat (Entscheidung 2026-08-03).
+  Programm beim Start angefasst hat (Entscheidung 2026-08-03). Seit 0.18.4
+  werden Remote-Konfiguration, Branch und neuester Stash nach der Bestätigung
+  erneut gegen die Vorschau geprüft; eine Abweichung bricht die Aktion ab.
+  `remote_restore_commands()` erhält außerdem alle gelesenen
+  `remote.<name>.*`-Werte (auch eigene Refspecs, `tagOpt`, `mirror`) und nicht
+  nur URLs und Upstreams.
 - `Z` in der Änderungsansicht ist der einzige Weg in gmf, der eine nicht
   committete Änderung wirklich wegwirft. Der Zuschnitt ist eine Entscheidung und
   keine Zwischenstufe: einzelne Datei hart (`plan_discard()`), alle Dateien
@@ -176,6 +187,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   ihrer beiden Git-Abfragen unerwartet, bricht sie geschlossen ab
   (`GitReadError`), statt „keine Submodule“ zu behaupten. Geduldet wird nur der
   belegte Fall ohne ersten Commit, in dem `git ls-tree HEAD` scheitern MUSS.
+  Seit 0.18.4 bindet `discard_snapshot()` die Vorschau zusätzlich an
+  Porcelain-Status, Indexeintrag, HEAD-Eintrag und rohen Arbeitsbaum-Inhalt.
+  Unmittelbar vor `git restore` wird derselbe Snapshot erneut gelesen; stimmt er
+  nicht mehr, wird nichts verworfen.
   Fürs Verwerfen gibt es bewusst keinen CLI-Schalter — die nicht-interaktive
   Schnittstelle bleibt lesend.
 - „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
@@ -205,22 +220,8 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
       im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
       Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
-- [ ] Der Verwerfen-Dialog liest Diff und Zeilenzahl VOR der Bestätigung
-      (`action_discard_file`), führt danach aber `run_git_logged(*plan.args)` aus,
-      ohne den Stand noch einmal mit der Vorschau abzugleichen. Ändert sich die
-      Datei währenddessen, verwirft gmf etwas anderes als gezeigt. Andere
-      Aktionen prüfen an dieser Stelle erneut (Code-Review 2026-08-05).
-- [ ] `remote_restore_commands()` baut nur `remote add`, `set-url` und
-      `--set-upstream-to`. Niemand liest die übrige `remote.<name>.*`-Config
-      (eigene Refspecs, `tagOpt`, `mirror`); nach dem "Rückgängig" steht ein so
-      eingerichtetes Remote anders da als vorher (Code-Review 2026-08-05).
 - [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
       die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
-- [ ] `fetch --all` klassifiziert bei mehreren gescheiterten Remotes nur den
-      kombinierten stderr — bei gemischten Ursachen (Login fehlt an einem Remote,
-      Repo weg an einem anderen) ist mindestens eine Diagnose falsch. Remotes
-      einzeln fetchen bzw. stderr pro Remote zuordnen und Ursache/Detail je
-      `RemoteStatus` speichern (Code-Review 2026-08-02).
 - [ ] `docs/make-screens.py` wertet Ruhe auf dem PTY als „fertig“: läuft nach dem
       letzten Tastendruck noch eine stille Git-Aktion, kann auf langsamen Maschinen
       ein Zwischenzustand aufgenommen werden und `--check` wird timingabhängig.

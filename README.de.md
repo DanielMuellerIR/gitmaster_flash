@@ -108,6 +108,8 @@ vorbehalten.
 - **↑n / ↓n neben einem Remote** — Commits vor/zurück gegenüber genau diesem
   Remote für den aktuellen Branch, auf Basis des letzten Fetch. `R` aktualisiert
   alle Remotes aller Repos mit `git fetch --all`, ohne einen Working Tree zu ändern.
+  Scheitern mehrere Remotes aus verschiedenen Gründen, behält jedes seine eigene
+  Diagnose samt Git-Fehler.
 - **M / D / U** — Anzahl geänderter, gelöschter und unversionierter Dateien.
 - **⚑Stash:n** — vorhandene Stashes. Die übersieht man sonst gern.
 - **⚠conflict:n** — ungemergte Dateien, etwa nach einem `git stash pop`, der
@@ -217,6 +219,11 @@ Was `Z` tut, hängt vom Zustand der Datei ab:
   zurücksetzen heißt hier, im Submodul selbst zu arbeiten (z.B.
   `git submodule update`).
 
+Unmittelbar vor dem bestätigten `git restore` liest gmf Porcelain-Status,
+Indexeintrag, HEAD-Eintrag und rohen Dateiinhalt erneut. Hat sich davon seit der
+Vorschau etwas geändert, wird nichts verworfen und die Datei muss erneut geprüft
+werden.
+
 Ab zwei geänderten verfolgten Dateien bietet derselbe Dialog mit `A` einen
 zweiten Weg an: **alle** Änderungen des Repos wandern in einen Stash statt ins
 Nichts, nach eigener Bestätigung. Das ist die Ausweitung für den Fall, dass man
@@ -268,7 +275,10 @@ Branches und Stashes bleiben unberührt, auf dem Server ändert sich nichts. Der
 Dialog zeigt sowohl den Befehl, der ausgeführt wird, als auch die Befehle, die
 die lokale Konfiguration wiederherstellen — einschließlich zusätzlicher
 Fetch-/Push-URLs und der Upstream-Verknüpfung jedes Branches, der das Remote
-verfolgte, denn `git remote remove` löscht auch diese mit. (Die
+verfolgte, außerdem eigener Remote-Einstellungen wie Refspecs, `tagOpt` und
+`mirror`, denn `git remote remove` löscht auch diese mit. Nach der Bestätigung
+wird die Konfiguration erneut geprüft; eine geänderte Vorschau wird nicht
+entfernt. (Die
 Remote-Tracking-Branches selbst holt der nächste Fetch zurück.)
 
 Zusammen nützlich: Auf GitHub gelöschte Repos behalten lokal ihr totes Remote.
@@ -286,7 +296,10 @@ und nennt den Terminal-Befehl, der es erzwingen würde. Die Rückfrage zeigt sow
 den genauen Löschbefehl als auch die Befehle zum Wiederherstellen des Branches —
 `git branch <Name> <OID>` und, falls ein Upstream gesetzt war, die Zeile
 `git branch --set-upstream-to …`, denn `git branch -d` löscht auch diese
-Verknüpfung mit.
+Verknüpfung mit. Branch-OID und Metadaten werden nach der Bestätigung erneut
+geprüft; hat sich der Branch bewegt, bleibt er bestehen. Dieselbe Zustandsbindung
+schützt den neuesten Stash, bevor `U` ihn anwendet oder `D` ihn endgültig
+verwirft.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
 teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie

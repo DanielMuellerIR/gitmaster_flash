@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.3"
+__version__ = "0.18.4"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -274,6 +274,9 @@ TR = {
     "stash_dropped": {"en": "Stash dropped in {rel}.", "de": "Stash verworfen in {rel}."},
     "stash_drop_failed": {"en": "stash drop failed: {e}",
                           "de": "stash drop fehlgeschlagen: {e}"},
+    "stash_changed": {
+        "en": "The latest stash changed after the preview — nothing was applied or dropped.",
+        "de": "Der neueste Stash hat sich nach der Vorschau geändert — nichts wurde angewendet oder verworfen."},
     # Pager
     "pager_footer": {"en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
                      "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}"},
@@ -513,6 +516,9 @@ TR = {
                              "de": "Löschen von {b} fehlgeschlagen: {e}"},
     "branch_delete_cancelled": {"en": "No branch was deleted.",
                                 "de": "Es wurde kein Branch gelöscht."},
+    "branch_changed": {
+        "en": "The branch changed after the preview — nothing was deleted.",
+        "de": "Der Branch hat sich nach der Vorschau geändert — nichts wurde gelöscht."},
     # Remote prüfen (T)
     "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
     "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
@@ -610,6 +616,9 @@ TR = {
                              "de": "Nicht mehr vorgemerkt, Datei bleibt liegen: {p}"},
     "discard_failed": {"en": "Discarding failed: {e}",
                        "de": "Verwerfen fehlgeschlagen: {e}"},
+    "discard_changed": {
+        "en": "The file changed after the preview — nothing was discarded. Review it again.",
+        "de": "Die Datei hat sich nach der Vorschau geändert — nichts wurde verworfen. Erneut prüfen."},
     "discard_refused_untracked": {
         "en": "Untracked file — it was never in Git, so there is no earlier state to "
               "go back to. Delete it yourself or put it in .gitignore.",
@@ -693,6 +702,9 @@ TR = {
     "remove_failed": {"en": "Removing {r} failed (Git exit code {code}).",
                       "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code})."},
     "remove_cancelled": {"en": "Nothing was removed.", "de": "Es wurde nichts entfernt."},
+    "remove_changed": {
+        "en": "The remote configuration changed after the preview — nothing was removed.",
+        "de": "Die Remote-Konfiguration hat sich nach der Vorschau geändert — nichts wurde entfernt."},
     # Befehlsprotokoll
     "cmdlog_title": {"en": "Commands this session ran",
                      "de": "In dieser Sitzung ausgeführte Befehle"},
@@ -832,6 +844,9 @@ class RemoteStatus:
     target_mismatch: bool = False
     multiple_pushurls: bool = False
     fetch_failed: bool = False
+    fetch_outcome: str = ""
+    fetch_error_long: str = ""
+    fetch_error_detail: str = ""
 
     @property
     def transfer_safe(self) -> bool:
@@ -918,6 +933,10 @@ class RemoteConfig:
     push_urls: list[str]
     fetch_targets: list[RemoteTarget]
     push_targets: list[RemoteTarget]
+    # Rohwerte aus remote.<name>.*. Sie sind für eine vollständige lokale
+    # Wiederherstellung nach `git remote remove` nötig: Der Befehl löscht neben
+    # URLs auch eigene Refspecs, tagOpt, mirror und weitere Remote-Optionen.
+    settings: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def transfer_safe(self) -> bool:
@@ -1023,6 +1042,19 @@ class DiscardPlan(NamedTuple):
     args: tuple[str, ...] = ()
     kind: str = ""
     refused: str = ""
+
+
+class DiscardSnapshot(NamedTuple):
+    """Der exakt geprüfte Zustand vor einem harten Datei-Verwerfen.
+
+    ``fingerprint`` bindet den sichtbaren Status an Index, HEAD und den rohen
+    Arbeitsbaum-Inhalt. Damit kann der Dialog nach der Bestätigung feststellen,
+    ob er noch dieselbe Änderung verwirft, die vorher geprüft wurde.
+    """
+
+    plan: DiscardPlan
+    diff_text: str
+    fingerprint: str
 
 
 def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
@@ -1463,6 +1495,19 @@ def stash_preview(repo: Path, timeout: int) -> tuple[bool, str]:
     return True, r.stdout
 
 
+def latest_stash(repo: Path, timeout: int) -> tuple[str, str] | None:
+    """OID und sichtbare Bezeichnung des aktuellen ``stash@{0}`` lesen."""
+    result = _required_git(
+        repo, "stash", "list", "-1", "--format=%H%x00%gd %gs", timeout=timeout)
+    line = result.stdout.rstrip("\n")
+    if not line:
+        return None
+    oid, separator, label = line.partition("\0")
+    if not separator or not oid or not label:
+        raise GitReadError("git stash list returned malformed output")
+    return oid, label
+
+
 # Git darf uns nie nach Zugangsdaten fragen. Seinen Prompt ("Username for
 # 'https://github.com':") schreibt Git nämlich direkt auf das Terminal (/dev/tty)
 # und nicht auf die von uns abgefangenen Kanäle: das zerlegt das curses-Bild und
@@ -1709,6 +1754,63 @@ def failed_fetch_remotes(result: subprocess.CompletedProcess) -> list[str]:
     return names
 
 
+def diagnose_failed_fetches(
+        repo: Path, configs: dict[str, RemoteConfig],
+        combined: subprocess.CompletedProcess, cfg: dict,
+) -> dict[str, tuple[str, str, str]]:
+    """Einen fehlgeschlagenen ``fetch --all`` je Remote sauber zuordnen.
+
+    Git nennt in seiner Sammelausgabe meist die gescheiterten Remote-Namen, aber
+    vermischt deren stderr. Nur diese Kandidaten werden einzeln erneut gefetcht;
+    so bleiben Ursache und Beleg beim richtigen Remote. Fehlt die Namenszeile
+    (unter anderem bei genau einem Remote), werden alle konfigurierten Remotes
+    geprüft. Ein inzwischen erfolgreicher Einzel-Fetch gilt als geheilt.
+    """
+    candidates = set(failed_fetch_remotes(combined)) or set(configs)
+    failures: dict[str, tuple[str, str, str]] = {}
+    for name in sorted(candidates):
+        if name not in configs:
+            # Eine inkonsistente Sammelzeile darf keinen erfundenen Remote in
+            # Status und JSON einschleusen. Die Config ist die Quelle der Namen.
+            continue
+        try:
+            result = run_git_logged(
+                repo, "fetch", "--prune", "--quiet", "--jobs=1", "--", name,
+                timeout=cfg["fetch_timeout"])
+        except subprocess.TimeoutExpired:
+            outcome, detail = "timeout", ""
+        else:
+            if result.returncode == 0:
+                continue
+            outcome = classify_remote_check(result)
+            detail = last_error_line(result)
+        failures[name] = (
+            outcome,
+            remote_check_message(name, outcome, 0, detail, cfg["fetch_timeout"]),
+            detail,
+        )
+    return failures
+
+
+def summarize_fetch_failures(st: RepoStatus) -> None:
+    """Remote-spezifische Fetch-Fehler knapp auf den Repo-Status projizieren."""
+    failed = [remote for remote in st.remotes if remote.fetch_failed]
+    if not failed:
+        return
+    st.error = "; ".join(remote_failure_short(
+        remote.name, remote.fetch_outcome or "unknown") for remote in failed)
+    st.error_long = " ".join(
+        remote.fetch_error_long or remote_check_message(
+            remote.name, remote.fetch_outcome or "unknown", 0,
+            remote.fetch_error_detail, 0)
+        for remote in failed)
+    st.error_detail = " | ".join(
+        f"{remote.name}: {remote.fetch_error_detail}"
+        for remote in failed if remote.fetch_error_detail)
+    st.remote_state = "error"
+    st.fetch_error = True
+
+
 def _kill_process_group(proc: subprocess.Popen) -> None:
     """Nach einem Timeout nicht nur git, sondern alles beenden, was es gestartet hat.
 
@@ -1924,6 +2026,15 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
     names_r = _required_git(repo, "remote", timeout=t_)
     result = {}
     for name in [line for line in names_r.stdout.splitlines() if line]:
+        raw_r = _required_git(
+            repo, "config", "--null", "--get-regexp",
+            r"^remote\.%s\." % re.escape(name), timeout=t_)
+        prefix = f"remote.{name}."
+        settings = []
+        for record in raw_r.stdout.split("\0"):
+            key, separator, value = record.partition("\n")
+            if separator and key.lower().startswith(prefix.lower()):
+                settings.append((key[len(prefix):], value))
         fetch_r = _required_git(repo, "remote", "get-url", "--all", "--", name,
                                 timeout=t_)
         push_r = _required_git(repo, "remote", "get-url", "--push", "--all", "--", name,
@@ -1936,6 +2047,7 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
             name, fetch_urls, push_urls,
             [canonical_remote_target(url, repo) for url in fetch_urls],
             [canonical_remote_target(url, repo) for url in push_urls],
+            settings,
         )
     return result
 
@@ -1962,19 +2074,21 @@ def is_github_url(url: str) -> bool:
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
                             configs: dict[str, RemoteConfig] | None = None,
-                            fetch_failed: set[str] | None = None) -> list[RemoteStatus]:
+                            fetch_failures: dict[str, tuple[str, str, str]] | None = None
+                            ) -> list[RemoteStatus]:
     """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt.
 
-    `fetch_failed` sind die Namen der Remotes, deren Fetch gerade scheiterte; sie
-    werden markiert, damit die Zeile sie rot zeigt statt einen veralteten Stand
-    als aktuell auszugeben.
+    `fetch_failures` ordnet jedem gerade gescheiterten Remote Ursache, erklärenden
+    Satz und redigierten Git-Beleg zu. Dadurch kann ein gemischter `fetch --all`-
+    Fehler nicht mehr allen Remotes dieselbe falsche Diagnose geben.
     """
     states: list[RemoteStatus] = []
     configs = configs if configs is not None else read_remote_configs(repo, cfg)
-    failed = fetch_failed or set()
+    failures = fetch_failures or {}
     for name, remote in configs.items():
         targets = remote.fetch_targets + remote.push_targets
         public_classes = {target.is_github for target in targets}
+        failure = failures.get(name, ("", "", ""))
         state = RemoteStatus(
             name=name,
             public=True in public_classes,
@@ -1985,7 +2099,10 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
             push_fingerprints=[target.fingerprint for target in remote.push_targets],
             target_mismatch=not remote.transfer_safe,
             multiple_pushurls=len(remote.push_targets) != 1,
-            fetch_failed=name in failed,
+            fetch_failed=name in failures,
+            fetch_outcome=failure[0],
+            fetch_error_long=failure[1],
+            fetch_error_detail=failure[2],
         )
         if branch not in ("?", "(detached)"):
             ref = f"refs/remotes/{name}/{branch}"
@@ -2007,7 +2124,7 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     return states
 
 
-def read_branches(repo: Path, cfg: dict) -> list[BranchInfo]:
+def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[BranchInfo]:
     """Alle lokalen Branches mit Stand, Upstream und Merge-Zustand lesen.
 
     Zwei Git-Aufrufe reichen: einer für die Daten, einer für die Frage, welche
@@ -2018,9 +2135,13 @@ def read_branches(repo: Path, cfg: dict) -> list[BranchInfo]:
               "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)")
     r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_)
     if r.returncode != 0:
+        if strict:
+            raise GitReadError("git branch failed (exit %d)" % r.returncode)
         return []
     merged_r = run_git(repo, "branch", "--merged", "HEAD",
                        "--format=%(refname:short)", timeout=t_)
+    if merged_r.returncode != 0 and strict and repo_has_head(repo, t_):
+        raise GitReadError("git branch --merged failed (exit %d)" % merged_r.returncode)
     merged = {line.strip() for line in merged_r.stdout.splitlines() if line.strip()}
     branches = []
     for line in r.stdout.splitlines():
@@ -2028,6 +2149,8 @@ def read_branches(repo: Path, cfg: dict) -> list[BranchInfo]:
             continue
         parts = line.split("\0")
         if len(parts) < 7:
+            if strict:
+                raise GitReadError("git branch returned malformed output")
             continue
         head, name, upstream, track, oid, date, subject = parts[:7]
         # `upstream:track` ist dank LC_ALL=C stabil englisch: "[ahead 2, behind 1]",
@@ -2058,16 +2181,41 @@ def remote_restore_commands(remote: RemoteConfig,
     Upstream-Zeile.)
     """
     name = remote.name
+    # `get-url` liefert die effektive, durch url.*.insteadOf expandierte Adresse.
+    # Für die Wiederherstellung ist dagegen der rohe Config-Wert maßgeblich.
+    raw_fetch_urls = [value for key, value in remote.settings
+                      if key.lower() == "url"] or remote.fetch_urls
+    raw_push_urls = [value for key, value in remote.settings
+                     if key.lower() == "pushurl"] or remote.push_urls
     commands = [format_git_command(("remote", "add", name,
-                                    display_remote_url(remote.fetch_urls[0])))]
-    for url in remote.fetch_urls[1:]:
+                                    display_remote_url(raw_fetch_urls[0])))]
+    for url in raw_fetch_urls[1:]:
         commands.append(format_git_command(
             ("remote", "set-url", "--add", name, display_remote_url(url))))
-    if remote.push_urls != remote.fetch_urls:
-        for index, url in enumerate(remote.push_urls):
+    if raw_push_urls != raw_fetch_urls:
+        for index, url in enumerate(raw_push_urls):
             option = ("--push",) if index == 0 else ("--add", "--push")
             commands.append(format_git_command(
                 ("remote", "set-url", *option, name, display_remote_url(url))))
+
+    # `git remote add` erfindet eine Standard-Refspec. Die ursprünglichen
+    # remote.<name>.*-Werte ersetzen sie vollständig und stellen auch tagOpt,
+    # mirror, promisor usw. wieder her. URL/pushurl wurden oben separat gesetzt,
+    # weil Git dafür die verständlicheren Remote-Befehle anbietet.
+    extra_settings: dict[str, list[tuple[str, str]]] = {}
+    for key, value in remote.settings:
+        if key.lower() in ("url", "pushurl"):
+            continue
+        extra_settings.setdefault(key.lower(), []).append((key, value))
+    if remote.settings and "fetch" not in extra_settings:
+        commands.append(format_git_command(
+            ("config", "--unset-all", f"remote.{name}.fetch")))
+    for entries in extra_settings.values():
+        for index, (key, value) in enumerate(entries):
+            option = "--replace-all" if index == 0 else "--add"
+            shown = display_remote_url(value) if "://" in value else terminal_text(value)
+            commands.append(format_git_command(
+                ("config", option, f"remote.{name}.{key}", shown)))
     tracking = [b for b in branches if b.upstream.startswith(name + "/")]
     if tracking:
         # `git remote remove` hat auch refs/remotes/<name>/* gelöscht, und
@@ -2101,8 +2249,13 @@ def repo_has_head(repo: Path, timeout: int) -> bool:
     Vor dem allerersten Commit existiert HEAD nur als Verweis ins Leere. Git
     kann dort weder etwas stashen noch auf einen früheren Stand zurückgehen.
     """
-    return run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
-                   timeout=timeout).returncode == 0
+    result = run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
+                     timeout=timeout)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:  # belegter normaler Fall: unborn HEAD
+        return False
+    raise GitReadError("git rev-parse HEAD failed (exit %d)" % result.returncode)
 
 
 def count_changed_lines(diff_text: str) -> int:
@@ -2158,6 +2311,94 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
     if r.returncode == 0 or (r.returncode == 1 and (r.stdout or not r.stderr)):
         return True, r.stdout
     return False, (r.stderr or "").strip()[:240]
+
+
+def _worktree_file_fingerprint(path: Path) -> str:
+    """Rohen Dateiinhalt für eine spätere Destruktiv-Prüfung festhalten.
+
+    Reguläre Dateien werden ohne Symlink-Folgen gestreamt; bei Symlinks gehört
+    das Linkziel selbst zum Zustand. Fehlende Dateien und andere Dateitypen
+    bekommen ebenfalls eine eindeutige Kennung. Metadaten wie die mtime zählen
+    bewusst nicht: Wenn Inhalt und Git-relevanter Modus gleich sind, würde
+    ``git restore`` auch nichts anderes verwerfen.
+    """
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    kind = stat.S_IFMT(before.st_mode)
+    executable = bool(before.st_mode & 0o111)
+    digest = hashlib.sha256()
+    if stat.S_ISLNK(before.st_mode):
+        try:
+            target = os.readlink(path)
+        except OSError as exc:
+            raise CommitSafetyError(f"cannot read selected symlink: {exc}") from exc
+        digest.update(os.fsencode(target))
+    elif stat.S_ISREG(before.st_mode):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise CommitSafetyError(f"cannot read selected file: {exc}") from exc
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise CommitSafetyError("selected file changed while it was read")
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
+            raise CommitSafetyError("selected file changed while it was read")
+    else:
+        digest.update(str((before.st_rdev, before.st_size)).encode("ascii"))
+    return f"{kind}:{int(executable)}:{digest.hexdigest()}"
+
+
+def discard_snapshot(repo: Path, entry: ChangedFile, timeout: int) -> DiscardSnapshot:
+    """Den Zustand erfassen, den ein Datei-Verwerfen tatsächlich verändern würde.
+
+    Die TUI hält einen zuvor gescannten ``ChangedFile``. Vor der Vorschau und
+    unmittelbar nach der Bestätigung wird dieser Snapshot neu gebaut. Schon eine
+    inhaltliche Änderung mit unverändertem Porcelain-Code (etwa weiterhin `` M``)
+    ändert den Fingerprint und stoppt die destruktive Aktion.
+    """
+    status_r = _required_git(
+        repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        "--", entry.path, timeout=timeout)
+    _, _, _, _, current_files = parse_porcelain(status_r.stdout)
+    current_files = mark_gitlinks(repo, current_files, timeout)
+    current = next((item for item in current_files if item.path == entry.path), None)
+    if current != entry:
+        raise CommitSafetyError("selected file changed after the repository scan")
+
+    has_head = repo_has_head(repo, timeout)
+    plan = plan_discard(current, has_head)
+    if plan.refused:
+        raise CommitSafetyError("selected file is no longer safe to discard")
+
+    index_r = _required_git(repo, "ls-files", "-s", "-z", "--", entry.path,
+                            timeout=timeout)
+    if has_head:
+        head_r = _required_git(repo, "ls-tree", "-z", "HEAD", "--", entry.path,
+                               timeout=timeout)
+    else:
+        head_r = subprocess.CompletedProcess([], 0, "", "")
+    diff_ok, diff_text = file_diff(repo, current.code, current.path, timeout)
+    if not diff_ok:
+        raise GitReadError(diff_text or "cannot read selected file diff")
+
+    digest = hashlib.sha256()
+    for value in (status_r.stdout, index_r.stdout, head_r.stdout,
+                  _worktree_file_fingerprint(repo / entry.path)):
+        digest.update(value.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+    return DiscardSnapshot(plan, diff_text, digest.hexdigest())
 
 
 def display_remote_url(url: str) -> str:
@@ -2379,6 +2620,13 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             value = (t("info_delta", a=state.ahead, b=state.behind)
                      if state.branch_exists else t("info_branch_missing_value"))
             rows.append((t("info_branch_label", b=branch), value))
+        if state and state.fetch_failed:
+            rows.append((t("info_last_error"), terminal_text(
+                state.fetch_error_long
+                or remote_failure_short(state.name, state.fetch_outcome or "unknown"))))
+            if state.fetch_error_detail:
+                rows.append((t("info_git_said"), terminal_text(
+                    state.fetch_error_detail)))
         specs.append(("remote", name, f"  {terminal_text(name)}{suffix}", rows))
 
     specs.extend(branch_block_specs(read_branches(st.path, cfg)))
@@ -2641,7 +2889,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         # Vergleich mit ALLEN Remotes (auf Basis des letzten fetch-Stands).
         configs = read_remote_configs(repo, cfg)
         st.remote = detect_sync_remote(repo, cfg, configs)
-        failed_remotes: set[str] = set()
+        fetch_failures: dict[str, tuple[str, str, str]] = {}
         if fetch:
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
@@ -2656,38 +2904,30 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                 fetched = run_git_logged(repo, "fetch", "--all", "--prune", "--quiet",
                                          "--jobs=1", timeout=cfg["fetch_timeout"])
             except subprocess.TimeoutExpired:
-                st.error = t("git_timeout")
-                st.remote_state = "error"
-                st.fetch_error = True
-                failed_remotes = set(configs)
+                for name in configs:
+                    fetch_failures[name] = (
+                        "timeout",
+                        remote_check_message(
+                            name, "timeout", 0, "", cfg["fetch_timeout"]),
+                        "",
+                    )
             else:
                 if fetched.returncode != 0:
-                    # Ein gescheiterter Fetch ist ein Problem EINZELNER Remotes (Repo
-                    # gelöscht, kein Netz, Login fehlt) — nicht des Repos. Deshalb die
-                    # betroffenen Namen merken und rot markieren. Bei nur einem Remote
-                    # nennt Git keinen Namen (es verhält sich dann wie ein einfaches
-                    # `fetch`), deshalb der Fallback auf alle konfigurierten.
-                    failed_remotes = set(failed_fetch_remotes(fetched)) or set(configs)
-                    names = ", ".join(sorted(failed_remotes)) or "--all"
-                    # Dieselbe Ursachenanalyse wie bei der T-Prüfung: die Zeile soll
-                    # sagen, was zu tun ist, statt jeden Fehler "Login" zu nennen.
-                    cause = classify_remote_check(fetched)
-                    st.error = remote_failure_short(names, cause)
-                    # Der ganze Satz und Gits eigener Wortlaut stehen auf der
-                    # Info-Seite; sie beweisen die Ursache auch auf fremden Rechnern.
-                    st.error_long = remote_check_message(
-                        names, cause, 0, last_error_line(fetched),
-                        cfg["fetch_timeout"])
-                    st.error_detail = last_error_line(fetched)
-                    st.remote_state = "error"
-                    st.fetch_error = True
+                    # Die Sammelausgabe vermischt Ursachen mehrerer Remotes. Nur
+                    # die gescheiterten Kandidaten einzeln nachprüfen, damit etwa
+                    # "Repo weg" und "kein Netz" nicht beide als Login-Fehler
+                    # erscheinen. Ein transient geheilter Kandidat fällt heraus.
+                    fetch_failures = diagnose_failed_fetches(
+                        repo, configs, fetched, cfg)
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
             # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
             configs = read_remote_configs(repo, cfg)
             st.remote = detect_sync_remote(repo, cfg, configs)
-        st.remotes = collect_remote_statuses(repo, st.branch, st.remote, cfg, configs,
-                                             fetch_failed=failed_remotes)
+        st.remotes = collect_remote_statuses(
+            repo, st.branch, st.remote, cfg, configs,
+            fetch_failures=fetch_failures)
+        summarize_fetch_failures(st)
         if st.remote is None:
             if not st.error and not detached:
                 st.remote_state = "no-remote"
@@ -2732,24 +2972,22 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
     Indexfehler wird vom frischen Lauf entweder erneut festgestellt oder er ist
     repariert.
     """
-    failed = {remote.name for remote in old.remotes
+    failed = {remote.name: remote for remote in old.remotes
               if remote.fetch_failed and remote.name != refetched}
-    carry_error = bool(old.error and old.fetch_error)
-    if refetched is not None and not failed:
-        # Der einzige bekannte Fetch-Fehler ist gerade bewiesen repariert.
-        carry_error = False
-    if not failed and not carry_error:
+    if not failed:
         return
     for remote in new.remotes:
-        if remote.name in failed:
+        previous = failed.get(remote.name)
+        if previous:
             remote.fetch_failed = True
-    if carry_error and not new.error:
-        new.error = old.error
-        new.error_long = old.error_long
-        new.error_detail = old.error_detail
-        new.fetch_error = True
-        if new.remote_state == "ok":
-            new.remote_state = "error"
+            remote.fetch_outcome = previous.fetch_outcome
+            remote.fetch_error_long = previous.fetch_error_long
+            remote.fetch_error_detail = previous.fetch_error_detail
+    if not new.error:
+        # Neu aus den tatsächlich verbleibenden Remotes zusammensetzen. Der alte
+        # Sammeltext könnte noch ein inzwischen erfolgreich refetchtes Remote
+        # nennen und wäre dann ebenso veraltet wie sein rotes Badge.
+        summarize_fetch_failures(new)
 
 
 def collect_all(root: Path, cfg: dict, fetch: bool = False,
@@ -2789,7 +3027,10 @@ def status_dict(st: RepoStatus) -> dict:
              "multiple_pushurls": r.multiple_pushurls,
              # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
              # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
-             "fetch_failed": r.fetch_failed}
+             "fetch_failed": r.fetch_failed,
+             "fetch_outcome": r.fetch_outcome,
+             "fetch_error_long": r.fetch_error_long,
+             "fetch_error_detail": r.fetch_error_detail}
             for r in st.remotes
         ],
         "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
@@ -3686,8 +3927,23 @@ class TUI:
         if st.conflicts:
             self.message = t("resolve_conflicts_first")
             return
+        try:
+            approved = latest_stash(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError):
+            approved = None
+        if approved is None or approved[1] != st.stashes[0]:
+            self.message = t("stash_changed")
+            return
         if not self.confirm(t("confirm_pop", rel=st.rel)):
             self.message = t("cancelled")
+            return
+        try:
+            current = latest_stash(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError):
+            current = None
+        if current != approved:
+            log_cancelled(st.path, ("stash", "pop", "stash@{0}"))
+            self.message = t("stash_changed")
             return
         r = run_git_logged(st.path, "stash", "pop", timeout=self.cfg["git_timeout"])
         new = self.refresh_one(st)
@@ -3721,8 +3977,23 @@ class TUI:
         if not st or not st.stashes:
             self.message = t("no_stash")
             return
+        try:
+            approved = latest_stash(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError):
+            approved = None
+        if approved is None or approved[1] != st.stashes[0]:
+            self.message = t("stash_changed")
+            return
         if not self.confirm(t("confirm_drop", rel=st.rel)):
             self.message = t("drop_cancelled")
+            return
+        try:
+            current = latest_stash(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError):
+            current = None
+        if current != approved:
+            log_cancelled(st.path, ("stash", "drop", "stash@{0}"))
+            self.message = t("stash_changed")
             return
         r = run_git_logged(st.path, "stash", "drop", "stash@{0}",
                            timeout=self.cfg["git_timeout"])
@@ -4060,10 +4331,18 @@ class TUI:
         `self.message`, warum nichts passiert ist: Eine Taste, die wortlos nichts
         tut, sieht aus wie ein kaputtes Programm.
         """
-        plan = plan_discard(entry, repo_has_head(st.path, self.cfg["git_timeout"]))
-        if plan.refused:
-            self.message = t("discard_refused_" + plan.refused)
+        # Für die Ablehnungsgründe ist der HEAD-Zustand irrelevant; den liest
+        # der konsistente Snapshot darunter zusammen mit Status und Index.
+        initial_plan = plan_discard(entry, has_head=True)
+        if initial_plan.refused:
+            self.message = t("discard_refused_" + initial_plan.refused)
             return False
+        try:
+            snapshot = discard_snapshot(st.path, entry, self.cfg["git_timeout"])
+        except (CommitSafetyError, GitReadError, OSError):
+            self.message = t("discard_changed")
+            return False
+        plan = snapshot.plan
         dim = curses.color_pair(C_DIM)
         rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
         if plan.kind == "unstage":
@@ -4074,9 +4353,8 @@ class TUI:
         else:
             rows.append((3, t("discard_effect_restore"), 0))
             rows.append((3, t("discard_effect_history"), 0))
-        ok, text = file_diff(st.path, entry.code, entry.path, self.cfg["git_timeout"])
-        if ok:
-            rows.append((3, t("discard_extent", n=count_changed_lines(text)), 0))
+        rows.append((3, t("discard_extent", n=count_changed_lines(
+            snapshot.diff_text)), 0))
         rows.append((0, "", 0))
         if plan.kind != "unstage":
             rows.append((1, t("discard_no_undo"),
@@ -4105,6 +4383,15 @@ class TUI:
             log_cancelled(st.path, plan.args)
             self.message = t("discard_cancelled")
             return False
+        try:
+            current = discard_snapshot(st.path, entry, self.cfg["git_timeout"])
+        except (CommitSafetyError, GitReadError, OSError):
+            current = None
+        if (current is None or current.plan != snapshot.plan
+                or current.fingerprint != snapshot.fingerprint):
+            log_cancelled(st.path, plan.args)
+            self.message = t("discard_changed")
+            return False
         r = run_git_logged(st.path, *plan.args, timeout=self.cfg["git_timeout"])
         if r.returncode != 0:
             self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
@@ -4119,8 +4406,12 @@ class TUI:
         Zweite Stufe des Verwerfen-Dialogs. Bewusst NICHT hart: Bei „alle" fehlt
         die Beurteilung der einzelnen Datei, die das harte Zurücksetzen trägt.
         """
-        plan = plan_discard_all(st.files,
-                                repo_has_head(st.path, self.cfg["git_timeout"]))
+        try:
+            has_head = repo_has_head(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError) as exc:
+            self.message = t("discard_failed", e=str(exc)[:120])
+            return False
+        plan = plan_discard_all(st.files, has_head)
         if plan.refused:
             self.message = t("discard_all_refused_" + plan.refused)
             return False
@@ -4301,6 +4592,12 @@ class TUI:
         if remote is None:
             self.message = t("info_no_remotes")
             return False
+        try:
+            branches = read_branches(st.path, self.cfg, strict=True)
+        except (GitReadError, OSError) as exc:
+            self.message = t("info_remote_error", e=terminal_text(exc))
+            return False
+        undo_commands = remote_restore_commands(remote, branches)
         command = format_git_command(("remote", "remove", name))
         dim = curses.color_pair(C_DIM)
         rows: list[tuple[int, str, int]] = []
@@ -4320,9 +4617,7 @@ class TUI:
         rows.append((1, t("remove_undo"), dim))
         # Alle nötigen Wiederherstellungsbefehle, nicht nur die erste Fetch-URL:
         # `git remote remove` löscht auch Push-URLs und Branch-Upstreams mit.
-        rows.extend((3, terminal_text(undo), dim)
-                    for undo in remote_restore_commands(
-                        remote, read_branches(st.path, self.cfg)))
+        rows.extend((3, terminal_text(undo), dim) for undo in undo_commands)
         rows.append((0, "", 0))
         confirmed = self._confirm_destructive(
             t("remove_title", r=name), rows, command, t("remove_confirm", r=name))
@@ -4331,6 +4626,18 @@ class TUI:
         if not confirmed:
             log_cancelled(st.path, ("remote", "remove", name))
             self.message = t("remove_cancelled")
+            return False
+        try:
+            current_remote = read_remote_configs(
+                st.path, self.cfg).get(name)
+            current_undo = (remote_restore_commands(
+                current_remote, read_branches(st.path, self.cfg, strict=True))
+                if current_remote else [])
+        except Exception:
+            current_remote, current_undo = None, []
+        if current_remote != remote or current_undo != undo_commands:
+            log_cancelled(st.path, ("remote", "remove", name))
+            self.message = t("remove_changed")
             return False
         r = run_git_logged(st.path, "remote", "remove", name,
                            timeout=self.cfg["git_timeout"])
@@ -4342,8 +4649,12 @@ class TUI:
 
     def _delete_branch(self, st: RepoStatus, name: str) -> bool:
         """Lokalen Branch löschen — nur gemergte, und nur nach Erklärung."""
-        branch = next((b for b in read_branches(st.path, self.cfg) if b.name == name),
-                      None)
+        try:
+            branches = read_branches(st.path, self.cfg, strict=True)
+        except (GitReadError, OSError) as exc:
+            self.message = t("info_remote_error", e=terminal_text(exc))
+            return False
+        branch = next((b for b in branches if b.name == name), None)
         if branch is None:
             self.message = t("info_nothing_selected")
             return False
@@ -4383,6 +4694,15 @@ class TUI:
         if not confirmed:
             log_cancelled(st.path, ("branch", "-d", name))
             self.message = t("branch_delete_cancelled")
+            return False
+        try:
+            current = next((item for item in read_branches(
+                st.path, self.cfg, strict=True) if item.name == name), None)
+        except (GitReadError, OSError):
+            current = None
+        if current != branch:
+            log_cancelled(st.path, ("branch", "-d", name))
+            self.message = t("branch_changed")
             return False
         r = run_git_logged(st.path, "branch", "-d", name,
                            timeout=self.cfg["git_timeout"])

@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import stat
+import string
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,21 @@ class TestParsePorcelain(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(parse_porcelain(""), (0, 0, 0, 0, []))
+
+
+class TranslationContractTests(unittest.TestCase):
+    def test_every_user_text_has_matching_english_and_german_placeholders(self):
+        formatter = string.Formatter()
+
+        def placeholders(text):
+            return {field for _, field, _, _ in formatter.parse(text)
+                    if field is not None}
+
+        for key, translations in gmf_module.TR.items():
+            with self.subTest(key=key):
+                self.assertEqual(set(translations), {"en", "de"})
+                self.assertEqual(placeholders(translations["en"]),
+                                 placeholders(translations["de"]))
 
 
 class TestDiscardPlan(unittest.TestCase):
@@ -428,8 +444,8 @@ class TestAgainstRealRepo(unittest.TestCase):
         with mock.patch.object(gmf_module, "run_git_logged", side_effect=merken):
             collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
         fetches = [a for a in aufrufe if a and a[0] == "fetch"]
-        self.assertEqual(len(fetches), 1, aufrufe)
-        self.assertIn("--jobs=1", fetches[0])
+        self.assertGreaterEqual(len(fetches), 1, aufrufe)
+        self.assertTrue(all("--jobs=1" in fetch for fetch in fetches), aufrufe)
 
     def test_local_scan_keeps_full_parallelism(self):
         with mock.patch("gitmaster_flash.find_repos", return_value=[]), \
@@ -967,6 +983,29 @@ class DiscardKeyTests(unittest.TestCase):
         self.assertIn(gmf_module.t("discard_no_undo"), drawn)
         # Eine Zeile raus, drei rein.
         self.assertIn(gmf_module.t("discard_extent", n=4), drawn)
+
+    def test_file_changed_after_preview_is_not_discarded(self):
+        """Die Bestätigung gilt nur für den vorher gezeigten Dateiinhalt."""
+        path = self.repo / "a.md"
+        path.write_text("gezeigte Änderung\n")
+        ui = self.make_ui([])
+        entry = self.entry_for(ui, "a.md")
+
+        def change_before_confirmation(*_args):
+            # Der Porcelain-Code bleibt `` M``. Ein bloßer Statusvergleich würde
+            # die andere Änderung deshalb nicht erkennen.
+            path.write_text("später hinzugekommene Änderung\n")
+            return True
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm",
+                                  side_effect=change_before_confirmation):
+            changed = ui.action_discard_file(ui.statuses[0], entry)
+
+        self.assertFalse(changed)
+        self.assertEqual(path.read_text(), "später hinzugekommene Änderung\n")
+        self.assertEqual(ui.message, gmf_module.t("discard_changed"))
+        self.assertTrue(gmf_module.COMMAND_LOG[-1].startswith("⊘"))
 
     def test_the_stash_result_repeats_that_submodules_stayed_behind(self):
         """Der Dialog kündigt an, dass `git stash` Submodule auslässt.
@@ -1989,6 +2028,45 @@ class StashAndReadFailureTests(unittest.TestCase):
             self.assertEqual(st.remote_state, "error")
             self.assertFalse(st.clean_and_synced)
 
+    def test_changed_latest_stash_is_neither_applied_nor_dropped(self):
+        """U und D bleiben an den Stash gebunden, der vor der Frage oben lag."""
+        for action in ("action_stash_pop", "action_stash_drop"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                repo = root / "repo"
+                repo.mkdir()
+                git(repo, "init", "-q")
+                git(repo, "config", "user.email", "t@example.invalid")
+                git(repo, "config", "user.name", "T")
+                path = repo / "a"
+                path.write_text("base\n")
+                git(repo, "add", "a")
+                git(repo, "commit", "-qm", "base")
+                path.write_text("erster Stash\n")
+                git(repo, "stash", "push", "-qm", "erster")
+                st = collect_status(repo, root, DEFAULT_CONFIG)
+
+                class Screen:
+                    def getmaxyx(self): return (30, 100)
+
+                ui = TUI(Screen(), root, DEFAULT_CONFIG, None)
+                ui.statuses = [st]
+
+                def add_new_stash(*_args):
+                    path.write_text("neuer Stash\n")
+                    git(repo, "stash", "push", "-qm", "neuer")
+                    return True
+
+                gmf_module.COMMAND_LOG.clear()
+                with mock.patch.object(TUI, "confirm", side_effect=add_new_stash):
+                    getattr(ui, action)()
+
+                after = collect_status(repo, root, DEFAULT_CONFIG)
+                self.assertEqual(len(after.stashes), 2)
+                self.assertEqual(path.read_text(), "base\n")
+                self.assertEqual(ui.message, gmf_module.t("stash_changed"))
+                self.assertTrue(gmf_module.COMMAND_LOG[-1].startswith("⊘"))
+
 
 class NonInteractiveGitTests(unittest.TestCase):
     """Git darf nie nach Zugangsdaten fragen — sonst zerlegt der Prompt die TUI."""
@@ -2095,6 +2173,30 @@ class NonInteractiveGitTests(unittest.TestCase):
         self.assertTrue(badges["faux"].startswith("✘"), badges)
         self.assertNotIn("✘", badges["lokal"])
         self.assertTrue(status_dict(st)["remotes"][0].get("fetch_failed") is not None)
+
+    def test_mixed_fetch_failures_keep_their_own_causes(self):
+        """stderr von `fetch --all` darf Ursachen nicht zwischen Remotes mischen."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo_with_denying_remotes(root, "login")
+            git(repo, "remote", "add", "gone", str(root / "missing.git"))
+            valid = root / "valid.git"
+            git(root, "init", "-q", "--bare", str(valid))
+            git(repo, "remote", "add", "valid", str(valid))
+            with mock.patch.object(gmf_module, "keychain_session",
+                                   return_value=True):
+                st = collect_status(repo, root, DEFAULT_CONFIG, fetch=True)
+
+        remotes = {remote.name: remote for remote in st.remotes}
+        self.assertEqual(remotes["login"].fetch_outcome, "auth")
+        self.assertEqual(remotes["gone"].fetch_outcome, "gone")
+        self.assertFalse(remotes["valid"].fetch_failed)
+        self.assertIn("login", remotes["login"].fetch_error_long.lower())
+        self.assertIn("no repository", remotes["gone"].fetch_error_long.lower())
+        payloads = {remote["name"]: remote
+                    for remote in status_dict(st)["remotes"]}
+        self.assertEqual(payloads["login"]["fetch_outcome"], "auth")
+        self.assertEqual(payloads["gone"]["fetch_outcome"], "gone")
 
     def test_run_git_disables_prompts_and_keeps_caller_env(self):
         recorded = {}
@@ -2615,6 +2717,35 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         shown = gmf_module.remote_restore_commands(secret, [])
         self.assertNotIn("s3cr3t", "\n".join(shown))
 
+    def test_restore_commands_preserve_all_remote_configuration(self):
+        """Eigene Refspecs und Remote-Optionen gehören zum Rückgängig-Weg."""
+        git(self.repo, "config", "--unset-all", "remote.origin.fetch")
+        git(self.repo, "config", "--add", "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/trunk")
+        git(self.repo, "config", "--add", "remote.origin.fetch",
+            "+refs/heads/release:refs/remotes/origin/release")
+        git(self.repo, "config", "remote.origin.tagOpt", "--no-tags")
+        git(self.repo, "config", "remote.origin.mirror", "true")
+
+        before = gmf_module.read_remote_configs(
+            self.repo, DEFAULT_CONFIG)["origin"]
+        commands = gmf_module.remote_restore_commands(before, [])
+        joined = "\n".join(commands)
+        self.assertIn("remote.origin.fetch", joined)
+        self.assertIn("remote.origin.tagopt", joined)
+        self.assertIn("remote.origin.mirror", joined)
+
+        git(self.repo, "remote", "remove", "origin")
+        for command in commands:
+            result = subprocess.run(
+                ["git", "-C", str(self.repo), *shlex.split(command)[1:]],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, f"{command}: {result.stderr}")
+
+        after = gmf_module.read_remote_configs(
+            self.repo, DEFAULT_CONFIG)["origin"]
+        self.assertEqual(after.settings, before.settings)
+
     def test_branch_restore_commands_include_the_upstream(self):
         branch = gmf_module.BranchInfo(name="feature", upstream="origin/feature",
                                        oid="abc1234")
@@ -2782,6 +2913,26 @@ class RemoteRemovalAndCommandLogTests(unittest.TestCase):
         self.assertIn("origin", ui.message)
         self.assertIn("git remote remove origin", "\n".join(gmf_module.COMMAND_LOG))
 
+    def test_remote_changed_after_preview_is_not_removed(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(self._info_screen([]), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+
+        def change_remote(*_args):
+            git(self.repo, "remote", "set-url", "--push", "origin",
+                str(self.root / "anderes-ziel.git"))
+            return True
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm", side_effect=change_remote):
+            removed = ui._remove_remote(st, "origin")
+
+        self.assertFalse(removed)
+        self.assertIn('[remote "origin"]',
+                      (self.repo / ".git" / "config").read_text())
+        self.assertEqual(ui.message, gmf_module.t("remove_changed"))
+        self.assertTrue(gmf_module.COMMAND_LOG[-1].startswith("⊘"))
+
     def test_info_view_maps_remote_blocks_to_lines(self):
         git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
@@ -2898,6 +3049,35 @@ class BranchAndDiffTests(unittest.TestCase):
         # Der Commit ist über main weiterhin erreichbar — nichts ist verloren.
         self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "log", "--oneline"],
                                         capture_output=True, text=True).returncode, 0)
+
+    def test_branch_changed_after_preview_is_not_deleted(self):
+        git(self.repo, "branch", "fertig")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+        class Screen:
+            def erase(self): pass
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, *args): pass
+            def refresh(self): pass
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+
+        def move_branch(*_args):
+            (self.repo / "a.md").write_text("zwei\n")
+            git(self.repo, "commit", "-qam", "zweiter Commit")
+            git(self.repo, "branch", "-f", "fertig", "HEAD")
+            return True
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(TUI, "confirm", side_effect=move_branch):
+            deleted = ui._delete_branch(st, "fertig")
+
+        self.assertFalse(deleted)
+        self.assertIn("fertig", [branch.name for branch in read_branches(
+            self.repo, DEFAULT_CONFIG)])
+        self.assertEqual(ui.message, gmf_module.t("branch_changed"))
+        self.assertTrue(gmf_module.COMMAND_LOG[-1].startswith("⊘"))
 
     def test_file_diff_covers_modified_deleted_and_untracked(self):
         (self.repo / "a.md").write_text("geändert\n")

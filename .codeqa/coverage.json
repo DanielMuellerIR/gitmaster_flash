@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "project": "gitmaster_flash",
+  "campaign": {
+    "id": "20260815T134622757620+0200",
+    "token_budget": 1500000,
+    "status": "active",
+    "started_at": "2026-08-15T13:46:22+02:00"
+  },
+  "campaign_history": [],
+  "scope": {
+    "paths": [
+      "gitmaster_flash.py",
+      "tests/test_gitmaster_flash.py",
+      "install.sh",
+      "gmf.zsh",
+      "tests/test_cli_blackbox.py",
+      "docs/make-screens.py",
+      "README.md",
+      "README.de.md"
+    ],
+    "exclusions": []
+  },
+  "areas": [
+    {
+      "id": "application-core",
+      "paths": [
+        "gitmaster_flash.py",
+        "tests/test_gitmaster_flash.py"
+      ],
+      "risk": "critical",
+      "priority": 1,
+      "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134622757620+0200",
+        "started_at": "2026-08-15T13:54:48+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
+    },
+    {
+      "id": "cli-install-boundary",
+      "paths": [
+        "install.sh",
+        "gmf.zsh",
+        "tests/test_cli_blackbox.py"
+      ],
+      "risk": "high",
+      "priority": 2,
+      "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
+      "state": "pending"
+    },
+    {
+      "id": "screen-generator",
+      "paths": [
+        "docs/make-screens.py"
+      ],
+      "risk": "medium",
+      "priority": 3,
+      "reason": "PTY-Steuerung und reproduzierbare Dokumentbilder koennen Prozesse hinterlassen oder UI-Drift verdecken",
+      "state": "pending"
+    },
+    {
+      "id": "documentation-contract",
+      "paths": [
+        "README.md",
+        "README.de.md"
+      ],
+      "risk": "low",
+      "priority": 4,
+      "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
+      "state": "pending"
+    }
+  ],
+  "architecture": {
+    "campaign_id": "20260815T134622757620+0200",
+    "recorded_at": "2026-08-15T13:46:24+02:00",
+    "observed_head": "309c52e601bc74dbaa42d3eabb84071a949df901",
+    "summary": "Parsing, Planer und Datenmodelle sind weitgehend von curses und zustandsaendernden Git-Aufrufen getrennt; das physisch grosse Einzelmodul ermoeglicht den Remote-Lauf ueber stdin.",
+    "paradigm": "Funktionaler Kern mit imperativer Shell in einem uebertragbaren CLI-Modul",
+    "fit": "passt",
+    "recommendation": "Paradigma beibehalten und lokale Grenzen bereichsweise schaerfen; eine Dateiaufteilung nur mit eigenem Auftrag und neuem Remote-Distributionsvertrag pruefen."
+  }
+}
