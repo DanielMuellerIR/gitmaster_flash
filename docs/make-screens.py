@@ -167,6 +167,30 @@ def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
     return got
 
 
+def _terminate_pty_child(pid: int) -> None:
+    """Das genaue PTY-Kind mit begrenztem TERM->KILL-Warten einsammeln."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    for _ in range(20):
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited == pid:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
 def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
                    cols: int = COLS, rows: int = ROWS,
                    ready_marker: bytes | None = None,
@@ -175,17 +199,17 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
     pid, fd = pty.fork()
     if pid == 0:                                    # child
         os.environ.update(TERM="xterm-256color", LINES=str(rows), COLUMNS=str(cols),
-                          LANG="en_US.UTF-8", TMPDIR=owned_tmp)
+                          LANG="en_US.UTF-8", TMPDIR=owned_tmp,
+                          GMF_SCREEN_CAPTURE="1")
         os.execvp(sys.executable, [sys.executable, str(GMF)] + args)
 
-    # Window size on the pty master. curses also honours LINES/COLUMNS (set in the
-    # child env above) — belt and braces, because initscr() may run before we get here.
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    # Phase 1: let it draw the first screen. Phase 2: type, let it redraw. Doing this
-    # explicitly (instead of "send keys whenever select is idle") is what makes the
-    # capture reliable — the earlier version raced the drawing and caught a blank screen.
     buf = b""
     try:
+        # Window size on the pty master. Auch dieser erste Elternschritt gehoert
+        # in die Cleanup-Klammer: Scheitert ioctl, muessen Kind und fd trotzdem
+        # sicher beendet beziehungsweise geschlossen werden.
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        # Phase 1: let it draw the first screen. Phase 2: type, let it redraw.
         buf = _read_pty_until(fd, quiet=settle, marker=ready_marker)
         for index, chunk in enumerate(_split_keys(keys)):
             os.write(fd, chunk)
@@ -201,16 +225,9 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
             os.close(fd)
         except OSError:
             pass
-        # Always reap the exact child. Otherwise a failed capture can leave the next
-        # one writing into a dead pty ("[Errno 5] Input/output error").
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
+        # Immer genau das Kind begrenzt einsammeln. Ein ignoriertes SIGTERM darf
+        # weder den Generator noch den nächsten Screenshot blockieren.
+        _terminate_pty_child(pid)
     return replay(buf.decode("utf-8", "replace"), cols, rows)
 
 
@@ -226,6 +243,12 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
     Kept separate from the pty plumbing on purpose: this way the replay is testable
     without a child process (see tests/test_gitmaster_flash.py).
     """
+    # Die Transferbefehle verwenden absichtlich einen zufälligen Einmal-Alias,
+    # damit keine vorhandene URL-Umschreibungsregel das geprüfte Ziel umleiten
+    # kann. Für reproduzierbare Referenzbilder bleibt seine Länge gleich, nur
+    # der zufällige Hexteil wird im Bild vereinheitlicht.
+    text = re.sub(
+        r"gmf-pin-[0-9a-f]{32}", "gmf-pin-" + "0" * 32, text)
     grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
     cy = cx = 0
     cur_fg, cur_bold, cur_rev = FG, False, False
@@ -450,20 +473,16 @@ def to_svg(grid: list, title: str) -> str:
 # account for terminal cell widths, but deliberately remains a small replay tool
 # rather than a complete terminal emulator.
 
-# Two real actions before every capture, so the command log shows what it is for
-# instead of "(none yet)": pop the stash of the third repo, then pull the one that is
-# a commit behind. Both are plain list-view keys — no overlay view involved. `L` and
-# not `P` on purpose: the fast-forward merge fits into the pane in full, while the
-# leased push line would be cut off mid-hash at the right edge.
-ACTIONS = DOWN + DOWN + b"Uy" + RIGHT + RIGHT + UP + b"Ly"
+# One confirmed list action before every capture, so the command log shows real
+# work instead of "(none yet)": commit the default suggestions in the first demo
+# repo. The final Enter returns from the commit helper to the reproducible list
+# screen before capture.
+ACTIONS = b"C\r" + b"docs: demo" + b"\r"
 
-# A quiet pty does not prove that the two confirmed Git actions are done. Wait for
-# their stable command-log lines before sending another key or terminating the child.
+# A quiet pty does not prove that the confirmed Git action is done. Wait for its
+# stable command-log line before terminating the child.
 # The indexes refer to the individual keypresses returned by _split_keys(ACTIONS).
-ACTION_MARKERS = {
-    3: b"git stash pop",
-    8: b"git merge --ff-only --",
-}
+ACTION_MARKERS = {12: b"git commit -m"}
 
 # Die Demo-Sandbox hat mehr Repos als `compact_from`, startet also kompakt. Für das
 # Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein. Die

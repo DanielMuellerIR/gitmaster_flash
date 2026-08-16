@@ -22,7 +22,7 @@ unterhalb des Ordners, in dem man es startet.
 
 ![Kompaktansicht: jedes Repo als Marke und Name, darunter das Befehlsprotokoll](docs/compact.de.svg)
 
-<sub>Alle Bilder in dieser README werden aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen. Die Befehle im Protokoll unter der Liste liefen wirklich auf der Sandbox: ein Stash-Pop und ein Pull.</sub>
+<sub>Alle Bilder in dieser README werden aus dem echten Programm auf der `--demo`-Sandbox erzeugt — `python3 docs/make-screens.py` (bzw. `--check`). Keine Screenshots, die bei jeder UI-Änderung neu gemacht werden müssen. Der Befehl im Protokoll unter der Liste lief wirklich auf der Sandbox: ein selektiver Commit.</sub>
 
 
 Zum gefahrlosen Ausprobieren, ohne die eigenen Repos anzufassen:
@@ -41,6 +41,12 @@ einfach gelöscht werden.
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 cd gitmaster_flash
 ./install.sh          # Selbsttest, dann `gmf`-Shell-Wrapper registrieren
+```
+
+Eine neue Shell oder einen neuen Terminal-Tab öffnen, damit die Wrapper-Zeile
+eingelesen wird, danach:
+
+```sh
 gmf ~/projekte        # oder einfach `gmf` für den aktuellen Ordner
 ```
 
@@ -107,12 +113,14 @@ vorbehalten.
   sonstige Remotes danach, GitHub ganz rechts.
 - **↑n / ↓n neben einem Remote** — Commits vor/zurück gegenüber genau diesem
   Remote für den aktuellen Branch, auf Basis des letzten Fetch. `R` aktualisiert
-  alle Remotes aller Repos mit `git fetch --all`, ohne einen Working Tree zu ändern.
+  bei allen Remotes aller Repos den aktuellen Branch einzeln, ohne einen Working
+  Tree zu ändern. Der Netz-Fetch schreibt keinen lokalen Ziel-Ref; anschließend
+  aktualisiert gmf nur den passenden Tracking-Ref, ohne symbolische Refs aufzulösen.
   Scheitern mehrere Remotes aus verschiedenen Gründen, behält jedes seine eigene
   Diagnose samt Git-Fehler.
 - **M / D / U** — Anzahl geänderter, gelöschter und unversionierter Dateien.
 - **⚑Stash:n** — vorhandene Stashes. Die übersieht man sonst gern.
-- **⚠conflict:n** — ungemergte Dateien, etwa nach einem `git stash pop`, der
+- **⚠conflict:n** — ungemergte Dateien, etwa nach einem `git stash apply`, der
   nicht sauber aufging. Bewusst getrennt von „modified", weil dahinter andere
   Arbeit steckt.
 - Warnungen wie „kein Sync-Remote" oder „Branch nicht auf dem Remote".
@@ -134,17 +142,17 @@ Seiten merken sich, wo man war.
 ![Fokus im Befehlsprotokoll: der Auswahlbalken steht dort, die Repo-Liste hat keinen](docs/command-log.de.svg)
 
 Abgebrochene Dialoge erscheinen als `⊘ … (nicht ausgeführt — abgebrochen)`, damit
-das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief. Zwei gleiche
+das Protokoll nie etwas als gelaufen ausweist, das gar nicht lief. Zwei
 `fetch`-Zeilen sind ebenfalls kein Fehler: gmf holt einmal vor der Rückfrage und
-einmal nach der Bestätigung und handelt nur, wenn sich dazwischen nichts bewegt
-hat (siehe „Sicheres Push und Pull").
+einmal nach der Bestätigung und handelt nur, wenn sich dazwischen nichts bewegt;
+nur ihre zufälligen Einmal-URL-Aliasse unterscheiden sich (siehe „Sicheres Push").
 
 `H` zeigt dasselbe Protokoll vollständig, über den Sicherheitsregeln. Die reinen
 Lesebefehle des Scans stehen bewusst nicht drin — sie würden die interessanten
 Zeilen zumüllen. Argumente sind so gequotet, wie eine Shell sie braucht, eine
-Zeile lässt sich also direkt übernehmen. Und destruktive Dialoge zeigen den
-Befehl vor der Bestätigung: Man sieht `git remote remove github` beim
-Entscheiden, nicht erst danach.
+Zeile lässt sich also direkt übernehmen. Zustandsändernde Aktionen stehen mit
+ihren echten, vollständig gebundenen Git-Argumenten im Protokoll; abgebrochene
+Bestätigungen bleiben ausdrücklich als nicht ausgeführt markiert.
 
 ## Bedienung
 
@@ -159,25 +167,24 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
-| A | Änderungen ansehen: Datei wählen, Diff lesen; dort `Z` verwerfen |
+| A | Änderungen Datei für Datei in einem rein lesenden Diff-Betrachter prüfen |
 | C | Commit-Hilfe (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
-| L | aktuellen Branch sicher per Fast-forward vom privaten Sync-Remote holen |
 | G | geschützter GitHub-Push mit Commit-/Dateivorschau und Texteingabe |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
-| I | Repo-Details und Remotes; dort `T` Remote prüfen, `X` Remote entfernen |
-| U | neuesten Stash anwenden (`git stash pop`, mit Rückfrage) |
+| I | rein lesende Repo-, Remote- und Branch-Details; dort `T` Remote prüfen |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
-| D | neuesten Stash endgültig verwerfen (`git stash drop`, mit Rückfrage) |
-| R | alles neu einlesen inklusive `git fetch --all` |
+| R | alles neu einlesen und jedes sichere Remote einzeln fetchen |
 | Q | beenden |
 
-Auf einen bereits konfliktbehafteten Baum wird nie ein weiterer Stash gepoppt —
-erst die Konflikte auflösen. Die Vorschau enthält auch unversionierte und binäre
-Dateien; ein fehlgeschlagener oder unerwartet leerer Git-Report wird vor der
-destruktiven Verwerfen-Aktion ausdrücklich gekennzeichnet.
+Die Stash-Vorschau enthält auch unversionierte und binäre Dateien; ein
+fehlgeschlagener oder unerwartet leerer Git-Report wird ausdrücklich
+gekennzeichnet. Das Anwenden oder Löschen eines Stashs bleibt danach eine
+Terminal-Aufgabe: Git kann Ziel-Branch, Index und Arbeitsbaum nicht atomar gegen
+parallele Änderungen binden und das Löschen nicht an einen bestimmten
+Reflog-Eintrag koppeln.
 
-## Änderungen ansehen und verwerfen (`A`, dort `Z`)
+## Änderungen rein lesend prüfen (`A`)
 
 `→` zeigt, *dass* sich eine Datei geändert hat; `A` zeigt, *was* sich darin
 geändert hat. Datei mit `↑`/`↓` (oder `Tab`) wählen, `⏎` drücken — der Diff
@@ -191,46 +198,15 @@ sonst ignoriert, und für gelöschte.
  U  notizen.txt
  D  alte-config.yml
 
- ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Z verwerfen · Q/Esc zurück
+ ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück
 ```
 
-Ansehen ist rein lesend: weder Index noch Arbeitsbaum werden dabei angefasst.
-`Z` verwirft dagegen die gewählte Datei und ist der einzige Weg in gmf, der eine
-nicht committete Änderung wirklich wegwirft. Er sitzt bewusst hier, wo die
-Dateiliste vor einem steht und `⏎` vorher den Diff zeigt.
-
-Was `Z` tut, hängt vom Zustand der Datei ab:
-
-- **Geändert, gelöscht oder vorgemerkt:** zurück auf den Stand des letzten
-  Commits (`git restore --source=HEAD --staged --worktree`). Die Historie bleibt
-  unberührt; verloren geht nur die nicht committete Änderung. Einen
-  Rückgängig-Befehl gibt es dafür nicht, und der Dialog sagt das auch so — er
-  nennt zusätzlich den Umfang in geänderten Zeilen, damit eine Datei mit echter
-  Arbeit sich von einer bloß angefassten unterscheidet.
-- **Neu hinzugefügt:** Die Datei steht in keinem Commit, einen früheren Stand
-  gibt es also nicht. Sie verliert nur die Vormerkung und bleibt als unverfolgte
-  Datei liegen — gmf löscht sie nicht.
-- **Unverfolgt, Merge-Konflikt, Umbenennung oder Submodul:** abgelehnt, mit
-  Begründung in der Zeile über der Fußleiste. Unverfolgte Dateien waren nie in
-  Git; sie zu entfernen wäre Löschen und nicht Verwerfen. Eine Umbenennung
-  besteht aus zwei Einträgen — eine Hälfte allein zurückzunehmen ließe die
-  andere stehen. Und bei einem Submodul checkt `git restore` nichts aus: Der
-  Befehl liefe ins Leere, das Submodul bliebe auf seinem Commit stehen —
-  zurücksetzen heißt hier, im Submodul selbst zu arbeiten (z.B.
-  `git submodule update`).
-
-Unmittelbar vor dem bestätigten `git restore` liest gmf Porcelain-Status,
-Indexeintrag, HEAD-Eintrag und rohen Dateiinhalt erneut. Hat sich davon seit der
-Vorschau etwas geändert, wird nichts verworfen und die Datei muss erneut geprüft
-werden.
-
-Ab zwei geänderten verfolgten Dateien bietet derselbe Dialog mit `A` einen
-zweiten Weg an: **alle** Änderungen des Repos wandern in einen Stash statt ins
-Nichts, nach eigener Bestätigung. Das ist die Ausweitung für den Fall, dass man
-eben nicht jede Datei einzeln beurteilt hat. Der Inhalt bleibt danach sichtbar
-und greifbar: `S` zeigt ihn, `U` holt ihn zurück, `D` wirft ihn weg.
-Unverfolgte Dateien bleiben auch dabei liegen, und Submodule behalten ihren
-ausgecheckten Stand — `git stash` lässt beide aus.
+Diese Ansicht bleibt bewusst rein lesend: Weder Index noch Arbeitsbaum werden
+angefasst. Für ein sicheres Verwerfen oder Entfernen aus der Vormerkung müsste
+gmf den geprüften Dateistand atomar gegen jeden Editor und jeden parallelen
+Git-Prozess binden. Git bietet diese Garantie für einen Arbeitsbaum-Pfad nicht.
+Deshalb bleiben solche Aktionen nach ausdrücklicher Prüfung dem Terminal
+vorbehalten, statt ungesehene Arbeit zu riskieren.
 
 ## Repo-Info und Remotes (`I`)
 
@@ -266,40 +242,15 @@ Antwort trennt die Fälle, die sonst gleich aussehen:
 Unterhalb dieser Klartext-Einordnung bewahrt die Info-Ansicht zusätzlich Gits
 eigene Fehlermeldung als Beleg auf.
 
-**`X` entfernt das ausgewählte Remote** nach einer Rückfrage, die vorher genau
-benennt, was passiert. Es ist ausschließlich eine lokale Konfigurationsänderung:
-Der Abschnitt `[remote "<Name>"]` verschwindet aus `.git/config`, die
-Remote-Tracking-Branches `refs/remotes/<Name>/*` werden gelöscht, und ein lokaler
-Branch mit Upstream dorthin verliert diese Verknüpfung. Commits, Dateien,
-Branches und Stashes bleiben unberührt, auf dem Server ändert sich nichts. Der
-Dialog zeigt sowohl den Befehl, der ausgeführt wird, als auch die Befehle, die
-die lokale Konfiguration wiederherstellen — einschließlich zusätzlicher
-Fetch-/Push-URLs und der Upstream-Verknüpfung jedes Branches, der das Remote
-verfolgte, außerdem eigener Remote-Einstellungen wie Refspecs, `tagOpt` und
-`mirror`, denn `git remote remove` löscht auch diese mit. Nach der Bestätigung
-wird die Konfiguration erneut geprüft; eine geänderte Vorschau wird nicht
-entfernt. (Die
-Remote-Tracking-Branches selbst holt der nächste Fetch zurück.)
-
-Zusammen nützlich: Auf GitHub gelöschte Repos behalten lokal ihr totes Remote.
-`R` markiert so ein Remote rot (`✘`) in der Repo-Zeile, `T` bestätigt, dass die
-Adresse erreichbar ist, das Repo aber weg ist, und `X` räumt es weg.
-
-**Auch die lokalen Branches stehen dort** — der zweite Zustand, den Git nie
-überträgt. Man sieht sie nie, weil man immer nur den aktuellen Branch betrachtet;
-entsprechend sammeln sich abgeschlossene Features und alte Experimente an. Je
-Branch stehen letzter Commit, Upstream mit Vorsprung/Rückstand und der
-Merge-Zustand da. `X` löscht einen Branch, aber nur, wenn er vollständig in HEAD
-gemergt ist (`git branch -d`): Seine Commits hängen dann ohnehin an HEAD, es kann
-also nichts verloren gehen. Nicht gemergte Branches lehnt gmf mit Begründung ab
-und nennt den Terminal-Befehl, der es erzwingen würde. Die Rückfrage zeigt sowohl
-den genauen Löschbefehl als auch die Befehle zum Wiederherstellen des Branches —
-`git branch <Name> <OID>` und, falls ein Upstream gesetzt war, die Zeile
-`git branch --set-upstream-to …`, denn `git branch -d` löscht auch diese
-Verknüpfung mit. Branch-OID und Metadaten werden nach der Bestätigung erneut
-geprüft; hat sich der Branch bewegt, bleibt er bestehen. Dieselbe Zustandsbindung
-schützt den neuesten Stash, bevor `U` ihn anwendet oder `D` ihn endgültig
-verwirft.
+Die Info-Ansicht ist bewusst rein lesend. `T` prüft das gewählte Remote und
+bewahrt Gits redigierte Antwort als Beleg auf. Lokale Branches erscheinen mit
+letztem Commit, Upstream, Vorsprung/Rückstand und Merge-Zustand; gmf entfernt aber
+weder Remotes noch Branches. Git würde dabei auch ihre Reflogs löschen. Darin kann
+der letzte lokale Verweis auf Commits liegen, und ein ehrlicher
+Rückgängig-Befehl kann ihn nicht rekonstruieren. Das Entfernen bleibt deshalb
+nach Prüfung dieser Details eine ausdrückliche Terminal-Aufgabe. Stashes werden
+rein lesend angezeigt; Anwenden und Löschen bleiben ebenfalls ausdrückliche
+Terminal-Aufgaben.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
 teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie
@@ -346,32 +297,31 @@ Lokale Branches:
  M  README.md                                                  ✔ committen
  U  notes.txt                                                  ✔ committen
  U  server.py                                                  ✔ committen
- U  build/out.o                                      ✎ .gitignore: build/
+ U  build/out.o                                                ✔ committen
 
- ␣ committen an/aus · i gitignore an/aus · ⏎ weiter · Esc abbrechen
+ ␣ committen an/aus · ⏎ weiter · Esc abbrechen
 ```
 
-1. Alle geänderten und neuen Dateien werden gelistet, jeweils mit Vorschlag:
-   typischer Müll (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`,
-   …) landet im Vorschlag für die **.gitignore**, alles andere im Vorschlag zum
-   **Committen**. Beides ist pro Datei umschaltbar (`␣` committen an/aus,
-   `i` gitignore an/aus).
+1. Alle geänderten und neuen Dateien werden gelistet. `␣` wählt sie an oder ab;
+   die Hilfe ändert vor dem Commit weder `.gitignore` noch eine andere Datei im
+   Arbeitsbaum.
 2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten Messages des
    Repos als Stil-Vorlage — so viele, wie über der Eingabezeile Platz haben; die
    Eingabezeile bleibt immer sichtbar.
-3. Merge-Konflikte sperren die Hilfe vollständig. Die `.gitignore` wird atomar und
-   ohne Folgen von Symlinks ergänzt. Der Commit entsteht über einen temporären Index,
+3. Merge-Konflikte sperren die Hilfe vollständig. Der Commit entsteht über einen temporären Index,
    der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
    samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Für die
    committeten Pfade übernimmt der echte Index den neuen Commit — genau wie bei
    `git commit -- <pfad>`; sonst meldete `git status` sie weiterhin als geändert.
-   Danach kann der
-   Commit optional über denselben geschützten privaten Sync-Pfad wie bei `P` gepusht
-   werden. Nach einem gewöhnlichen lokalen Commit nennt die Ergebniszeile
-   `git reset --soft HEAD~1` als Rückgängig-Befehl. Nach dem allerersten Commit
-   steht dort stattdessen `git update-ref -d HEAD <neue-OID>`: Die erwartete OID
-   verhindert das Löschen eines inzwischen weiterbewegten Branches, während die
-   committeten Dateien vorgemerkt und auf der Festplatte bleiben.
+   Push bleibt eine getrennte, bewusste Aktion mit `P`. Nach einem gewöhnlichen
+   lokalen Commit nennt die Ergebniszeile
+   `git update-ref --no-deref refs/heads/<Branch> <alte-OID> <neue-OID>` als
+   Rückgängig-Befehl. Nach dem allerersten Commit verwendet sie
+   `git update-ref --no-deref -d refs/heads/<Branch> <neue-OID>`. Der vollständige Ref bindet
+   das Undo auch nach einem Checkout an den freigegebenen Branch; die erwartete
+   neue OID verhindert zusätzlich jede Änderung, wenn dieser Branch weitergezogen
+   ist. Die committeten Dateien bleiben vorgemerkt und auf der Festplatte. Bei
+   detached HEAD ist die Hilfe gesperrt.
 
 ## Installation
 
@@ -424,10 +374,10 @@ schlicht, ein fälliger Push ist dort also unsichtbar. Dasselbe gilt für Branch
 gerade nicht ausgecheckt sind.
 
 ```sh
-gitmaster_flash.py --diff meinmac            # ~/git hier gegen ~/git auf meinmac
-gitmaster_flash.py --diff meinmac --json     # maschinenlesbar
-gitmaster_flash.py --diff meinmac:~/code     # anderes Verzeichnis drüben
-gitmaster_flash.py --diff meinmac --fetch    # vorher die ↑/↓-Zahlen auffrischen
+gmf --diff meinmac            # ~/git hier gegen ~/git auf meinmac
+gmf --diff meinmac --json     # maschinenlesbar
+gmf --diff meinmac:~/code     # anderes Verzeichnis drüben
+gmf --diff meinmac --fetch    # vorher die ↑/↓-Zahlen auffrischen
 ```
 
 Ausgegeben werden **nur die Unterschiede**, getrennt in Klassen — diese Trennung
@@ -443,7 +393,8 @@ nur auf meinmac: experiment
 ```
 
 `DRIFT` umfasst außerdem Fehler, Konflikte, Stashes, Branch-Verfügbarkeit,
-Remote-Sicherheitsklassen und zugangsdatenfreie Ziel-Fingerprints; rohe Remote-URLs
+Remote-Sicherheitsklassen (einschließlich der Frage, ob Fetch-/Push-URLs ohne
+offengelegte Zugangsdaten ausführbar sind) und zugangsdatenfreie Ziel-Fingerprints; rohe Remote-URLs
 und Zugangsdaten gelangen nie ins JSON. `DRIFT` = sollte gleich sein, ist es nicht
 (Handlungsbedarf). `SYNC` = beide
 Rechner sind sich einig, stehen aber gemeinsam vor/hinter dem Sync-Remote — im
@@ -458,12 +409,15 @@ dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber
 braucht es nur `python3` und `git`. Nebeneffekt: beide Seiten laufen immer in exakt
 derselben Fassung, Versionsdrift ist ausgeschlossen. Funktioniert auch gegen Linux.
 
-**Es ändert nie deine Repos** — keine Remotes angelegt, nichts committet oder gepusht,
-Branch, Index und Arbeitsbaum bleiben unangetastet. Es sagt, was anders ist; das
-Reparieren bleibt bei dir. Zweierlei schreibt es trotzdem, beides außerhalb der
-Repo-Inhalte: `--fetch` führt auf beiden Rechnern ein echtes `git fetch --all --prune`
-aus — genau dafür ist der Schalter da, und er berührt nur die Remote-Tracking-Refs —,
-und der allererste Lauf legt `~/.config/gitmaster_flash/config.json` an, auf dem
+**Branch, Index und Arbeitsbaum bleiben unangetastet** — keine Remotes angelegt,
+nichts committet oder gepusht. Es sagt, was anders ist; das Reparieren bleibt bei
+dir. Zweierlei schreibt es trotzdem: `--fetch` führt auf beiden Rechnern einen
+echten Fetch aus; Tag-Holen, Tag-Pruning und Submodul-Rekursion sind abgeschaltet.
+Je Remote holt gmf nur die angekündigte Objekt-ID des aktuellen Branches ohne
+lokalen Ziel-Ref und aktualisiert danach ausschließlich
+`refs/remotes/<remote>/<Branch>` mit `--no-deref`. Die geprüfte URL läuft über
+einen Einmal-Alias; unsichere Remotes werden gemeldet statt ausgeführt. Der
+allererste Lauf legt außerdem `~/.config/gitmaster_flash/config.json` an, auf dem
 befragten Rechner ebenso, weil dort dasselbe Skript läuft.
 
 **Tipp:** Rechner in `~/.ssh/config` eintragen und `ControlMaster auto` /
@@ -476,9 +430,9 @@ aber keins.
 ## Nicht-interaktiv (Skripte, CI, Agenten)
 
 ```sh
-gitmaster_flash.py --list          # farbige Textliste
-gitmaster_flash.py --json          # maschinenlesbar
-gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
+python3 gitmaster_flash.py --list          # farbige Textliste
+python3 gitmaster_flash.py --json          # maschinenlesbar
+python3 gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
 
 # Jede Ausgabe nennt die Version — so zeigt ein Diff zweier Rechner-Ausgaben,
 # ob dieselbe Fassung dahintersteckt:
@@ -513,26 +467,39 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
   Kompaktansicht (Standard 20: bis einschließlich 20 bleibt die Detailansicht;
   `M` schaltet jederzeit um).
 - `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
+- `diff_timeout` — harte Laufzeitgrenze für den gesamten SSH-Vergleich
+  (Standard 3600 Sekunden). Einzelne Git-Aufrufe behalten `git_timeout` oder
+  `fetch_timeout`; für den SSH-Verbindungsaufbau gilt zusätzlich eine eigene
+  Grenze von zehn Sekunden.
 - `commit_timeout` — Sekunden allein für `git commit` (Standard 120). Dabei läuft
   der pre-commit-Hook des Repos, der oft Linter oder Tests startet und deutlich
   länger braucht als `git_timeout`. Wird die Grenze erreicht, werden git *und*
   alles vom Hook Gestartete beendet, und gmf meldet das, statt abzustürzen.
 
-## Sicheres Push und Pull
+## Sicheres Push
 
-`P` und `L` sind absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt.
-Beide fetchen zuerst, verlangen einen sauberen Arbeitsbaum und blockieren
+`P` ist absichtlich auf einen nichtöffentlichen Sync-Remote begrenzt. Die Aktion
+fetcht zuerst, verlangt einen sauberen Arbeitsbaum und blockiert Rückstand oder
 divergente History. Fetch- und Push-URL müssen genau dasselbe zugangsdatenfreie
 Host-/Repo-Ziel bezeichnen; mehrere oder abweichende Push-URLs werden gesperrt.
 Der bei Hosting-Diensten übliche Mix — Fetch per HTTPS, Push per SSH über den
 virtuellen Benutzer `git` — gilt dabei als dasselbe Ziel:
 `git@host:org/repo` und `https://host/org/repo` meinen dasselbe Repo.
 Unmittelbar vor der bestätigten Mutation werden Branch, HEAD, Index, Arbeitsbaum,
-Remote-Identität und Ziel-OID nochmals geprüft. Pull übernimmt nur die freigegebene
-unveränderliche OID per Fast-forward. Push überträgt die freigegebene Commit-OID mit
+Remote-Identität und Ziel-OID nochmals geprüft. Push überträgt die freigegebene Commit-OID mit
 einem expliziten Refspec. Eine exakte Ziel-OID-Lease verhindert, dass eine
 Remote-Löschung oder parallele Verschiebung daraus eine ungeprüfte Aktualisierung
-macht; Tags werden nie gesendet.
+macht; Tags und Submodul-Commits werden nie gesendet. Für diesen einen Push sind
+außerdem Repo-Hooks abgeschaltet, damit ein pre-push-Hook keine ungeprüften Tags
+oder weiteren Refs veröffentlicht. Die Übertragung verwendet die
+exakt geprüfte URL statt eines Remote-Namens, den eine parallele Konfigurationsänderung
+umleiten könnte. Die Fetch-Refspec muss `refs/heads/<Branch>` auf den passenden
+Tracking-Ref dieses Remotes abbilden.
+
+Pull bleibt eine Terminal-Aktion. Branch, Index und Arbeitsbaum lassen sich
+gegenüber parallelen Git-Prozessen nicht atomar an den in dieser TUI freigegebenen
+Stand binden. gmf riskiert deshalb keinen Fast-forward auf einen Branch, der im
+Race-Fenster ausgecheckt wurde.
 
 Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
 Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden

@@ -14,25 +14,23 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
         (needs the shell wrapper `gmf` from gmf.zsh — a child process cannot
         change the parent shell's working directory)
   F/…   open the repo in a configured app (see config.json)
-  A     look at the changes file by file; there Z discards the selected one
-        (hard for a single file, all of them together into a stash instead)
-  C     commit helper: suggests what to commit and what to .gitignore
+  A     inspect the changes file by file (read-only)
+  C     commit helper: select exactly which changed files to commit
   P     safely push the current branch to the private sync remote
-  L     safely fast-forward the current branch from the private sync remote
   G     guarded GitHub push (preview + typed confirmation; branch only, no tags)
   H     explain the Git safety rules
   I     show repository details, remote addresses, and clickable GitHub URLs
-  U     apply the latest stash (git stash pop, with confirmation)
   S     view the latest stash as a diff (read-only, scrollable)
-  D     drop the latest stash (git stash drop, with confirmation)
-  R     reload everything incl. `git fetch --all` (shows progress)
+  R     reload everything and fetch each safe remote separately (shows progress)
   Q     quit
 
 Non-interactive: with --list / --json (or no TTY) it prints the overview as text
 or JSON (machine-readable). Exit code 1 if any repo needs attention.
 
 Two machines: `--diff HOST` compares this machine's repos with another one over
-ssh and prints only the differences (read-only, never changes anything). The only
+ssh and prints only the differences. It leaves branches, index, and working trees
+alone; the first run may create config.json on either machine, and `--fetch`
+updates safe remote-tracking refs. The only
 requirement is that `ssh HOST` works — gitmaster_flash does NOT need to be
 installed there: the script is piped over stdin, so both sides always run the
 exact same version. Remotes live in .git/config and are never carried by git
@@ -54,9 +52,9 @@ import hashlib
 import json
 import math
 import os
-import posixpath
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -64,11 +62,12 @@ import sys
 import tempfile
 import unicodedata
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.7"
+__version__ = "0.18.8"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -103,30 +102,16 @@ DEFAULT_CONFIG = {
     # Timeout in Sekunden für einzelne git-Aufrufe (fetch darf länger).
     "git_timeout": 10,
     "fetch_timeout": 30,
+    # Harte Laufzeitgrenze für den kompletten SSH-Vergleich. Sie ist bewusst
+    # deutlich größer als die Einzelgrenzen oben und kann für sehr große
+    # Bestände erhöht werden; ein verbundener, aber festgefahrener Remote-Lauf
+    # darf die lokale TUI trotzdem nicht unbegrenzt blockieren.
+    "diff_timeout": 3600,
     # `git commit` führt den pre-commit-Hook des Repos aus — und der startet in
     # vielen Projekten Linter oder Tests, die deutlich länger als zehn Sekunden
     # brauchen. Mit dem kurzen git_timeout wäre jeder solche Commit chancenlos.
     "commit_timeout": 120,
 }
-
-# Muster für die Commit-Hilfe: Dateien, die typischerweise in .gitignore gehören.
-# (basename_oder_teil, ist_verzeichnis, gitignore_zeile)
-IGNORE_RULES = [
-    ("node_modules", True, "node_modules/"),
-    ("__pycache__", True, "__pycache__/"),
-    (".venv", True, ".venv/"),
-    ("venv", True, "venv/"),
-    ("dist", True, "dist/"),
-    ("build", True, "build/"),
-    (".idea", True, ".idea/"),
-    (".pytest_cache", True, ".pytest_cache/"),
-    (".mypy_cache", True, ".mypy_cache/"),
-    (".ruff_cache", True, ".ruff_cache/"),
-    (".DS_Store", False, ".DS_Store"),
-    ("Thumbs.db", False, "Thumbs.db"),
-    (".env", False, ".env"),
-]
-IGNORE_SUFFIXES = {".pyc": "*.pyc", ".log": "*.log", ".tmp": "*.tmp"}
 
 
 # ---------------------------------------------------------------------------
@@ -145,11 +130,15 @@ TR = {
     "diff_same": {"en": "No differences to {h}.", "de": "Kein Unterschied zu {h}."},
     "diff_need_host": {"en": "--diff needs a host, e.g. --diff mymac",
                        "de": "--diff braucht einen Host, z.B. --diff meinmac"},
+    "diff_bad_host": {"en": "--diff host is not a safe SSH destination",
+                      "de": "Der --diff-Host ist kein sicheres SSH-Ziel"},
     "diff_ssh_failed": {"en": "Cannot reach {h}: {e}", "de": "{h} nicht erreichbar: {e}"},
     "diff_ssh_exit": {"en": "ssh exited with code {code}",
                       "de": "ssh endete mit Code {code}"},
     "diff_ssh_no_output": {"en": "no output", "de": "keine Ausgabe"},
     "diff_ssh_bad_json": {"en": "unreadable JSON", "de": "unlesbares JSON"},
+    "diff_ssh_bad_schema": {"en": "incompatible JSON structure",
+                            "de": "inkompatible JSON-Struktur"},
     "diff_version": {
         "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
         "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
@@ -197,14 +186,13 @@ TR = {
     "conflict_n": {"en": "conflict:{n}", "de": "Konflikt:{n}"},
     # Detailzeilen
     "conflict_label": {"en": "C=conflict ", "de": "C=Konflikt "},
-    "stash_row_hint": {"en": "(U pop · S preview · D drop)",
-                       "de": "(U anwenden · S Vorschau · D verwerfen)"},
+    "stash_row_hint": {"en": "(S preview)", "de": "(S Vorschau)"},
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
     "changes_footer": {
-        "en": " ↑/↓ or Tab select file · ⏎ show diff · Z discard · Q/Esc back",
-        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Z verwerfen · Q/Esc zurück"},
+        "en": " ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back",
+        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück"},
     "no_changes_to_show": {"en": "Nothing changed in this repository.",
                            "de": "In diesem Repo hat sich nichts geändert."},
     "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
@@ -215,10 +203,10 @@ TR = {
     # Footer
     "f1": {"en": " ↑/↓/←/→ select · ⏎ cd & quit · M view · Tab log · I info · H help",
            "de": " ↑/↓/←/→ wählen · ⏎ cd & Exit · M Ansicht · Tab Log · I Info · H Hilfe"},
-    "f2": {"en": " {apps} · A changes · C commit · U stash pop · S stash view · D stash drop",
-           "de": " {apps} · A Änderungen · C Commit · U Stash pop · S Stash-Blick · D Stash weg"},
-    "f3": {"en": " R fetch all · P sync push · L sync pull · G GitHub push · Q quit",
-           "de": " R fetch all · P Sync-Push · L Sync-Pull · G GitHub-Push · Q Beenden"},
+    "f2": {"en": " {apps} · A changes · C commit · S stash view",
+           "de": " {apps} · A Änderungen · C Commit · S Stash-Blick"},
+    "f3": {"en": " R fetch safe remotes · P sync push · G GitHub push · Q quit",
+           "de": " R sichere Remotes fetchen · P Sync-Push · G GitHub-Push · Q Beenden"},
     # Kompakte Ansicht und Protokollbereich
     "compact_more": {"en": "columns {a}-{b}/{n}", "de": "Spalten {a}-{b}/{n}"},
     "log_pane_title": {"en": " Commands", "de": " Befehle"},
@@ -227,6 +215,7 @@ TR = {
                        "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     "yesno_extra": {"en": "  (Y/N/{k})", "de": "  (J/N/{k})"},
+    "cancelled": {"en": "Cancelled.", "de": "Abgebrochen."},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
                       "de": "App nicht gefunden: {p} (config.json anpassen)"},
@@ -242,21 +231,6 @@ TR = {
                       "dann landet man automatisch dort.)"},
     # Stash
     "no_stash": {"en": "No stash in this repo.", "de": "Kein Stash in diesem Repo."},
-    "resolve_conflicts_first": {
-        "en": "Resolve the merge conflicts first (open the repo with an app key), "
-              "then press U again.",
-        "de": "Erst die Merge-Konflikte auflösen (App-Taste öffnet das Repo), "
-              "dann erneut U drücken."},
-    "confirm_pop": {"en": "Apply latest stash in '{rel}' (git stash pop)?",
-                    "de": "Neuesten Stash in '{rel}' anwenden (git stash pop)?"},
-    "cancelled": {"en": "Cancelled.", "de": "Abgebrochen."},
-    "stash_applied": {"en": "Stash applied in {rel}.", "de": "Stash angewendet in {rel}."},
-    "stash_conflict": {
-        "en": "Stash created {n} merge conflict(s) — the stash is kept. "
-              "Open the repo with an app key and resolve.",
-        "de": "Stash erzeugte {n} Merge-Konflikt(e) — Stash bleibt erhalten. "
-              "Repo mit einer App-Taste öffnen und auflösen."},
-    "stash_pop_failed": {"en": "stash pop failed: {e}", "de": "stash pop fehlgeschlagen: {e}"},
     "empty_diff": {"en": "(empty diff)", "de": "(leerer Diff)"},
     "stash_preview_failed": {"en": "Stash preview failed: {e}",
                               "de": "Stash-Vorschau fehlgeschlagen: {e}"},
@@ -265,34 +239,19 @@ TR = {
         "de": "(Stash vorhanden, aber Git erzeugte keinen darstellbaren Patch)"},
     "stash_preview_title": {"en": "Stash preview · {rel} · {s}",
                             "de": "Stash-Vorschau · {rel} · {s}"},
-    "confirm_drop": {"en": "Drop latest stash in '{rel}' PERMANENTLY "
-                           "(git stash drop)? Cannot be undone.",
-                     "de": "Neuesten Stash in '{rel}' ENDGÜLTIG verwerfen "
-                           "(git stash drop)? Nicht rückgängig machbar."},
-    "drop_cancelled": {"en": "Cancelled — stash kept.",
-                       "de": "Abgebrochen — Stash bleibt erhalten."},
-    "stash_dropped": {"en": "Stash dropped in {rel}.", "de": "Stash verworfen in {rel}."},
-    "stash_drop_failed": {"en": "stash drop failed: {e}",
-                          "de": "stash drop fehlgeschlagen: {e}"},
-    "stash_changed": {
-        "en": "The latest stash changed after the preview — nothing was applied or dropped.",
-        "de": "Der neueste Stash hat sich nach der Vorschau geändert — nichts wurde angewendet oder verworfen."},
     # Pager
     "pager_footer": {"en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
                      "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}"},
     # Commit-Hilfe
     "commit_title": {"en": "Commit helper · {rel} — review, then ⏎",
                      "de": "Commit-Hilfe · {rel} — Vorschlag prüfen, dann ⏎"},
-    "to_gitignore": {"en": "→ .gitignore ({p})", "de": "→ .gitignore ({p})"},
     "do_commit": {"en": "✔ commit", "de": "✔ committen"},
     "do_skip": {"en": "✘ skip", "de": "✘ auslassen"},
-    "commit_footer": {"en": " ␣ commit on/off · i gitignore on/off · ⏎ next · Esc cancel",
-                      "de": " ␣ committen an/aus · i gitignore an/aus · ⏎ weiter · Esc abbrechen"},
+    "commit_footer": {"en": " ␣ commit on/off · ⏎ next · Esc cancel",
+                      "de": " ␣ committen an/aus · ⏎ weiter · Esc abbrechen"},
     "commit_cancelled": {"en": "Commit helper cancelled.", "de": "Commit-Hilfe abgebrochen."},
     "nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "commit_in": {"en": "Commit in {rel}", "de": "Commit in {rel}"},
-    "new_in_gitignore": {"en": "New in .gitignore:", "de": "Neu in .gitignore:"},
-    "more_entries": {"en": "… and {n} more", "de": "… und {n} weitere"},
     "to_commit_n": {"en": "To commit: {n} file(s)", "de": "Zu committen: {n} Datei(en)"},
     "recent_msgs": {"en": "Recent commit messages (style reference):",
                     "de": "Letzte Commit-Messages (Stil-Vorlage):"},
@@ -300,6 +259,12 @@ TR = {
     "empty_msg": {"en": "Empty message — cancelled.", "de": "Leere Message — abgebrochen."},
     "git_add_failed": {"en": "git add failed: {e}", "de": "git add fehlgeschlagen: {e}"},
     "commit_failed": {"en": "Commit failed: {e}", "de": "Commit fehlgeschlagen: {e}"},
+    "commit_exists_index_failed": {
+        "en": "Commit {oid} exists, but the real index was not updated — inspect git status before continuing.",
+        "de": "Commit {oid} ist vorhanden, aber der echte Index wurde nicht übernommen — vor dem Weiterarbeiten git status prüfen."},
+    "commit_outcome_unknown": {
+        "en": "The commit outcome could not be verified — a commit may exist; inspect git log and git status before continuing.",
+        "de": "Der Commit-Ausgang konnte nicht sicher geprüft werden — ein Commit kann vorhanden sein; vor dem Weiterarbeiten git log und git status prüfen."},
     # Ein Commit läuft nicht immer sofort durch: der pre-commit-Hook des Repos kann
     # Linter oder Tests starten. Ohne diese Zeile sähe die TUI so lange tot aus.
     "commit_running": {
@@ -316,20 +281,28 @@ TR = {
     "commit_conflicts": {
         "en": "Commit helper is blocked while merge conflicts exist.",
         "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen."},
+    "commit_operation": {
+        "en": "Commit helper is blocked while a merge, rebase, cherry-pick, or revert is active.",
+        "de": "Die Commit-Hilfe ist während Merge, Rebase, Cherry-Pick oder Revert gesperrt."},
+    "commit_detached": {
+        "en": "Commit helper is blocked on a detached HEAD; switch to a branch first.",
+        "de": "Die Commit-Hilfe ist bei detached HEAD gesperrt; zuerst auf einen Branch wechseln."},
     # Der Rückgängig-Befehl steht bewusst in der Meldung: Wer gerade committet hat,
     # soll nicht suchen müssen, wie er es zurücknimmt.
     "committed_in": {"en": "Committed in {rel}. Undo: {undo}",
                      "de": "Committet in {rel}. Rückgängig: {undo}"},
-    "confirm_push": {"en": "Push {n} commit(s) to {r} now?",
-                     "de": "Jetzt {n} Commit(s) zu {r} pushen?"},
-    "committed_pushed": {"en": "Committed & pushed ({r}).", "de": "Committet & gepusht ({r})."},
-    "push_failed": {"en": "Push failed (Git exit code {code}).",
-                    "de": "Push fehlgeschlagen (Git-Exit-Code {code})."},
-    "pull_failed": {"en": "Fast-forward failed (Git exit code {code}).",
-                    "de": "Fast-forward fehlgeschlagen (Git-Exit-Code {code})."},
+    "push_outcome_unknown": {
+        "en": "Push outcome is unknown (Git exit code {code}); fetch/check the remote before retrying.",
+        "de": "Push-Ausgang unklar (Git-Exit-Code {code}); vor dem Wiederholen Remote fetchen/prüfen."},
+    "push_io_unknown": {
+        "en": "Push outcome is unknown; the process result could not be read — fetch/check the remote before retrying.",
+        "de": "Push-Ausgang unklar; das Prozessergebnis konnte nicht gelesen werden — vor dem Wiederholen Remote fetchen/prüfen."},
+    "push_tracking_changed": {
+        "en": "Push succeeded, but the local tracking ref changed concurrently; reload before another push.",
+        "de": "Push erfolgreich, aber der lokale Tracking-Ref änderte sich parallel; vor einem weiteren Push neu laden."},
     "nothing_to_commit": {"en": "Nothing to commit in this repo.",
                           "de": "Nichts zu committen in diesem Repo."},
-    # Sichere Push-/Pull-Hilfe
+    # Sichere Push-Hilfe
     "no_sync_for_action": {"en": "No sync remote is configured for this repository.",
                            "de": "Für dieses Repo ist kein Sync-Remote konfiguriert."},
     "public_simple_block": {
@@ -337,6 +310,9 @@ TR = {
         "de": "Der Sync-Remote ist öffentlich. Nutze G für die geschützte GitHub-Vorschau."},
     "transfer_fetch_failed": {"en": "Fetch from {r} failed (Git exit code {code}).",
                               "de": "Fetch von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+    "fetch_outcome_unknown": {
+        "en": "Fetch outcome for {r} is unknown; its tracking ref may have changed — reload before retrying.",
+        "de": "Fetch-Ausgang für {r} unklar; sein Tracking-Ref kann geändert sein — vor dem Wiederholen neu laden."},
     # Kurz halten: diese Meldung erscheint auch als Badge in der Repo-Zeile und
     # wird dort auf die Terminalbreite abgeschnitten. Die Langfassung steht im README.
     "transfer_auth_missing": {
@@ -365,15 +341,10 @@ TR = {
     "transfer_behind": {"en": "Local branch is {n} commit(s) behind {r}; pull first.",
                         "de": "Der lokale Branch ist {n} Commit(s) hinter {r}; zuerst pullen."},
     "nothing_to_push": {"en": "Nothing to push to {r}.", "de": "Nichts zu {r} zu pushen."},
-    "nothing_to_pull": {"en": "Nothing to pull from {r}.", "de": "Nichts von {r} zu pullen."},
     "confirm_sync_push": {"en": "Push {n} commit(s) to the private sync remote {r}?",
                           "de": "{n} Commit(s) zum privaten Sync-Remote {r} pushen?"},
-    "confirm_sync_pull": {"en": "Fast-forward {n} commit(s) from the private sync remote {r}?",
-                          "de": "{n} Commit(s) per Fast-forward vom privaten Sync-Remote {r} holen?"},
     "sync_pushed": {"en": "Pushed current branch to {r} (no tags).",
                     "de": "Aktuellen Branch zu {r} gepusht (keine Tags)."},
-    "sync_pulled": {"en": "Fast-forwarded current branch from {r}.",
-                    "de": "Aktuellen Branch per Fast-forward von {r} geholt."},
     "no_github": {"en": "No GitHub remote in this repository.",
                   "de": "Dieses Repo hat keinen GitHub-Remote."},
     "many_github": {"en": "Several GitHub remotes ({names}); use the terminal to choose deliberately.",
@@ -402,28 +373,20 @@ TR = {
     "git_help_body": {
         "en": "P  Push only the current branch to the private sync remote.\n"
               "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
-              "L  Pull only from the private sync remote by fast-forward.\n"
-              "   Never merges or rebases and refuses dirty/divergent repositories.\n\n"
               "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
               "   Requires typing PUSH <remote>; pins source and target OIDs and sends no tags.\n"
               "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
-              "R  Fetches all remotes in all repositories; it does not change working trees.\n\n"
-              "Z  Discards the selected file in the changes view (A) — the only action\n"
-              "   that loses an uncommitted change, and there is no undo for it.\n"
-              "   Untracked files, merge conflicts and renames are refused.\n"
-              "   A in that dialog puts all changes into a stash instead.",
+              "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
+              "A  Shows every changed file and its diff without modifying the repository.\n"
+              "   Discarding or unstaging remains an explicit terminal operation.",
         "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
               "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
-              "L  Nur per Fast-forward vom privaten Sync-Remote holen.\n"
-              "   Führt nie Merge oder Rebase aus und verweigert dirty/divergente Repos.\n\n"
               "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
               "   Verlangt PUSH <Remote>; pinnt Quell-/Ziel-OID und sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
-              "R  Fetcht alle Remotes aller Repos; Working Trees bleiben unverändert.\n\n"
-              "Z  Verwirft in der Änderungsansicht (A) die gewählte Datei — die einzige\n"
-              "   Aktion, die eine nicht committete Änderung verliert; kein Zurück.\n"
-              "   Unverfolgte Dateien, Merge-Konflikte und Umbenennungen lehnt gmf ab.\n"
-              "   A im selben Dialog legt stattdessen alle Änderungen in einen Stash."},
+              "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
+              "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
+              "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion."},
     # Repo-Info
     "repo_info_title": {"en": "Repository info · {rel}", "de": "Repo-Info · {rel}"},
     "info_path": {"en": "Path", "de": "Pfad"},
@@ -477,48 +440,16 @@ TR = {
         "en": " ↑/↓ or Tab select remote/branch · PgUp/PgDn scroll · Q/Esc close",
         "de": " ↑/↓ oder Tab Remote/Branch wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
     "info_footer_actions": {
-        "en": " T test remote (does it still exist?) · X remove remote (local config only)",
-        "de": " T Remote prüfen (existiert es noch?) · X Remote entfernen (nur lokale Config)"},
+        "en": " T test selected remote (read-only)",
+        "de": " T gewähltes Remote prüfen (rein lesend)"},
     "info_footer_actions_branch": {
-        "en": " X delete branch (only if merged; commits stay reachable)",
-        "de": " X Branch löschen (nur wenn gemergt; Commits bleiben erreichbar)"},
+        "en": " Branch details are read-only",
+        "de": " Branch-Details sind rein lesend"},
     "info_no_remotes": {"en": "This repository has no remote.",
                         "de": "Dieses Repo hat kein Remote."},
     "info_nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "info_check_remote_only": {"en": "T tests remotes; a branch is local anyway.",
                                "de": "T prüft Remotes; ein Branch ist ohnehin lokal."},
-    # Branch löschen (X auf einem Branch)
-    "branch_delete_title": {"en": "Delete branch · {b}", "de": "Branch löschen · {b}"},
-    "branch_is_current": {"en": "{b} is the current branch — switch branches first.",
-                          "de": "{b} ist der aktuelle Branch — erst wechseln."},
-    "branch_not_merged": {
-        "en": "{b} is not merged into HEAD; gmf deletes merged branches only "
-              "(terminal: git branch -D {b}).",
-        "de": "{b} ist nicht in HEAD gemergt; gmf löscht nur gemergte Branches "
-              "(Terminal: git branch -D {b})."},
-    "branch_effect_pointer": {
-        "en": "· only the branch pointer {b} disappears from .git/config and refs",
-        "de": "· es verschwindet nur der Branch-Zeiger {b} aus Config und Refs"},
-    "branch_effect_merged": {
-        "en": "· its commits are already in HEAD, so nothing is lost",
-        "de": "· seine Commits stecken schon in HEAD, es geht also nichts verloren"},
-    "branch_effect_remote": {
-        "en": "· a branch of the same name on a remote is NOT touched",
-        "de": "· ein gleichnamiger Branch auf einem Remote bleibt unberührt"},
-    "branch_effect_safe": {
-        "en": "· files, stashes and other branches stay untouched",
-        "de": "· Dateien, Stashes und andere Branches bleiben unberührt"},
-    "branch_delete_confirm": {"en": "Delete branch {b} now?",
-                              "de": "Branch {b} jetzt löschen?"},
-    "branch_deleted": {"en": "Deleted branch {b} (was {oid}).",
-                       "de": "Branch {b} gelöscht (war {oid})."},
-    "branch_delete_failed": {"en": "Deleting {b} failed: {e}",
-                             "de": "Löschen von {b} fehlgeschlagen: {e}"},
-    "branch_delete_cancelled": {"en": "No branch was deleted.",
-                                "de": "Es wurde kein Branch gelöscht."},
-    "branch_changed": {
-        "en": "The branch changed after the preview — nothing was deleted.",
-        "de": "Der Branch hat sich nach der Vorschau geändert — nichts wurde gelöscht."},
     # Remote prüfen (T)
     "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
     "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
@@ -550,6 +481,18 @@ TR = {
         "de": "{r}: Serverfehler dort — deren Problem, nicht dein Repo."},
     "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
                       "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
+    "check_unsafe_refspec": {
+        "en": "{r}: fetch blocked — its refspec can change refs outside refs/remotes/{r}/.",
+        "de": "{r}: Fetch gesperrt — seine Refspec kann Refs außerhalb refs/remotes/{r}/ ändern."},
+    "check_unsafe_url": {
+        "en": "{r}: check blocked — its fetch address is ambiguous, secret-bearing, or uses an external remote helper.",
+        "de": "{r}: Prüfung gesperrt — die Fetch-Adresse ist mehrdeutig, enthält Zugangsdaten oder nutzt einen externen Remote-Helper."},
+    "check_changed": {
+        "en": "{r}: remote configuration changed during fetch — the result is not trusted; tracking refs may already have changed.",
+        "de": "{r}: Remote-Konfiguration änderte sich während des Fetchs — dem Ergebnis wird nicht vertraut; Tracking-Refs können bereits geändert sein."},
+    "check_outcome_unknown": {
+        "en": "{r}: fetch outcome unknown — tracking refs may already have changed; refresh before retrying.",
+        "de": "{r}: Fetch-Ausgang unklar — Tracking-Refs können bereits geändert sein; vor dem Wiederholen neu einlesen."},
     "check_unknown": {"en": "{r}: unclear result — {e}", "de": "{r}: unklares Ergebnis — {e}"},
     # Stichworte für die Repo-Zeile (der ganze Satz steht auf der Info-Seite)
     "short_gone": {"en": "repository gone", "de": "Repo weg"},
@@ -560,158 +503,19 @@ TR = {
     "short_unreachable": {"en": "no connection", "de": "keine Verbindung"},
     "short_server": {"en": "server error", "de": "Serverfehler"},
     "short_timeout": {"en": "no answer", "de": "keine Antwort"},
+    "short_unsafe_refspec": {"en": "unsafe fetch refspec", "de": "unsichere Fetch-Refspec"},
+    "short_unsafe_url": {"en": "unsafe remote address", "de": "unsichere Remote-Adresse"},
+    "short_changed": {"en": "remote changed", "de": "Remote geändert"},
+    "short_outcome_unknown": {"en": "fetch outcome unknown",
+                              "de": "Fetch-Ausgang unklar"},
     "short_unknown": {"en": "fetch failed", "de": "Fetch fehlgeschlagen"},
-    # Remote entfernen (X)
-    "remove_title": {"en": "Remove remote · {r}", "de": "Remote entfernen · {r}"},
-    "remove_what_happens": {"en": "What this does:", "de": "Was dabei passiert:"},
-    "remove_effect_config": {
-        "en": "· the [remote \"{r}\"] section disappears from .git/config",
-        "de": "· der Abschnitt [remote \"{r}\"] verschwindet aus .git/config"},
-    "remove_effect_refs": {
-        "en": "· the remote-tracking branches refs/remotes/{r}/* are deleted",
-        "de": "· die Remote-Tracking-Branches refs/remotes/{r}/* werden gelöscht"},
-    "remove_effect_upstream": {
-        "en": "· a local branch tracking {r} loses its upstream setting",
-        "de": "· ein lokaler Branch mit Upstream auf {r} verliert diese Verknüpfung"},
-    "remove_effect_safe": {
-        "en": "· commits, files, branches and stashes stay untouched — nothing is sent",
-        "de": "· Commits, Dateien, Branches und Stashes bleiben unberührt — nichts wird gesendet"},
-    "remove_effect_server": {
-        "en": "· nothing changes on the server; this is purely local",
-        "de": "· auf dem Server ändert sich nichts; das ist rein lokal"},
-    "remove_undo": {"en": "Undo (restore the local configuration):",
-                    "de": "Rückgängig (lokale Konfiguration wiederherstellen):"},
-    "remove_command": {"en": "Command:", "de": "Befehl:"},
-    # Änderungen verwerfen (V in der Änderungsansicht)
-    "discard_title": {"en": "Discard changes · {p}",
-                      "de": "Änderungen verwerfen · {p}"},
-    "discard_effect_restore": {
-        "en": "· the file goes back to the state of the last commit",
-        "de": "· die Datei geht auf den Stand des letzten Commits zurück"},
-    "discard_effect_unstage": {
-        "en": "· this file is in no commit yet — there is no earlier state",
-        "de": "· diese Datei steht in keinem Commit — einen früheren Stand gibt es nicht"},
-    "discard_effect_stays": {
-        "en": "· it only loses its staging and stays on disk as an untracked file",
-        "de": "· sie verliert nur die Vormerkung und bleibt als unverfolgte Datei liegen"},
-    "discard_effect_history": {
-        "en": "· committed history is untouched; only the uncommitted change is lost",
-        "de": "· die Historie bleibt unberührt; verloren geht nur die nicht committete Änderung"},
-    "discard_extent": {"en": "· extent: {n} changed line(s)",
-                       "de": "· Umfang: {n} geänderte Zeile(n)"},
-    "discard_no_undo": {
-        "en": "No undo: what is discarded here cannot be brought back.",
-        "de": "Kein Rückgängig: Was hier verworfen wird, kommt nicht zurück."},
-    "discard_offer_all": {
-        "en": "A = put all {n} changed files into a stash instead (can be brought back)",
-        "de": "A = stattdessen alle {n} geänderten Dateien in einen Stash (holbar)"},
-    "discard_confirm": {"en": "Discard the changes in '{p}'?",
-                        "de": "Änderungen in '{p}' verwerfen?"},
-    "discard_unstage_confirm": {"en": "Remove '{p}' from the staged files?",
-                                "de": "'{p}' aus den vorgemerkten Dateien nehmen?"},
-    "discard_cancelled": {"en": "Cancelled — nothing discarded.",
-                          "de": "Abgebrochen — nichts verworfen."},
-    "discard_done": {"en": "Discarded: {p}", "de": "Verworfen: {p}"},
-    "discard_unstage_done": {"en": "No longer staged, file kept: {p}",
-                             "de": "Nicht mehr vorgemerkt, Datei bleibt liegen: {p}"},
-    "discard_failed": {"en": "Discarding failed: {e}",
-                       "de": "Verwerfen fehlgeschlagen: {e}"},
-    "discard_changed": {
-        "en": "The file changed after the preview — nothing was discarded. Review it again.",
-        "de": "Die Datei hat sich nach der Vorschau geändert — nichts wurde verworfen. Erneut prüfen."},
-    "discard_refused_untracked": {
-        "en": "Untracked file — it was never in Git, so there is no earlier state to "
-              "go back to. Delete it yourself or put it in .gitignore.",
-        "de": "Unverfolgte Datei — sie war nie in Git, es gibt keinen früheren Stand. "
-              "Selbst löschen oder in .gitignore aufnehmen."},
-    "discard_refused_conflict": {
-        "en": "Merge conflict — resolve it first; gmf discards nothing here.",
-        "de": "Merge-Konflikt — erst auflösen; gmf verwirft hier nichts."},
-    "discard_refused_rename": {
-        "en": "Renamed file — the new and the old name belong together, and gmf does "
-              "not discard half a rename.",
-        "de": "Umbenannte Datei — neuer und alter Name gehören zusammen, und eine "
-              "halbe Umbenennung verwirft gmf nicht."},
-    "discard_refused_submodule": {
-        "en": "Submodule — git restore does not touch its checked-out state, so "
-              "nothing would change. Reset it inside the submodule itself "
-              "(e.g. git submodule update).",
-        "de": "Submodul — git restore fasst dessen ausgecheckten Stand nicht an, es "
-              "würde sich also nichts ändern. Im Submodul selbst zurücksetzen "
-              "(z.B. git submodule update)."},
-    # Alle Änderungen eines Repos (zweite Stufe desselben Dialogs)
-    "discard_all_title": {"en": "Discard all changes · {rel}",
-                          "de": "Alle Änderungen verwerfen · {rel}"},
-    "discard_all_effect_stash": {
-        "en": "· all {n} changed file(s) go into a stash, not into the bin",
-        "de": "· alle {n} geänderten Dateien wandern in einen Stash, nicht in den Müll"},
-    "discard_all_effect_tree": {
-        "en": "· the working tree returns to the state of the last commit",
-        "de": "· der Arbeitsbaum geht auf den Stand des letzten Commits zurück"},
-    "discard_all_effect_untracked": {
-        "en": "· untracked files stay where they are",
-        "de": "· unverfolgte Dateien bleiben liegen"},
-    "discard_all_effect_submodules": {
-        "en": "· submodules keep their checked-out state (git stash skips them)",
-        "de": "· Submodule behalten ihren ausgecheckten Stand (git stash lässt sie aus)"},
-    "discard_all_effect_visible": {
-        "en": "· the stash stays visible in the list: S shows it, D drops it",
-        "de": "· der Stash bleibt in der Liste sichtbar: S zeigt ihn, D wirft ihn weg"},
-    # Ehrlich bleiben: `git stash pop` (ohne --index, wie auch die Taste U)
-    # schreibt alles in den Arbeitsbaum zurück. Was vorher vorgemerkt war, ist
-    # danach nicht mehr vorgemerkt.
-    "discard_all_undo": {
-        "en": "Undo (brings the contents back, U does the same; the staging is lost):",
-        "de": "Rückgängig (holt die Inhalte zurück, U tut dasselbe; "
-              "die Vormerkung geht verloren):"},
-    "discard_all_confirm": {"en": "Move all changes in '{rel}' into a stash?",
-                            "de": "Alle Änderungen in '{rel}' in einen Stash legen?"},
-    "discard_all_done": {"en": "All changes stashed in {rel} — U brings them back.",
-                         "de": "Alle Änderungen in {rel} gestasht — U holt sie zurück."},
-    # Eigene Meldung, wenn Submodule im Spiel waren: "alle Änderungen" wäre dann
-    # gelogen — der Dialog hat es vorher angekündigt, das Ergebnis muss es auch
-    # sagen, sonst hält man den Baum für restlos sauber.
-    "discard_all_done_submodules": {
-        "en": "Stashed in {rel} except the submodules — U brings it back.",
-        "de": "In {rel} gestasht, außer den Submodulen — U holt es zurück."},
-    "discard_all_refused_no_head": {
-        "en": "This repository has no commit yet — Git cannot stash here.",
-        "de": "Dieses Repo hat noch keinen Commit — Git kann hier nicht stashen."},
-    "discard_all_refused_only_untracked": {
-        "en": "Only untracked files here — gmf discards none of those.",
-        "de": "Hier liegen nur unverfolgte Dateien — davon verwirft gmf keine."},
-    "discard_all_refused_only_submodules": {
-        "en": "Only submodule changes here — git stash does not touch those; "
-              "work inside the submodule instead.",
-        "de": "Hier sind nur Submodul-Änderungen — die fasst git stash nicht an; "
-              "stattdessen im Submodul selbst arbeiten."},
-    "discard_all_refused_conflict": {
-        "en": "Merge conflict — resolve it first; gmf discards nothing here.",
-        "de": "Merge-Konflikt — erst auflösen; gmf verwirft hier nichts."},
-    # Sicherheitszusage der destruktiven Dialoge: der auszuführende Befehl muss im
-    # Moment der Bestätigung sichtbar sein. Passt er nicht mehr aufs Fenster,
-    # wird die Aktion verweigert statt blind bestätigt.
-    "dialog_too_small": {
-        "en": "Window is too small to show this confirmation safely — enlarge it and retry.",
-        "de": "Fenster zu klein, um diese Bestätigung sicher zu zeigen — vergrößern und erneut versuchen."},
-    "remove_sync_warning": {
-        "en": "Careful: {r} is the sync remote here — P and L stop working for this repo.",
-        "de": "Achtung: {r} ist hier der Sync-Remote — P und L funktionieren danach nicht mehr."},
-    "remove_confirm": {"en": "Remove remote {r} now?", "de": "Remote {r} jetzt entfernen?"},
-    "remove_done": {"en": "Removed remote {r}.", "de": "Remote {r} entfernt."},
-    "remove_failed": {"en": "Removing {r} failed (Git exit code {code}).",
-                      "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code})."},
-    "remove_cancelled": {"en": "Nothing was removed.", "de": "Es wurde nichts entfernt."},
-    "remove_changed": {
-        "en": "The remote configuration changed after the preview — nothing was removed.",
-        "de": "Die Remote-Konfiguration hat sich nach der Vorschau geändert — nichts wurde entfernt."},
     # Befehlsprotokoll
     "cmdlog_title": {"en": "Commands this session ran",
                      "de": "In dieser Sitzung ausgeführte Befehle"},
     "cmdlog_cancelled": {"en": "not run — cancelled", "de": "nicht ausgeführt — abgebrochen"},
     "cmdlog_empty": {
-        "en": "(none yet — actions like C, P, L, G, U, D, X and Z are listed here)",
-        "de": "(noch keine — Aktionen wie C, P, L, G, U, D, X und Z stehen hier)"},
+        "en": "(none yet — actions like C, P, G and R are listed here)",
+        "de": "(noch keine — Aktionen wie C, P, G und R stehen hier)"},
     "cmdlog_hint": {
         "en": "Every line is a real Git command; you can run it in a terminal yourself.",
         "de": "Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar."},
@@ -723,6 +527,11 @@ TR = {
               "(slow pre-commit hook or slow network?).",
         "de": "git {cmd} brauchte länger als {s}s und wurde abgebrochen "
               "(langsamer pre-commit-Hook oder langsames Netz?)."},
+    "transfer_timeout": {
+        "en": "git {cmd} took longer than {s}s; the outcome is unknown. Remote or "
+              "tracking refs may have changed — fetch/check before retrying.",
+        "de": "git {cmd} brauchte länger als {s}s; der Ausgang ist unklar. Remote- "
+              "oder Tracking-Refs können geändert sein — vor dem Wiederholen fetchen/prüfen."},
     "demo_built": {"en": "Demo sandbox: {p}\n(fake repos; delete the folder when done)",
                    "de": "Demo-Sandbox: {p}\n(Fake-Repos; Ordner danach löschen)"},
 }
@@ -774,6 +583,9 @@ class RepoStatus:
     path: Path
     rel: str                      # Pfad relativ zum Scan-Start (Anzeigename)
     branch: str = "?"
+    # Volle OID aus demselben Scan wie `branch`; None bedeutet belegten unborn
+    # Branch, der leere String nur einen von Tests/Altaufrufern unbekannten Stand.
+    head_oid: str | None = ""
     remote: str | None = None     # Name des erkannten Sync-Remotes (z.B. origin)
     remote_state: str = "ok"      # ok | no-remote | no-branch | detached | error
     ahead: int = 0
@@ -788,7 +600,7 @@ class RepoStatus:
     modified: int = 0
     deleted: int = 0
     untracked: int = 0
-    conflicts: int = 0            # ungemergte Dateien (Merge-Konflikt, z.B. nach stash pop)
+    conflicts: int = 0            # ungemergte Dateien (z.B. nach stash apply)
     files: list[ChangedFile] = field(default_factory=list)
     stashes: list = field(default_factory=list)  # ["stash@{0} WIP ...", ...]
     error: str = ""
@@ -840,9 +652,15 @@ class RemoteStatus:
     ahead: int = 0
     behind: int = 0
     fetch_fingerprint: str = ""
+    fetch_fingerprints: list[str] = field(default_factory=list)
     push_fingerprints: list[str] = field(default_factory=list)
     target_mismatch: bool = False
     multiple_pushurls: bool = False
+    fetch_refspecs_safe: bool = False
+    fetch_refspec_fingerprint: str = ""
+    branch_mapping_safe: bool = False
+    fetch_url_safe: bool = False
+    push_url_safe: bool = False
     fetch_failed: bool = False
     fetch_outcome: str = ""
     fetch_error_long: str = ""
@@ -882,6 +700,9 @@ class TransferCheck:
     worktree_fingerprint: str = ""
     fetch_fingerprint: str = ""
     push_fingerprint: str = ""
+    remote_name: str = ""
+    remote_config_signature: tuple = ()
+    transfer_url: str = ""
     target_oid: str = ""
 
     @property
@@ -890,7 +711,8 @@ class TransferCheck:
 
     def approval_signature(self) -> tuple:
         return (self.branch, self.head_oid, self.index_oid, self.worktree_fingerprint,
-                self.fetch_fingerprint, self.push_fingerprint, self.target_oid,
+                self.fetch_fingerprint, self.push_fingerprint, self.transfer_url,
+                self.remote_name, self.remote_config_signature, self.target_oid,
                 tuple(self.commits), tuple(self.files), self.ahead, self.behind)
 
 
@@ -933,19 +755,368 @@ class RemoteConfig:
     push_urls: list[str]
     fetch_targets: list[RemoteTarget]
     push_targets: list[RemoteTarget]
-    # Rohwerte aus remote.<name>.*. Sie sind für eine vollständige lokale
-    # Wiederherstellung nach `git remote remove` nötig: Der Befehl löscht neben
-    # URLs auch eigene Refspecs, tagOpt, mirror und weitere Remote-Optionen.
+    # Rohwerte aus remote.<name>.*. Fetches werden daraus einmal geprüft und
+    # anschließend mit genau diesen Refspecs ausgeführt; die veränderbare Config
+    # darf zwischen Schutzprüfung und Git-Aufruf nichts Neues einschleusen.
     settings: list[tuple[str, str]] = field(default_factory=list)
+    fetch_invalid_reason: str = ""
+    push_invalid_reason: str = ""
 
     @property
     def transfer_safe(self) -> bool:
-        return (len(self.fetch_targets) == 1 and len(self.push_targets) == 1
+        return (not self.fetch_invalid_reason and not self.push_invalid_reason
+                and len(self.fetch_targets) == 1 and len(self.push_targets) == 1
                 and self.fetch_targets[0] == self.push_targets[0])
 
 
+def _valid_refspec_pattern(value: str) -> bool:
+    """Git-Ref-Grammatik mit optional genau einem Refspec-Stern prüfen."""
+    if (not value.startswith("refs/") or value.endswith("/")
+            or value.endswith(".") or "//" in value or ".." in value
+            or "@{" in value or value.count("*") > 1):
+        return False
+    if any(ord(char) < 32 or ord(char) == 127
+           or char in " ~^:?[\\" for char in value):
+        return False
+    for component in value.split("/"):
+        if (not component or component.startswith(".")
+                or component.lower().endswith(".lock")):
+            return False
+    return True
+
+
+def fetch_refspecs_safe(remote: RemoteConfig) -> bool:
+    """Nur Tracking-Refs im Namensraum dieses Remotes aktualisieren lassen.
+
+    Negative Refspecs und reine Quell-Refspecs schreiben keine Ziel-Ref. Jede
+    ausdrueckliche Zielseite muss dagegen unter refs/remotes/<name>/ liegen.
+    Der eigentliche Netz-Fetch schreibt zwar keinen Ziel-Ref mehr; die Prüfung
+    belegt aber weiterhin, welchen Tracking-Ref gmf danach übernehmen darf.
+    """
+    if remote.fetch_invalid_reason:
+        return False
+    prefix = f"refs/remotes/{remote.name}/"
+    specs = [raw for key, raw in remote.settings if key.lower() == "fetch"]
+    if not specs:
+        # Ohne explizite Refspec kann ein späterer Fetch nicht an den geprüften
+        # Ziel-Namensraum gebunden werden. FETCH_HEAD allein wäre zwar harmlos,
+        # aktualisierte aber auch keinen Stand für den Repo-Vergleich.
+        return False
+    tracking_update = False
+    for raw in specs:
+        spec = raw.strip()
+        if spec != raw:
+            return False
+        if spec.startswith("^"):
+            if (spec.startswith("^+") or ":" in spec
+                    or not _valid_refspec_pattern(spec[1:])):
+                return False
+            continue
+        spec = spec.removeprefix("+")
+        if ":" not in spec:
+            if not _valid_refspec_pattern(spec):
+                return False
+            continue
+        if spec.count(":") != 1:
+            return False
+        source, destination = spec.split(":", 1)
+        if (not _valid_refspec_pattern(source)
+                or not _valid_refspec_pattern(destination)
+                or source.count("*") != destination.count("*")
+                or not destination.startswith(prefix)):
+            return False
+        tracking_update = True
+    return tracking_update
+
+
+def _ref_pattern_matches(pattern: str, ref: str) -> bool:
+    """Eine Git-Refspec mit höchstens einem `*` gegen einen vollen Ref prüfen."""
+    if "*" not in pattern:
+        return pattern == ref
+    before, after = pattern.split("*", 1)
+    return ref.startswith(before) and ref.endswith(after) \
+        and len(ref) >= len(before) + len(after)
+
+
+def fetch_maps_branch_exactly(remote: RemoteConfig, branch: str) -> bool:
+    """Belegt die erwartete Quelle für den Tracking-Ref dieses Branches.
+
+    Ein sicherer Ziel-Namensraum allein reicht für einen Push nicht: Eine
+    Refspec `dev:refs/remotes/origin/main` würde sonst Remote-dev als main
+    anzeigen und später sogar in den lokalen main mergen.
+    """
+    if not fetch_refspecs_safe(remote):
+        return False
+    expected_source = f"refs/heads/{branch}"
+    expected_destination = f"refs/remotes/{remote.name}/{branch}"
+    negatives: list[str] = []
+    sources: set[str] = set()
+    for key, raw in remote.settings:
+        if key.lower() != "fetch":
+            continue
+        spec = raw.strip()
+        if spec.startswith("^"):
+            negatives.append(spec[1:])
+            continue
+        spec = spec.removeprefix("+")
+        if ":" not in spec:
+            continue
+        source, destination = spec.split(":", 1)
+        if not _ref_pattern_matches(destination, expected_destination):
+            continue
+        if "*" in destination:
+            before, after = destination.split("*", 1)
+            middle = expected_destination[len(before):]
+            if after:
+                middle = middle[:-len(after)]
+            source = source.replace("*", middle)
+        sources.add(source)
+    if any(_ref_pattern_matches(pattern, expected_source) for pattern in negatives):
+        return False
+    return sources == {expected_source}
+
+
+def _argv_safe_remote_url(url: str) -> bool:
+    """Nur eine unverändert darstellbare Remote-Adresse darf in argv landen."""
+    if not url or display_remote_url(url) != url or terminal_text(url) != url:
+        return False
+    raw = str(url).strip()
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*::", raw):
+        return False
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme:
+        return parsed.scheme.lower() in {
+            "http", "https", "ssh", "git", "file", "git+ssh", "ssh+git",
+        }
+    # Kein Schema: lokaler Pfad oder die von Git eingebaute SCP-SSH-Syntax.
+    return True
+
+
+def remote_fetch_url(remote: RemoteConfig) -> str | None:
+    """Die tatsächlich verwendete, normalisierte Fetch-Adresse oder None."""
+    if (remote.fetch_invalid_reason or not remote.fetch_urls
+            or not remote.fetch_targets):
+        return None
+    return (remote.fetch_targets[0].repo_id
+            if remote.fetch_targets[0].host == "local"
+            else remote.fetch_urls[0])
+
+
+def remote_push_url(remote: RemoteConfig) -> str | None:
+    """Die eindeutig verwendbare, normalisierte Push-Adresse oder None."""
+    if (remote.push_invalid_reason or len(remote.push_urls) != 1
+            or len(remote.push_targets) != 1):
+        return None
+    return (remote.push_targets[0].repo_id
+            if remote.push_targets[0].host == "local"
+            else remote.push_urls[0])
+
+
+def remote_fetch_url_safe(remote: RemoteConfig) -> bool:
+    url = remote_fetch_url(remote)
+    return url is not None and _argv_safe_remote_url(url)
+
+
+def remote_push_url_safe(remote: RemoteConfig) -> bool:
+    url = remote_push_url(remote)
+    return url is not None and _argv_safe_remote_url(url)
+
+
+NO_GIT_HOOKS_ARGS = ("-c", "core.hooksPath=/dev/null")
+
+
+def safe_update_ref_args(*args: str) -> tuple[str, ...]:
+    """Interne Ref-CAS ohne vom Repo kontrollierte Nebenwirkungs-Hooks."""
+    return (*NO_GIT_HOOKS_ARGS, "update-ref", *args)
+
+
+class _PinnedRemoteURL(str):
+    """Str-Markierung: `run_git` bindet genau diese URL gegen Rewrite-Regeln."""
+
+    def __new__(cls, remote_url: str):
+        alias = "gmf-pin-" + uuid.uuid4().hex + "://approved"
+        value = super().__new__(cls, alias)
+        value.remote_url = remote_url
+        return value
+
+
+def _pinned_url_config(url: str) -> tuple[tuple[str, ...], str]:
+    """Eine einmalige, nicht weiter umschreibbare URL-Bindung erzeugen.
+
+    `remote get-url` liefert bereits eine umgeschriebene Adresse. Übergäbe gmf
+    sie danach nackt erneut an Git, könnte eine zweite Regel diese Adresse noch
+    einmal auf ein anderes Ziel umleiten. Stattdessen sieht Git nur einen
+    zufälligen Einmal-Alias; die pro Prozess gesetzte Regel bildet genau diesen
+    Alias auf die freigegebene URL ab. Fremde Rewrite-Regeln kennen den Alias
+    nicht. `run_git()` übergibt Schlüssel und Werte getrennt über
+    `GIT_CONFIG_KEY/VALUE`, damit ein `=` in der URL nicht versehentlich
+    Schlüssel und Wert trennt.
+    """
+    return (), _PinnedRemoteURL(url)
+
+
+def approved_fetch_args(remote: RemoteConfig, branch: str,
+                        source_oid: str) -> tuple[str, ...] | None:
+    """Nur das freigegebene Branch-Objekt holen, ohne einen lokalen Ref zu setzen.
+
+    Git Fetch dereferenziert Ziel-Symrefs. Deshalb bekommt der Netzaufruf
+    absichtlich gar keine Ziel-Refspec; `fetch_remote_safely()` übernimmt den
+    Tracking-Ref danach selbst mit `update-ref --no-deref`.
+    """
+    if not remote.fetch_urls or not remote.fetch_targets:
+        return None
+    fetch_url = remote_fetch_url(remote)
+    if (not fetch_refspecs_safe(remote)
+            or fetch_url is None or not _argv_safe_remote_url(fetch_url)
+            or not fetch_maps_branch_exactly(remote, branch)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid)):
+        return None
+    pin_config, pinned_url = _pinned_url_config(fetch_url)
+    return (
+        *pin_config, *NO_GIT_HOOKS_ARGS,
+        "fetch", "--no-tags", "--no-prune-tags", "--no-recurse-submodules",
+        "--no-write-fetch-head", "--quiet", "--jobs=1", "--refmap=", "--",
+        pinned_url, source_oid,
+    )
+
+
+def fetch_remote_block_reason(remote: RemoteConfig, branch: str) -> str | None:
+    """Den belegten Sicherheitsgrund nennen, bevor irgendein Netzaufruf läuft."""
+    if remote.fetch_invalid_reason:
+        return remote.fetch_invalid_reason
+    if (branch in ("?", "(detached)")
+            or not fetch_refspecs_safe(remote)
+            or not fetch_maps_branch_exactly(remote, branch)
+            or not remote.fetch_urls or not remote.fetch_targets):
+        return "unsafe_refspec"
+    fetch_url = remote_fetch_url(remote)
+    if fetch_url is None or not _argv_safe_remote_url(fetch_url):
+        return "unsafe_url"
+    return None
+
+
+def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
+                        timeout: int) -> subprocess.CompletedProcess:
+    """Einen Branch holen und seinen Tracking-Ref ohne Symref-Dereferenz setzen."""
+    def update_tracking(*args: str) -> subprocess.CompletedProcess:
+        try:
+            return run_git_logged(repo, *args, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Die Netzseite kann bereits erfolgreich gewesen und der lokale Ref
+            # trotz Timeout schon geändert sein. Für die UI bleibt das deshalb
+            # ein unklarer Fetch-Ausgang, kein sicher abgebrochenes update-ref.
+            raise FetchTrackingTimeout(
+                ["git", "-C", str(repo), "fetch"], exc.timeout,
+                output=exc.output, stderr=exc.stderr) from None
+
+    def config_matches() -> bool:
+        try:
+            current = read_remote_configs(
+                repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(
+                    remote.name)
+        except (subprocess.TimeoutExpired, GitReadError, OSError,
+                ValueError, RuntimeError):
+            return False
+        if current is None:
+            return False
+        return (tuple(current.fetch_urls), tuple(current.push_urls),
+                tuple(current.settings), current.fetch_invalid_reason,
+                current.push_invalid_reason) == (
+                    tuple(remote.fetch_urls), tuple(remote.push_urls),
+                    tuple(remote.settings), remote.fetch_invalid_reason,
+                    remote.push_invalid_reason)
+
+    def roll_back_tracking_change(source_oid: str | None, old_oid: str,
+                                  old_existed: bool
+                                  ) -> subprocess.CompletedProcess:
+        if source_oid is None:
+            # Unsere Löschung wiederherstellen, aber nur solange kein anderer
+            # Prozess inzwischen einen neuen Ref angelegt hat.
+            return update_tracking(*safe_update_ref_args(
+                "--no-deref", destination, old_oid, "0" * len(old_oid)))
+        if old_existed:
+            return update_tracking(*safe_update_ref_args(
+                "--no-deref", destination, old_oid, source_oid))
+        return update_tracking(*safe_update_ref_args(
+            "--no-deref", "-d", destination, source_oid))
+
+    reason = fetch_remote_block_reason(remote, branch)
+    if reason is not None:
+        return subprocess.CompletedProcess(
+            ["git", "fetch"], 128, "", reason)
+    fetch_url = remote_fetch_url(remote)
+    if fetch_url is None:
+        return subprocess.CompletedProcess(
+            ["git", "fetch"], 128, "", "unsafe_url")
+
+    source_ref = f"refs/heads/{branch}"
+    destination = f"refs/remotes/{remote.name}/{branch}"
+    pin_config, pinned_url = _pinned_url_config(fetch_url)
+    advertised = run_git(
+        repo, *pin_config, "ls-remote", "--refs", "--", pinned_url,
+        source_ref, timeout=timeout)
+    if advertised.returncode != 0:
+        return advertised
+    rows = [line.split("\t", 1) for line in advertised.stdout.splitlines()
+            if line.strip()]
+    if any(len(row) != 2 for row in rows) or len(rows) > 1:
+        return subprocess.CompletedProcess(
+            advertised.args, 128, advertised.stdout, "ambiguous remote branch")
+    source_oid = rows[0][0] if rows else None
+    if source_oid is not None and not re.fullmatch(
+            r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid):
+        return subprocess.CompletedProcess(
+            advertised.args, 128, advertised.stdout, "invalid remote object ID")
+
+    old = run_git(
+        repo, "rev-parse", "--verify", "-q", destination, timeout=timeout,
+        env=RAW_OBJECT_ENV)
+    if old.returncode not in (0, 1):
+        return old
+    old_oid = (old.stdout.strip() if old.returncode == 0
+               else "0" * (len(source_oid) if source_oid else 40))
+    if source_oid is None:
+        if old.returncode == 1:
+            return subprocess.CompletedProcess(advertised.args, 0, "", "")
+        if not config_matches():
+            raise RemoteConfigChangedError(remote.name)
+        updated = update_tracking(*safe_update_ref_args(
+            "--no-deref", "-d", destination, old_oid))
+        if updated.returncode != 0 or config_matches():
+            return updated
+        rolled_back = roll_back_tracking_change(None, old_oid, True)
+        if rolled_back.returncode != 0:
+            raise OSError("fetch tracking rollback outcome is unknown")
+        raise RemoteConfigChangedError(remote.name)
+
+    args = approved_fetch_args(remote, branch, source_oid)
+    if args is None:
+        return subprocess.CompletedProcess(
+            ["git", "fetch"], 128, "", "unsafe fetch configuration")
+    fetched = run_git_logged(repo, *args, timeout=timeout, env=RAW_OBJECT_ENV)
+    if fetched.returncode != 0:
+        return fetched
+    present = run_git(
+        repo, "cat-file", "-e", source_oid + "^{commit}", timeout=timeout,
+        env=RAW_OBJECT_ENV)
+    if present.returncode != 0:
+        return subprocess.CompletedProcess(
+            present.args, 128, present.stdout, "fetched object is unavailable")
+    if not config_matches():
+        raise RemoteConfigChangedError(remote.name)
+    updated = update_tracking(*safe_update_ref_args(
+        "--no-deref", destination, source_oid, old_oid))
+    if updated.returncode != 0 or config_matches():
+        return updated
+    rolled_back = roll_back_tracking_change(
+        source_oid, old_oid, old.returncode == 0)
+    if rolled_back.returncode != 0:
+        raise OSError("fetch tracking rollback outcome is unknown")
+    raise RemoteConfigChangedError(remote.name)
+
+
 # Zwei-Buchstaben-Codes, die einen ungemergten Zustand (Merge-Konflikt) bedeuten.
-# git status meldet solche Dateien z.B. nach einem `stash pop` mit Konflikt.
+# git status meldet solche Dateien z.B. nach einem `stash apply` mit Konflikt.
 UNMERGED_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
 
 
@@ -957,21 +1128,16 @@ class ChangedFile(NamedTuple):
     --porcelain``: erstes Zeichen der Index (was gestaget ist), zweites Zeichen
     der Arbeitsbaum (was daneben noch geändert ist). Erst daran ist erkennbar,
     ob eine Änderung nur im Arbeitsbaum liegt (`` M``), nur im Index (``M ``)
-    oder in beiden (``MM``) — und ob es eine neu hinzugefügte Datei (``A ``) ist,
-    für die es gar keinen früheren Stand gibt. Ohne diese Unterscheidung lässt
-    sich nicht sagen, was ein Zurücksetzen der Datei überhaupt bedeutet.
-
-    ``submodule`` markiert einen Gitlink (Submodul, Mode 160000). Der
-    Porcelain-Status kennzeichnet Submodule nicht — die Kennung setzt erst
-    ``mark_gitlinks()`` nach dem Parsen. Sie ist fürs Verwerfen entscheidend:
-    ``git restore`` und ``git stash`` fassen den ausgecheckten Stand eines
-    Submoduls nicht an, melden aber trotzdem Erfolg (Exit 0).
+    oder in beiden (``MM``) — und ob es eine neu hinzugefügte Datei (``A ``) ist.
     """
 
     code: str
     path: str
     xy: str
-    submodule: bool = False
+    # Ziel und Quelle eines Porcelain-Renames tragen dieselbe Paar-ID. Der
+    # Commit-Wizard darf sie dadurch nur gemeinsam an- oder abwaehlen; das rohe
+    # xy allein reicht bei mehreren gleichzeitigen Renames nicht zur Zuordnung.
+    rename_group: str = ""
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -1024,151 +1190,37 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]
             m += 1
             files.append(ChangedFile("M", path, xy))
         if source and "R" in xy:
+            group = hashlib.sha256(
+                (path + "\0" + source).encode("utf-8", "surrogateescape")
+            ).hexdigest()
+            files[-1] = files[-1]._replace(rename_group=group)
             d += 1
-            files.append(ChangedFile("D", source, xy))
+            files.append(ChangedFile("D", source, xy, rename_group=group))
     return m, d, u, c, files
-
-
-class DiscardPlan(NamedTuple):
-    """Wie eine Änderung zurückgenommen wird — oder warum gmf es ablehnt.
-
-    ``args`` sind die Git-Argumente ohne ``git`` selbst; bei einer Ablehnung
-    sind sie leer und ``refused`` nennt den Grund (Schlüssel für die Meldung).
-    ``kind`` sagt dem Dialog, welcher Fall vorliegt, damit er die Folgen richtig
-    beschreibt — „zurück auf den letzten Commit" ist etwas anderes als „bleibt
-    liegen, nur nicht mehr vorgemerkt".
-    """
-
-    args: tuple[str, ...] = ()
-    kind: str = ""
-    refused: str = ""
-
-
-class DiscardSnapshot(NamedTuple):
-    """Der exakt geprüfte Zustand vor einem harten Datei-Verwerfen.
-
-    ``fingerprint`` bindet den sichtbaren Status an Index, HEAD und den rohen
-    Arbeitsbaum-Inhalt. Damit kann der Dialog nach der Bestätigung feststellen,
-    ob er noch dieselbe Änderung verwirft, die vorher geprüft wurde.
-    """
-
-    plan: DiscardPlan
-    diff_text: str
-    fingerprint: str
-
-
-def plan_discard(entry: ChangedFile, has_head: bool) -> DiscardPlan:
-    """Für eine einzelne Datei entscheiden, was Verwerfen hier bedeutet.
-
-    ``has_head`` sagt, ob das Repo überhaupt schon einen Commit hat (siehe
-    ``repo_has_head()``). Ohne HEAD gibt es keinen Stand, aus dem Git etwas
-    zurückholen könnte — das ändert den Befehl, nicht die Zusage.
-
-    Fünf Fälle, die sich nur am rohen Status (plus Gitlink-Kennung)
-    auseinanderhalten lassen:
-
-    * Merge-Konflikt: abgelehnt. Mitten in einem Merge ist „zurück auf den
-      letzten Commit" für eine einzelne Datei nicht eindeutig — man verlöre
-      womöglich die halbe Auflösung.
-    * Submodul (Gitlink): abgelehnt. ``git restore`` checkt im Submodul nichts
-      aus — der Befehl liefe mit Exit 0 durch, das Submodul stünde unverändert
-      auf seinem Commit, und gmf meldete trotzdem „Verworfen". Zurückgehen
-      heißt hier: im Submodul selbst arbeiten (z.B. ``git -C <pfad> checkout``
-      oder ``git submodule update``).
-    * Unverfolgt (``??``): abgelehnt. Diese Datei war nie in Git, es gibt keinen
-      Stand, auf den man zurückgeht. Das wäre Löschen, nicht Verwerfen.
-    * Umbenennung (``R…``): abgelehnt. Sie besteht aus zwei Einträgen (neuer und
-      alter Name); eine Hälfte allein zurückzunehmen ließe die andere als Rest
-      im Repo stehen.
-    * Neu hinzugefügt (``A…``), als Kopie erkannt (``C…``) oder nur angemeldet
-      (Status ``" A"``, das Ergebnis von ``git add -N``): Die Datei steht in keinem
-      Commit, ein früherer Stand existiert also nicht. gmf nimmt sie nur aus der
-      Vormerkung; die Datei selbst bleibt als unverfolgte Datei liegen und wird
-      NICHT gelöscht. Die Y-Spalte muss hier mitgeprüft werden: Bei ``git add -N``
-      steht das ``A`` rechts, und der generische ``git restore --worktree`` unten
-      LÖSCHT einen verfolgten Pfad, den die Quelle nicht kennt.
-    * Alles andere (geändert, gelöscht, Typwechsel — gestaget, im Arbeitsbaum
-      oder beides): zurück auf den Stand des letzten Commits. ``--source=HEAD``
-      mit ``--staged --worktree`` setzt Vormerkung und Arbeitsbaum gemeinsam
-      zurück; ein blankes ``git restore`` holte den Arbeitsbaum nur aus der
-      Vormerkung und ließe eine gestagete Änderung stehen.
-    """
-    xy = entry.xy
-    if xy in UNMERGED_CODES:
-        return DiscardPlan(refused="conflict")
-    if xy == "??":
-        return DiscardPlan(refused="untracked")
-    if "R" in xy:
-        return DiscardPlan(refused="rename")
-    if entry.submodule:
-        return DiscardPlan(refused="submodule")
-    if xy[:1] in ("A", "C") or xy[1:2] == "A":
-        if not has_head:
-            # `git restore --staged` holt die Vormerkung standardmäßig aus HEAD,
-            # den es hier noch nicht gibt — Git bräche ab. `rm --cached` nimmt
-            # den Eintrag direkt aus dem Index und lässt die Datei liegen; genau
-            # das sagt der Dialog zu.
-            # `-f` ist hier nötig, nicht großzügig: Wurde die neue Datei nach dem
-            # `git add` weiterbearbeitet (Status ``AM``), verweigert `rm --cached`
-            # den Dienst, weil der vorgemerkte Inhalt weder in der Datei noch in
-            # HEAD steht. Aufgegeben wird dabei nur diese Zwischenfassung — genau
-            # das, was "Vormerkung entfernen" bedeutet, und dasselbe, was
-            # `git restore --staged` im Repo MIT Commit ohne Nachfrage tut.
-            # `--cached` bleibt die Zusage an die Datei: Der Arbeitsbaum wird
-            # nicht angefasst, auch nicht mit `-f`.
-            return DiscardPlan(("rm", "--cached", "-f", "--", entry.path), "unstage")
-        return DiscardPlan(("restore", "--staged", "--", entry.path), "unstage")
-    return DiscardPlan(
-        ("restore", "--source=HEAD", "--staged", "--worktree", "--", entry.path),
-        "restore")
-
-
-def plan_discard_all(files: list[ChangedFile], has_head: bool) -> DiscardPlan:
-    """Alle verfolgten Änderungen auf einmal — als Stash, nicht als Verlust.
-
-    Bei „alle" fehlt die Beurteilung der einzelnen Datei, die das harte
-    Zurücksetzen trägt. Deshalb wandert hier alles in einen Stash: Der Baum ist
-    genauso sauber, der Inhalt bleibt aber sichtbar (Stash-Zeile, ``S``
-    Vorschau) und mit ``U`` wieder anwendbar.
-
-    Bewusst ohne Pfadangabe und ohne ``--include-untracked``: ``git stash push``
-    nimmt genau die verfolgten Änderungen mit und lässt unverfolgte Dateien
-    liegen — dieselbe Grenze wie bei der Einzeldatei. Submodule (Gitlinks)
-    bleiben ebenfalls draußen: ``git stash`` fasst deren ausgecheckten Stand
-    nicht an. Gibt es außer Submodulen nichts zu stashen, wird abgelehnt —
-    der Befehl legte sonst gar keinen Stash an (»No local changes to save«)
-    und gmf meldete trotzdem Erfolg.
-    """
-    if any(f.xy in UNMERGED_CODES for f in files):
-        return DiscardPlan(refused="conflict")
-    if not has_head:
-        # Ohne einen einzigen Commit gibt es nichts, wogegen Git stashen könnte.
-        return DiscardPlan(refused="no_head")
-    if not any(f.xy != "??" for f in files):
-        return DiscardPlan(refused="only_untracked")
-    if not any(f.xy != "??" and not f.submodule for f in files):
-        return DiscardPlan(refused="only_submodules")
-    return DiscardPlan(("stash", "push", "-m", "gmf: discarded all changes"),
-                       "stash")
-
-
-def suggested_ignore(path: str) -> str | None:
-    """Liefert die passende .gitignore-Zeile, wenn die Datei typischer Müll ist."""
-    parts = path.rstrip("/").split("/")
-    basename = parts[-1]
-    for name, is_dir, pattern in IGNORE_RULES:
-        if is_dir and name in parts:
-            return pattern
-        if not is_dir and basename == name:
-            return pattern
-    for suffix, pattern in IGNORE_SUFFIXES.items():
-        if basename.endswith(suffix):
-            return pattern
-    return None
 
 
 class CommitSafetyError(RuntimeError):
     pass
+
+
+class CommitAdoptionError(CommitSafetyError):
+    """Der Commit steht bereits im Verlauf, nur die Indexübernahme scheiterte."""
+
+    def __init__(self, committed_head: str, cause: Exception):
+        super().__init__(str(cause))
+        self.committed_head = committed_head
+
+
+class CommitOutcomeUnknownError(RuntimeError):
+    """HEAD kann bewegt sein; Erfolg oder sicherer Rollback ist nicht belegt."""
+
+
+class RemoteConfigChangedError(RuntimeError):
+    """Ein Fetch wurde wegen geänderter Remote-Konfiguration zurückgenommen."""
+
+
+class FetchTrackingTimeout(subprocess.TimeoutExpired):
+    """Ein Tracking-Ref-CAS kann trotz Timeout bereits gewirkt haben."""
 
 
 def _path_signature(path: Path) -> tuple | None:
@@ -1180,53 +1232,7 @@ def _path_signature(path: Path) -> tuple | None:
             info.st_size, info.st_mtime_ns)
 
 
-def update_gitignore_atomic(repo: Path, patterns: list[str]) -> bool:
-    """Append unique rules without following symlinks or overwriting a raced target."""
-    repo = repo.resolve()
-    target = repo / ".gitignore"
-    before = _path_signature(target)
-    existing_text = ""
-    if before is not None:
-        info = target.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise CommitSafetyError("target is not a regular file")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(target, flags)
-        except OSError as e:
-            raise CommitSafetyError(str(e)) from e
-        try:
-            with os.fdopen(fd, "r") as f:
-                existing_text = f.read()
-        except (OSError, UnicodeError) as e:
-            raise CommitSafetyError(str(e)) from e
-    existing = set(existing_text.splitlines())
-    new_lines = [pattern for pattern in patterns if pattern not in existing]
-    if not new_lines:
-        return False
-    updated = existing_text
-    if updated and not updated.endswith("\n"):
-        updated += "\n"
-    updated += "\n".join(new_lines) + "\n"
-
-    fd, tmp_name = tempfile.mkstemp(prefix=".gitignore.gmf.", dir=repo)
-    tmp = Path(tmp_name)
-    try:
-        mode = stat.S_IMODE(target.lstat().st_mode) if before is not None else 0o644
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w") as f:
-            f.write(updated)
-            f.flush()
-            os.fsync(f.fileno())
-        if _path_signature(target) != before:
-            raise CommitSafetyError("target changed during update")
-        os.replace(tmp, target)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-    return True
+_SIGNATURE_UNSET = object()
 
 
 def _real_index_signature(repo: Path, timeout: int) -> tuple | None:
@@ -1251,8 +1257,31 @@ def has_unmerged_entries(repo: Path, timeout: int) -> bool:
     return bool(diff.stdout or index.stdout)
 
 
+def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
+    """True, wenn ein Commit Teil einer laufenden Git-Sequenz waere.
+
+    Ein konfliktfrei vorbereiteter Merge hat keine ungemergten Indexeintraege,
+    aber `git commit` erzeugt trotzdem einen Merge-Commit. Der temporaere
+    Teilbaum der Commit-Hilfe darf einen solchen Commit niemals abschliessen.
+    Dasselbe gilt fuer Cherry-Pick, Revert, Rebase und den Sequencer.
+    """
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                   "rebase-merge", "rebase-apply", "sequencer"):
+        result = _required_git(repo, "rev-parse", "--git-path", marker,
+                               timeout=timeout)
+        path = Path(result.stdout.strip())
+        if not path.is_absolute():
+            path = repo / path
+        if path.exists():
+            return True
+    return False
+
+
 def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
-                    commit_timeout: int | None = None) -> subprocess.CompletedProcess:
+                    commit_timeout: int | None = None, *,
+                    expected_head=_SIGNATURE_UNSET,
+                    expected_ref=_SIGNATURE_UNSET
+                    ) -> subprocess.CompletedProcess:
     """Commit exactly paths through a temporary index; preserve the user's index bytes.
 
     `timeout` gilt für die schnellen Vorbereitungsschritte (Index lesen, Baum
@@ -1263,18 +1292,37 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         raise CommitSafetyError("no approved paths")
     if has_unmerged_entries(repo, timeout):
         raise CommitSafetyError("merge conflicts exist")
+    if repository_operation_in_progress(repo, timeout):
+        raise CommitSafetyError("a merge or sequencer operation is active")
     real_before = _real_index_signature(repo, timeout)
     head_before = current_head(repo, timeout)
+    head_ref_before = current_symbolic_head_ref(repo, timeout)
+    if head_ref_before is None:
+        raise CommitSafetyError("detached HEAD")
+    if ((expected_head is not _SIGNATURE_UNSET
+         and head_before != expected_head)
+            or (expected_ref is not _SIGNATURE_UNSET
+                and head_ref_before != expected_ref)):
+        raise CommitSafetyError("HEAD changed after UI approval")
     approved = set(paths)
     with tempfile.TemporaryDirectory(prefix="gmf-index-") as temp:
         index_path = str(Path(temp) / "index")
-        env = dict(os.environ, GIT_INDEX_FILE=index_path)
+        env = {
+            **RAW_OBJECT_ENV,
+            "GIT_INDEX_FILE": index_path,
+            "GIT_LITERAL_PATHSPECS": "1",
+        }
         if head_before is None:
             # Frisches Repo ohne ersten Commit: HEAD existiert noch nicht, der
             # temporäre Index startet leer statt vom HEAD-Baum.
-            _required_git(repo, "read-tree", "--empty", timeout=timeout, env=env)
+            _required_git(repo, *NO_GIT_HOOKS_ARGS, "read-tree", "--empty",
+                          timeout=timeout, env=env)
         else:
-            _required_git(repo, "read-tree", "HEAD", timeout=timeout, env=env)
+            # Nicht den beweglichen Namen HEAD erneut lesen: Ein kurzzeitiger
+            # Checkout könnte sonst fremde, nicht freigegebene Baum-Einträge in
+            # den temporären Index bringen und vor dem späten Guard zurückwechseln.
+            _required_git(repo, *NO_GIT_HOOKS_ARGS, "read-tree", head_before,
+                          timeout=timeout, env=env)
         # Interna des temporären Index werden NICHT protokolliert: ein kopiertes
         # `git add`/`git commit` liefe im Terminal gegen den ECHTEN Index (dem
         # Protokoll fehlt das entscheidende GIT_INDEX_FILE) und könnte dort
@@ -1304,40 +1352,142 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         tree_after = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if tree_after != tree_before:
             raise CommitSafetyError("approved files changed during commit preparation")
-        logged_args = ("commit", "-m", message, "--", *paths)
+        # Der echte Index-Lock verhindert ab hier, dass Merge, Cherry-pick,
+        # Revert oder Checkout ihre gemeinsame Sequenz NACH der Markerprüfung
+        # beginnen. `git commit` arbeitet mit dem separaten GIT_INDEX_FILE und
+        # braucht deshalb ausschließlich dessen eigenen Index-Lock. HEAD kann
+        # Git selbst nur aktualisieren, wenn wir HEAD.lock noch nicht halten;
+        # die Branch-Identität wird direkt vor und nach dem Commit geprüft.
+        guard_paths = (
+            Path(str(_git_path(repo, "index", timeout)) + ".lock"),
+        )
+        guards: list[tuple[Path, int | None, tuple[int, int]]] = []
+        commit_started = False
+        committed_head = None
         try:
-            result = run_git(
-                repo, "commit", "-m", message, env=env,
-                timeout=timeout if commit_timeout is None else commit_timeout)
-        except subprocess.TimeoutExpired as exc:
-            log_command(repo, logged_args, returncode=None)
-            # Der freigegebene Baum existiert nur hier in der Funktion. Die
-            # Ausnahme ist der einzige Kanal zum Timeout-Zweig des Aufrufers —
-            # nur mit dem Baum kann finish_interrupted_commit dort dieselbe
-            # Hook-Prüfung samt Rollback leisten wie der Normalweg unten.
-            exc.approved_tree = tree_after
-            # Dazu gehört die HEAD-Basis DIESER Funktion: Der Aufrufer hat sein
-            # eigenes `head_before` schon vorher gelesen. Rückt HEAD dazwischen
-            # weiter (ein anderes Programm committet im selben Repo), passt der
-            # alte Wert nicht mehr zum Elternteil unseres Commits — der atomare
-            # Rollback in `_verify_hooks_kept_approved_tree` griffe dann nicht,
-            # und ein von einem Hook erweiterter Commit bliebe stehen.
-            exc.approved_head = head_before
-            raise
-        log_command(repo, logged_args, result.returncode)
-    committed_head = None
-    if result.returncode == 0:
-        committed_head = _verify_hooks_kept_approved_tree(
-            repo, head_before, tree_after, timeout)
-    if _real_index_signature(repo, timeout) != real_before:
-        raise CommitSafetyError("Git changed the real index unexpectedly")
-    if result.returncode == 0:
-        adopt_commit_in_real_index(repo, paths, timeout)
-        # Der Aufrufer braucht die ungekürzte neue OID für einen sicheren
-        # Rückgängig-Befehl beim Erst-Commit. CompletedProcess bleibt dabei
-        # rückwärtskompatibel für alle bisherigen Aufrufer.
-        result.committed_head = committed_head
-    return result
+            for guard_path in guard_paths:
+                fd, identity = _acquire_git_lock(guard_path)
+                guards.append((guard_path, fd, identity))
+            if has_unmerged_entries(repo, timeout):
+                raise CommitSafetyError("merge conflicts appeared before commit")
+            if repository_operation_in_progress(repo, timeout):
+                raise CommitSafetyError(
+                    "a merge or sequencer operation appeared before commit")
+            if _real_index_signature(repo, timeout) != real_before:
+                raise CommitSafetyError("Git index changed during approval")
+            if current_head(repo, timeout) != head_before:
+                raise CommitSafetyError("HEAD changed during commit preparation")
+            if current_symbolic_head_ref(repo, timeout) != head_ref_before:
+                raise CommitSafetyError("HEAD branch changed during commit preparation")
+            literal_paths = tuple(":(literal)" + path for path in paths)
+            logged_args = ("commit", "-m", message, "--", *literal_paths)
+            reflog_action = "gmf-" + uuid.uuid4().hex
+            commit_env = {
+                **RAW_OBJECT_ENV,
+                "GIT_INDEX_FILE": index_path,
+                "GIT_REFLOG_ACTION": reflog_action,
+            }
+            try:
+                commit_started = True
+                result = run_git(
+                    repo, "-c", "core.logAllRefUpdates=true",
+                    "commit", "-m", message, env=commit_env,
+                    timeout=timeout if commit_timeout is None else commit_timeout)
+            except subprocess.TimeoutExpired as exc:
+                log_command(repo, logged_args, returncode=None)
+                # Diese Attribute markieren ausschließlich einen Timeout IM
+                # eigentlichen Commit-Aufruf. Frühere Timeouts besitzen sie
+                # nicht und dürfen im TUI-Pfad keinen Commit vortäuschen.
+                exc.approved_tree = tree_after
+                exc.approved_head = head_before
+                exc.approved_ref = head_ref_before
+                exc.approved_paths = tuple(paths)
+                exc.reflog_action = reflog_action
+                raise
+            except OSError as exc:
+                # Popen kann bereits gestartet sein und communicate() erst nach
+                # einem wirksamen Commit scheitern. Ohne verlässlichen Exit-Code
+                # darf die UI niemals zu einem Wiederholungsversuch einladen.
+                log_command(repo, logged_args, returncode=None)
+                raise CommitOutcomeUnknownError(str(exc)) from exc
+            log_command(repo, logged_args, result.returncode)
+            if result.returncode != 0:
+                try:
+                    reflog_matches = _commit_reflog_matches(
+                        repo, reflog_action, timeout)
+                    moved = (current_head(repo, timeout) != head_before
+                             or current_symbolic_head_ref(repo, timeout)
+                             != head_ref_before)
+                except (subprocess.TimeoutExpired, GitReadError,
+                        CommitSafetyError, OSError) as exc:
+                    raise CommitOutcomeUnknownError(str(exc)) from exc
+                if reflog_matches or moved:
+                    # Ein Hook kann selbst einen Commit schreiben und danach
+                    # den äußeren Commit mit Exit != 0 scheitern lassen. Er kann
+                    # HEAD sogar zurückstellen; der zufällige Reflog-Marker
+                    # belegt die zwischenzeitliche Branch-Mutation trotzdem.
+                    raise CommitOutcomeUnknownError(
+                        "repository changed although git commit reported failure")
+            try:
+                committed_head = None
+                if result.returncode == 0:
+                    try:
+                        committed_head, committed_ref = _commit_reflog_proof(
+                            repo, reflog_action, timeout)
+                    except CommitSafetyError as exc:
+                        # Ohne Reflog-Nachweis kennen wir die eigene Commit-OID
+                        # nicht sicher. Git hat dennoch bereits Erfolg gemeldet.
+                        raise CommitOutcomeUnknownError(str(exc)) from exc
+                    committed_head = _verify_hooks_kept_approved_tree(
+                        repo, head_before, tree_after, timeout, head_ref_before,
+                        committed_head, committed_ref)
+                try:
+                    real_after = _real_index_signature(repo, timeout)
+                except (CommitSafetyError, GitReadError, OSError,
+                        subprocess.TimeoutExpired) as exc:
+                    if result.returncode == 0:
+                        raise CommitAdoptionError(committed_head, exc) from exc
+                    raise
+                if real_after != real_before:
+                    error = CommitSafetyError(
+                        "Git changed the real index unexpectedly")
+                    if result.returncode == 0:
+                        raise CommitAdoptionError(committed_head, error)
+                    raise error
+                if result.returncode == 0:
+                    try:
+                        adopt_commit_in_real_index(
+                            repo, paths, committed_head, head_ref_before,
+                            real_before, timeout, _held_guards=guards)
+                    except (CommitSafetyError, GitReadError, OSError,
+                            subprocess.TimeoutExpired) as exc:
+                        raise CommitAdoptionError(committed_head, exc) from exc
+                    # Der Aufrufer braucht die ungekürzte neue OID für einen
+                    # sicheren Rückgängig-Befehl beim Erst-Commit.
+                    result.committed_head = committed_head
+                    result.approved_head = head_before
+                    result.approved_ref = head_ref_before
+                return result
+            except (subprocess.TimeoutExpired, GitReadError, OSError) as exc:
+                if result.returncode == 0:
+                    raise CommitOutcomeUnknownError(str(exc)) from exc
+                raise
+        finally:
+            pending_exception = sys.exc_info()[0] is not None
+            cleanup_error = None
+            for guard_path, fd, identity in reversed(guards):
+                try:
+                    _release_owned_git_lock(guard_path, fd, identity)
+                except OSError as exc:
+                    cleanup_error = cleanup_error or exc
+            if cleanup_error is not None and not pending_exception:
+                if commit_started:
+                    # Der Commit kann bereits existieren; selbst ein Fehler
+                    # beim bloßen Schließen/Löschen des Guards darf daraus nie
+                    # die irreführende Aussage "Commit failed" machen.
+                    raise CommitOutcomeUnknownError(
+                        str(cleanup_error)) from cleanup_error
+                raise CommitSafetyError(str(cleanup_error)) from cleanup_error
 
 
 def _stage_approved(repo: Path, paths: list[str], timeout: int,
@@ -1360,17 +1510,58 @@ def _stage_approved(repo: Path, paths: list[str], timeout: int,
         (present if os.path.lexists(repo / path) else missing).append(path)
     result = subprocess.CompletedProcess(["git", "add"], 0, "", "")
     if present:
-        result = run_git(repo, "add", "--", *present, timeout=timeout, env=env)
+        result = run_git(repo, *NO_GIT_HOOKS_ARGS, "add", "--", *present,
+                         timeout=timeout, env=env)
         if result.returncode != 0:
             return result
     if missing:
-        result = run_git(repo, "rm", "--cached", "-q", "--ignore-unmatch", "--",
-                         *missing, timeout=timeout, env=env)
+        result = run_git(
+            repo, *NO_GIT_HOOKS_ARGS, "rm", "--cached", "-q",
+            "--ignore-unmatch", "--", *missing, timeout=timeout, env=env)
+        if result.returncode != 0:
+            return result
     return result
 
 
+def _commit_reflog_matches(repo: Path, action: str,
+                           timeout: int) -> list[tuple[str, str]]:
+    """Alle Branch-Reflog-Einträge des zufälligen Commit-Markers lesen."""
+    result = _required_git(
+        repo, "reflog", "show", "--all", "--format=%H%x00%gD%x00%gs",
+        "--fixed-strings", f"--grep-reflog={action}", timeout=timeout,
+        env=RAW_OBJECT_ENV)
+    matches: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split("\0", 2)
+        if len(fields) != 3 or not fields[2].startswith(action + ":"):
+            continue
+        selector = fields[1]
+        ref = selector.rsplit("@{", 1)[0]
+        if fields[0] and (ref == "HEAD" or ref.startswith("refs/heads/")):
+            matches.append((fields[0], ref))
+    return matches
+
+
+def _commit_reflog_proof(repo: Path, action: str,
+                         timeout: int) -> tuple[str, str]:
+    """Die von diesem ``git commit`` geschriebene OID und Ref eindeutig lesen.
+
+    Der zufällige ``GIT_REFLOG_ACTION`` steht nur für diesen Aufruf im Reflog.
+    Dadurch bleibt ein späterer fremder Commit unterscheidbar, selbst wenn er
+    den Branch noch vor unserer Nachprüfung weiterbewegt.
+    """
+    matches = [(oid, ref) for oid, ref in _commit_reflog_matches(
+        repo, action, timeout) if ref.startswith("refs/heads/")]
+    if len(matches) != 1:
+        raise CommitSafetyError(
+            "cannot identify the committed branch safely; check git log")
+    return matches[0]
+
+
 def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
-                                     approved_tree: str, timeout: int) -> str:
+                                     approved_tree: str, timeout: int,
+                                     approved_ref: str, committed_head: str,
+                                     committed_ref: str) -> str:
     """Nach dem Commit prüfen, dass kein Hook den freigegebenen Baum verändert hat.
 
     `git commit` erbt GIT_INDEX_FILE — ein pre-commit-Hook kann darüber mit
@@ -1383,31 +1574,71 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
     Alt-Wert-Prüfung bewegt den Branch nur dann, wenn er noch exakt auf unserem
     Commit steht — fremde Commits kann das nicht treffen.
     """
-    head_after = _required_git(repo, "rev-parse", "HEAD", timeout=timeout).stdout.strip()
-    committed_tree = _required_git(repo, "rev-parse", "HEAD^{tree}",
-                                   timeout=timeout).stdout.strip()
-    if committed_tree == approved_tree:
-        return head_after
-    parent = run_git(repo, "rev-parse", "--verify", "-q", head_after + "^",
-                     timeout=timeout)
-    parent_oid = parent.stdout.strip() if parent.returncode == 0 else None
-    if parent_oid == head_before:
-        if head_before is None:
-            # Erst-Commit: den Branch-Ref wieder löschen (unborn wiederherstellen).
-            rollback = run_git_logged(repo, "update-ref", "-d", "HEAD", head_after,
-                                      timeout=timeout)
+    raw_env = RAW_OBJECT_ENV
+    head_now = _required_git(repo, "rev-parse", "HEAD", timeout=timeout,
+                             env=raw_env).stdout.strip()
+    actual_ref = current_symbolic_head_ref(repo, timeout)
+    approved_now = run_git(
+        repo, "rev-parse", "--verify", "-q", approved_ref,
+        timeout=timeout, env=raw_env)
+    approved_oid = approved_now.stdout.strip() if approved_now.returncode == 0 else None
+
+    def rollback_commit_ref(restore_oid: str | None) -> subprocess.CompletedProcess:
+        if restore_oid is None:
+            args = safe_update_ref_args(
+                "--no-deref", "-d", committed_ref, committed_head)
         else:
-            rollback = run_git_logged(repo, "update-ref", "HEAD", head_before,
-                                      head_after, timeout=timeout)
-        if rollback.returncode == 0:
+            args = safe_update_ref_args(
+                "--no-deref", committed_ref, restore_oid, committed_head)
+        return run_git_logged(repo, *args, timeout=timeout)
+
+    actual_parents = commit_parents(repo, committed_head, timeout)
+    if committed_ref != approved_ref:
+        # Der Commit landete auf einem anderen Branch. Dessen vorherige Spitze
+        # ist der eindeutige Eltern-Commit des dort erzeugten Normalcommits —
+        # NICHT `head_before` des freigegebenen Branches. Bei mehreren Eltern
+        # gibt es keinen sicheren Rücksetzpunkt und wir mutieren gar nichts.
+        if len(actual_parents) > 1:
+            raise CommitOutcomeUnknownError(
+                "commit landed on another branch with ambiguous parents")
+        restore_oid = actual_parents[0] if actual_parents else None
+        if rollback_commit_ref(restore_oid).returncode == 0:
+            raise CommitSafetyError(
+                "commit landed on another branch and was rolled back")
+        raise CommitOutcomeUnknownError(
+            "commit landed on another branch and could not be rolled back")
+    expected_parents = [] if head_before is None else [head_before]
+    if actual_parents != expected_parents:
+        if len(actual_parents) > 1:
+            raise CommitOutcomeUnknownError(
+                "the commit has ambiguous parents and was not rolled back")
+        restore_oid = actual_parents[0] if actual_parents else None
+        if rollback_commit_ref(restore_oid).returncode == 0:
+            raise CommitSafetyError(
+                "the commit has unexpected parents and was rolled back")
+        raise CommitOutcomeUnknownError(
+            "the commit has unexpected parents and could not be rolled back")
+    committed_tree = _required_git(
+        repo, "rev-parse", committed_head + "^{tree}", timeout=timeout,
+        env=raw_env).stdout.strip()
+    if committed_tree != approved_tree:
+        if rollback_commit_ref(head_before).returncode == 0:
             raise CommitSafetyError(
                 "a hook changed the approved files; the commit was rolled back")
-    raise CommitSafetyError("a hook changed the committed tree; check git log")
+        raise CommitOutcomeUnknownError(
+            "a hook changed the committed tree and rollback failed")
+    if (actual_ref != approved_ref or approved_oid != committed_head
+            or head_now != committed_head):
+        raise CommitOutcomeUnknownError(
+            "HEAD branch changed after commit; commit remains on the approved branch")
+    return committed_head
 
 
 def finish_interrupted_commit(repo: Path, head_before: str | None,
                               paths: list[str], timeout: int,
-                              approved_tree: str | None = None) -> bool:
+                              approved_tree: str | None = None,
+                              approved_ref: str | None = None,
+                              reflog_action: str | None = None) -> bool:
     """Nach einem Commit-Timeout klären, ob der Commit doch entstanden ist.
 
     `git commit` kann den Commit längst geschrieben haben und erst danach — etwa
@@ -1417,50 +1648,92 @@ def finish_interrupted_commit(repo: Path, head_before: str | None,
     Rückgabe: True, wenn ein neuer Commit existiert.
 
     `approved_tree` ist der vor dem Commit festgeschriebene Baum (aus der
-    Timeout-Ausnahme von commit_selected). Damit gilt hier dieselbe Zusage wie
-    im Normalweg: Erst wenn der committete Baum exakt dem freigegebenen
-    entspricht, wird der Index nachgezogen. Weicht er ab — ein pre-commit-Hook
-    hat z.B. weitere Pfade in den Commit gestagt —, rollt
-    `_verify_hooks_kept_approved_tree` den Commit zurück und wirft
-    CommitSafetyError. Der frühere reine Namensvergleich (`changed ==
-    set(paths)`) ließ genau diesen Fall ungeprüft durch und übersah auch
-    inhaltlich veränderte, gleichnamige Pfade; er bleibt nur als vorsichtige
-    Rückfallebene, wenn kein Baum bekannt ist (Timeout vor dem eigentlichen
-    Commit-Aufruf) — dann wird der Index nie nachgezogen, ohne dass die Pfade
-    exakt stimmen.
+    Timeout-Ausnahme von commit_selected). Vollständige Elternliste und Baum
+    werden damit nur lesend geprüft. Anders als im synchronen Normalweg darf
+    dieser Pfad weder den Index nachziehen noch einen abweichenden Commit
+    zurückrollen: Nach dem Timeout lässt sich nicht beweisen, ob er von gmf oder
+    einem parallelen Programm kam. Ohne freigegebenen Baum wird deshalb nur ein
+    geänderter HEAD gemeldet, aber nicht als inhaltlich freigegeben behandelt.
     """
+    # Timeouts absichtlich unverändert weiterreichen: Der TUI-Aufrufer zeigt
+    # dafür den unklaren Commit-Ausgang an. Eine Umwandlung in GitReadError
+    # würde fälschlich wie ein gewöhnlicher Commit-Fehler aussehen.
     head_after = current_head(repo, timeout)
     if head_after is None or head_after == head_before:
+        if reflog_action is not None:
+            # Ein Hook kann auf einem anderen Branch committen, HEAD danach auf
+            # den Ausgangsstand zurückstellen und erst dann hängen. Der zufällige
+            # Marker belegt diese Mutation, auch wenn HEAD unverändert aussieht.
+            if _commit_reflog_matches(repo, reflog_action, timeout):
+                raise CommitSafetyError(
+                    "a hook commit exists on another branch; check git log")
         return False
+    if (approved_ref is not None
+            and current_symbolic_head_ref(repo, timeout) != approved_ref):
+        raise CommitSafetyError(
+            "HEAD branch changed during interrupted commit; check git log")
     if approved_tree is not None:
-        _verify_hooks_kept_approved_tree(repo, head_before, approved_tree, timeout)
-        # Der Baum stimmt — aber ist es überhaupt UNSER Commit? Nur wenn er
-        # direkt auf der freigegebenen Basis sitzt, gehört er zu diesem Lauf.
-        # Ein fremder Commit mit zufällig gleichem Baum darf den echten Index
-        # nicht nachziehen; das verschöbe Index-Einträge, die niemand hier
-        # freigegeben hat.
-        parent = run_git(repo, "rev-parse", "--verify", "-q", head_after + "^",
-                         timeout=timeout)
-        parent_oid = parent.stdout.strip() if parent.returncode == 0 else None
-        if parent_oid != head_before:
+        # Zuerst nur lesend pruefen. `_verify_hooks_kept_approved_tree()` kann
+        # zurueckrollen und ist hier deshalb absichtlich tabu.
+        expected_parents = [] if head_before is None else [head_before]
+        if commit_parents(repo, head_after, timeout) != expected_parents:
             raise CommitSafetyError(
-                "the new commit does not sit on the approved base; check git log")
-        adopt_commit_in_real_index(repo, paths, timeout)
+                "the new commit has unexpected parents; check git log")
+        committed_tree = _required_git(
+            repo, "rev-parse", head_after + "^{tree}", timeout=timeout,
+            env=RAW_OBJECT_ENV).stdout.strip()
+        if committed_tree != approved_tree:
+            raise CommitSafetyError(
+                "the new commit does not match the approved tree; check git log")
+        # Selbst Basis+Baum beweisen nach dem Timeout nicht, dass dieser Commit
+        # von unserem inzwischen beendeten Prozess stammt. Deshalb keine
+        # Indexmutation; der Status bleibt bis zur manuellen Pruefung ehrlich.
         return True
-    if head_before is None:
-        r = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
-                    "--root", head_after, timeout=timeout)
-    else:
-        r = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r",
-                    head_before, head_after, timeout=timeout)
-    changed = {line for line in r.stdout.splitlines() if line}
-    if r.returncode == 0 and changed == set(paths):
-        adopt_commit_in_real_index(repo, paths, timeout)
+    # Ohne freigegebenen Baum ist nicht einmal der Inhalt belastbar zuordenbar.
+    # Auch dann nur melden, niemals Index oder HEAD verändern.
     return True
 
 
-def adopt_commit_in_real_index(repo: Path, paths: list[str], timeout: int) -> None:
-    """Den echten Index für die committeten Pfade auf den neuen HEAD nachziehen.
+def _git_path(repo: Path, name: str, timeout: int) -> Path:
+    """Einen von Git bestimmten Verwaltungs-Pfad absolut zurückgeben."""
+    result = _required_git(repo, "rev-parse", "--git-path", name, timeout=timeout)
+    path = Path(result.stdout.strip())
+    return path if path.is_absolute() else repo / path
+
+
+def _acquire_git_lock(path: Path) -> tuple[int, tuple[int, int]]:
+    """Eine Git-Lockdatei ohne Warten anlegen und ihre Identität festhalten."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise CommitSafetyError("cannot lock %s: %s" % (path.name, exc)) from exc
+    info = os.fstat(fd)
+    return fd, (info.st_dev, info.st_ino)
+
+
+def _release_owned_git_lock(path: Path, fd: int | None,
+                            identity: tuple[int, int]) -> None:
+    """Nur die von diesem Prozess angelegte, noch identische Lockdatei lösen."""
+    if fd is not None:
+        os.close(fd)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if (info.st_dev, info.st_ino) == identity:
+        path.unlink()
+
+
+def adopt_commit_in_real_index(repo: Path, paths: list[str],
+                               committed_head: str, approved_ref: str,
+                               expected_index_signature: tuple | None,
+                               timeout: int, *,
+                               _held_guards: list[tuple[
+                                   Path, int | None, tuple[int, int]
+                               ]] | None = None) -> None:
+    """Den echten Index für die committeten Pfade auf den verifizierten Commit ziehen.
 
     Ohne diesen Schritt bleibt der echte Index auf dem Stand von vor dem Commit
     stehen: Er zeigt für die eben committete Datei noch den alten Inhalt. `git
@@ -1472,29 +1745,154 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str], timeout: int) -> No
     fasst es ausschließlich diese Index-Einträge an — nie den Arbeitsbaum, nie
     einen Commit und nie die übrigen, bewusst gestageten Änderungen.
     """
-    # Ein Fehler hier darf den bereits geschriebenen Commit nicht entwerten. Er
-    # steht im Befehlsprotokoll (H) mit seinem Exit-Code; schlimmstenfalls sieht
-    # die Datei bis zum nächsten `git add`/`git reset` weiter geändert aus.
-    run_git_logged(repo, "reset", "-q", "HEAD", "--", *paths, timeout=timeout)
+    # Drei gewöhnliche Git-Locks schließen die Lücke zwischen Zustandsprüfung
+    # und Indexmutation: Checkout braucht index.lock/HEAD.lock, update-ref den
+    # Branch-Lock. Die Pfade werden zuerst in einem zweiten temporären Index
+    # aktualisiert; erst nach erneuter Prüfung ersetzt dessen Inhalt atomar den
+    # echten Index. Ein Fehler lässt den bereits geschriebenen Commit bestehen,
+    # verändert aber weder einen fremden Index noch einen fremden Branch.
+    index = _git_path(repo, "index", timeout)
+    head = _git_path(repo, "HEAD", timeout)
+    branch = _git_path(repo, approved_ref, timeout)
+    lock_paths = (Path(str(index) + ".lock"), Path(str(head) + ".lock"),
+                  Path(str(branch) + ".lock"))
+    external_guards = _held_guards is not None
+    held = _held_guards if _held_guards is not None else []
+    temp_index: Path | None = None
+    try:
+        if external_guards:
+            if [entry[0] for entry in held] != list(lock_paths[:1]):
+                raise CommitSafetyError("commit guard identity changed")
+            lock_targets = lock_paths[1:]
+        else:
+            lock_targets = lock_paths
+        for lock_path in lock_targets:
+            fd, identity = _acquire_git_lock(lock_path)
+            held.append((lock_path, fd, identity))
+        index_fd = held[0][1]
+        if index_fd is None:  # ausschließlich für den Typprüfer
+            raise CommitSafetyError("lost index lock")
+        if _real_index_signature(repo, timeout) != expected_index_signature:
+            raise CommitSafetyError("Git index changed before real-index adoption")
+        if (current_head(repo, timeout) != committed_head
+                or current_symbolic_head_ref(repo, timeout) != approved_ref):
+            raise CommitSafetyError("HEAD changed before real-index adoption")
+
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix="gmf-adopt-index-", dir=index.parent)
+        os.close(temp_fd)
+        temp_index = Path(temp_name)
+        if index.exists():
+            temp_index.write_bytes(index.read_bytes())
+        else:
+            temp_index.unlink()
+            empty = run_git(
+                repo, *NO_GIT_HOOKS_ARGS, "read-tree", "--empty",
+                timeout=timeout,
+                env={**RAW_OBJECT_ENV, "GIT_INDEX_FILE": str(temp_index)})
+            if empty.returncode != 0:
+                raise GitReadError("git read-tree failed (exit %d)" % empty.returncode)
+        updated = run_git(
+            repo, *NO_GIT_HOOKS_ARGS, "reset", "-q", committed_head,
+            "--", *paths,
+            timeout=timeout,
+            env={**RAW_OBJECT_ENV,
+                 "GIT_INDEX_FILE": str(temp_index),
+                 "GIT_LITERAL_PATHSPECS": "1",
+                 })
+        if updated.returncode != 0:
+            raise GitReadError("git reset failed (exit %d)" % updated.returncode)
+        if (current_head(repo, timeout) != committed_head
+                or current_symbolic_head_ref(repo, timeout) != approved_ref):
+            raise CommitSafetyError("HEAD changed during real-index adoption")
+
+        content = temp_index.read_bytes()
+        os.ftruncate(index_fd, 0)
+        offset = 0
+        while offset < len(content):
+            offset += os.write(index_fd, content[offset:])
+        if index.exists():
+            # Einen bestehenden Indexmodus erhalten. Beim Erst-Commit bleibt
+            # dagegen der von `_acquire_git_lock()` sicher mit 0600 angelegte
+            # Modus bestehen; 0644 würde eine strenge Prozess-Umask umgehen.
+            os.fchmod(index_fd, stat.S_IMODE(index.lstat().st_mode))
+        os.fsync(index_fd)
+        os.close(index_fd)
+        held[0] = (held[0][0], None, held[0][2])
+        os.replace(lock_paths[0], index)
+        log_command(
+            repo, (*NO_GIT_HOOKS_ARGS, "reset", "-q", committed_head, "--",
+                   *(":(literal)" + path for path in paths)), 0)
+    finally:
+        if temp_index is not None:
+            try:
+                temp_index.unlink()
+            except FileNotFoundError:
+                pass
+        if external_guards:
+            # Der Aufrufer besitzt den Index-Lock weiterhin; die hier ergänzten
+            # HEAD-/Branch-Locks lösen.
+            for lock_path, fd, identity in reversed(held[1:]):
+                _release_owned_git_lock(lock_path, fd, identity)
+            del held[1:]
+        else:
+            for lock_path, fd, identity in reversed(held):
+                _release_owned_git_lock(lock_path, fd, identity)
 
 
 def current_head(repo: Path, timeout: int) -> str | None:
-    """Commit-ID von HEAD — oder None, wenn sie sich nicht lesen lässt.
+    """Commit-ID von HEAD — oder nur beim belegten unborn Branch ``None``.
 
-    Wird gebraucht, um nach einem abgebrochenen Commit zu unterscheiden, ob er noch
-    zustande kam. Ein frisches Repo ohne Commits hat kein HEAD: auch dann None.
+    Timeout und andere Lesefehler werden propagiert; sie dürfen niemals wie ein
+    frisches Repo ohne Commit aussehen.
     """
-    try:
-        r = run_git(repo, "rev-parse", "HEAD", timeout=timeout)
-    except subprocess.TimeoutExpired:
+    r = run_git(repo, "rev-parse", "--verify", "-q", "HEAD", timeout=timeout)
+    if r.returncode == 0:
+        return r.stdout.strip()
+    if r.returncode == 1:
         return None
-    return r.stdout.strip() if r.returncode == 0 else None
+    raise GitReadError("git rev-parse HEAD failed (exit %d)" % r.returncode)
 
 
-def stash_preview(repo: Path, timeout: int) -> tuple[bool, str]:
-    """Return a complete stash patch, including untracked and binary contents."""
-    r = run_git(repo, "stash", "show", "-p", "--binary", "--include-untracked",
-                "stash@{0}", timeout=timeout)
+def current_symbolic_head_ref(repo: Path, timeout: int) -> str | None:
+    """Vollständiger Branch-Ref von HEAD; bei detached HEAD ``None``."""
+    result = run_git(repo, "symbolic-ref", "-q", "HEAD", timeout=timeout)
+    if result.returncode == 0:
+        ref = result.stdout.strip()
+        if ref.startswith("refs/heads/"):
+            return ref
+        raise GitReadError("HEAD points outside refs/heads")
+    if result.returncode == 1:
+        return None
+    raise GitReadError("git symbolic-ref HEAD failed (exit %d)" % result.returncode)
+
+
+def commit_parents(repo: Path, oid: str, timeout: int) -> list[str]:
+    """Alle Eltern einer Commit-OID lesen; ein Normalcommit hat genau einen."""
+    result = _required_git(
+        repo, "rev-list", "--parents", "-n", "1", oid, "--", timeout=timeout,
+        env=RAW_OBJECT_ENV)
+    fields = result.stdout.split()
+    if not fields or fields[0] != oid:
+        raise GitReadError("git rev-list returned malformed parents")
+    return fields[1:]
+
+
+def stash_preview(repo: Path, timeout: int, oid: str | None = None) -> tuple[bool, str]:
+    """Return one OID-bound stash patch, including untracked and binary contents."""
+    if oid is None:
+        try:
+            current = latest_stash(repo, timeout)
+        except (GitReadError, OSError) as exc:
+            return False, str(exc)[:240]
+        if current is None:
+            return False, "no stash"
+        oid = current[0]
+    r = run_git(
+        repo, "stash", "show", "-p", "--binary", "--include-untracked",
+        "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
+        oid, timeout=timeout,
+        env=RAW_OBJECT_ENV)
     if r.returncode != 0:
         detail = (r.stderr or "Git exit %d" % r.returncode).strip()[:240]
         return False, detail
@@ -1526,7 +1924,32 @@ NONINTERACTIVE_GIT_ENV = {
     "GIT_ASKPASS": "",              # kein Askpass-Programm/-Dialog
     "SSH_ASKPASS": "",
     "SSH_ASKPASS_REQUIRE": "never",  # OpenSSH: auch keinen GUI-Dialog aufmachen
+    "GIT_OPTIONAL_LOCKS": "0",       # Leser aktualisieren Index-Caches nie nebenbei
     "LC_ALL": "C",                  # Meldungen bleiben stabil englisch (s.u.)
+}
+
+# Diese Variablen schlagen `git -C <repo>` und koennen einen Aufruf auf Refs,
+# Objekte, Index oder Arbeitsbaum eines anderen Repos umlenken. Von der
+# aufrufenden Shell werden sie deshalb nie geerbt. Nur GIT_INDEX_FILE darf ein
+# interner Aufrufer kontrolliert fuer den temporaeren Commit-Index setzen.
+REPOSITORY_GIT_ENV = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH", "GIT_PREFIX", "GIT_NAMESPACE",
+    # Diese Variablen schreiben zwar nicht in ein anderes Repo, deuten aber
+    # seinen Commit-Graph um. Ein geerbtes Graft/Shallow-File darf eine echte
+    # Divergenz niemals als Fast-forward erscheinen lassen.
+    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
+}
+
+# Objekt- und Historienprüfungen müssen den echten Commit-Graph sehen. Das leere
+# Graft-/Shallow-Dateien unterdrücken sowohl geerbte Umleitungen als auch die
+# repo-lokalen Graph-Grenzen; GIT_NO_REPLACE_OBJECTS schaltet Replace-Refs ab.
+# `run_git()` lässt genau diese kontrollierten leeren Dateien intern zu.
+RAW_OBJECT_ENV = {
+    "GIT_NO_REPLACE_OBJECTS": "1",
+    "GIT_GRAFT_FILE": os.devnull,
+    "GIT_SHALLOW_FILE": os.devnull,
 }
 
 # Ursachen, die ein fehlgeschlagener Remote-Zugriff haben kann — in dieser Reihenfolge
@@ -1572,6 +1995,10 @@ CREDENTIAL_HELPER_MARKERS = (
     "terminal prompts disabled", "could not read username",
     "could not read password", "authentication failed",
     "invalid username or password",
+)
+
+KEYCHAIN_HELPER_MARKERS = (
+    "osxkeychain", "gh auth git-credential",
 )
 
 
@@ -1620,7 +2047,8 @@ def keychain_session() -> bool:
     return _KEYCHAIN_SESSION
 
 
-def classify_remote_check(result: subprocess.CompletedProcess) -> str:
+def classify_remote_check(result: subprocess.CompletedProcess, *,
+                          keychain_helper: bool = False) -> str:
     """Warum ist der Zugriff auf das Remote gescheitert?
 
     Liefert "dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
@@ -1637,20 +2065,88 @@ def classify_remote_check(result: subprocess.CompletedProcess) -> str:
     text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
     for cause, markers in REMOTE_CHECK_CAUSES:
         if any(marker in text for marker in markers):
-            if (cause == "auth" and not keychain_session()
+            if (cause == "auth" and keychain_helper and not keychain_session()
                     and any(m in text for m in CREDENTIAL_HELPER_MARKERS)):
                 return "nokeychain"
             return cause
     return "unknown"
 
 
-def credentials_missing(result: subprocess.CompletedProcess) -> bool:
+def credentials_missing(result: subprocess.CompletedProcess, *,
+                        keychain_helper: bool = False) -> bool:
     """Fehlen wirklich Zugangsdaten? (Ein unbekannter Hostschlüssel ist etwas anderes.)
 
     Bei "nokeychain" bewusst False: Dort fehlen keine Zugangsdaten, sie sind nur
     aus dieser Sitzung nicht lesbar.
     """
-    return classify_remote_check(result) == "auth"
+    return classify_remote_check(result, keychain_helper=keychain_helper) == "auth"
+
+
+def remote_uses_keychain_helper(repo: Path, name: str, timeout: int, *,
+                                for_push: bool = False) -> bool:
+    """Positiv belegen, dass dieses Remote einen Keychain-Helper verwendet.
+
+    Eine Nicht-Aqua-Sitzung allein beweist keine Schlüsselbundursache. Erst der
+    fuer die konkrete URL wirksame `credential.helper` macht aus einem sonstigen
+    Auth-Fehler den Sonderfall `nokeychain`.
+    """
+    try:
+        remote = read_remote_configs(
+            repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(name)
+    except (subprocess.TimeoutExpired, GitReadError, OSError,
+            ValueError, RuntimeError):
+        return False
+    if remote is None:
+        return False
+    urls = remote.push_urls if for_push else remote.fetch_urls
+    # Git verwendet beim Fetch nur die erste URL. Ein Helper, der erst auf eine
+    # spätere Ersatz-URL passt, belegt daher nicht die Ursache des vorliegenden
+    # Fehlers. Push-Remotes mit mehreren Zielen sind ohnehin nicht transfer_safe;
+    # auch dort ist ausschließlich der tatsächlich gewählte erste Endpunkt
+    # relevant.
+    for url in urls[:1]:
+        # Die Match-URL landet in argv und ist damit fuer andere lokale Prozesse
+        # sichtbar. Enthält sie Benutzerinfo, Query oder Fragment, darf selbst
+        # die Helper-Diagnose das Secret nicht dorthin kopieren.
+        try:
+            parsed = urllib.parse.urlsplit(url)
+        except ValueError:
+            continue
+        if (parsed.scheme.lower() not in ("http", "https")
+                or display_remote_url(url) != url):
+            continue
+        try:
+            result = run_git(
+                repo, "config", "--get-urlmatch", "credential.helper", url,
+                timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            # Diese Abfrage ist nur eine nachgelagerte Diagnose. Ihr eigener
+            # Fehler darf die eigentliche Fetch-/Push-Meldung nicht verdecken.
+            return False
+        if result.returncode not in (0, 1):
+            continue
+        for line in result.stdout.splitlines():
+            shell_helper = line.startswith("!")
+            command = line[1:].lstrip() if shell_helper else line
+            try:
+                words = shlex.split(command)
+            except ValueError:
+                continue
+            if not words:
+                continue
+            if not shell_helper and words == ["osxkeychain"]:
+                return True
+            if (len(words) == 3
+                    and words[1:3] == ["auth", "git-credential"]):
+                executable = Path(words[0])
+                if (shell_helper and words[0] == "gh"
+                        and shutil.which("gh") is not None):
+                    return True
+                if (executable.is_absolute()
+                        and executable.name == "gh"
+                        and os.access(executable, os.X_OK)):
+                    return True
+    return False
 
 
 # Git zitiert in Fehlermeldungen die komplette Remote-URL — inklusive eines
@@ -1666,9 +2162,9 @@ def credentials_missing(result: subprocess.CompletedProcess) -> bool:
 # genau die Schemata NICHT ab, deren letztes Zeichen ein Satzzeichen ist
 # (z.B. ein Remote-Helper "foo+://") — dort bliebe das Passwort stehen.
 _SCHEME = r"[A-Za-z][A-Za-z0-9+.-]*"
-_URL_PASSWORD = re.compile(r"(?i)\b(%s://[^/@\s:]*):[^/@\s]*@" % _SCHEME)
-_HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
+_URL_USERINFO = re.compile(r"(?i)\b(%s://)([^/@\s]+)@" % _SCHEME)
 _URL_QUERY_FRAGMENT = re.compile(r"(?i)\b(%s://[^\s'?#]*)[?#][^\s']*" % _SCHEME)
+_SSH_URL_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
 
 
 def redact_remote_error(line: str) -> str:
@@ -1682,17 +2178,26 @@ def redact_remote_error(line: str) -> str:
     Info-Seite und über error_long auch in --json; deshalb wird schon an der
     Eingangsgrenze redigiert, nicht erst bei der Anzeige.
     """
-    line = _URL_PASSWORD.sub(r"\1@", line)
-    line = _HTTP_USERINFO.sub(r"\1", line)
+    def redact_userinfo(match: re.Match) -> str:
+        scheme_prefix, userinfo = match.groups()
+        scheme = scheme_prefix[:-3].lower()
+        if scheme in _SSH_URL_SCHEMES:
+            # Ein SSH-Benutzer wie `git` ist Zielidentitaet; ein Passwort nie.
+            username = userinfo.split(":", 1)[0]
+            return scheme_prefix + username + "@"
+        # Bei HTTP, FTP und unbekannten Helper-Schemata kann schon das einzelne
+        # Userinfo-Feld ein Zugangstoken sein. Nur SSH ist explizit erlaubt.
+        return scheme_prefix
+
+    line = _URL_USERINFO.sub(redact_userinfo, line)
     return _URL_QUERY_FRAGMENT.sub(r"\1", line)
 
 
 def last_error_line(result: subprocess.CompletedProcess) -> str:
     """Die aussagekräftigste Fehlerzeile von Git — der Beleg für die Ursache.
 
-    `fetch --all` schließt mit der Sammelzeile "error: could not fetch <name>" ab,
-    die nichts erklärt. Die eigentliche Ursache steht davor, deshalb werden solche
-    Sammelzeilen übersprungen.
+    Eine etwaige Sammelzeile "error: could not fetch <name>" erklärt nichts.
+    Die eigentliche Ursache steht davor, deshalb wird die Sammelzeile übersprungen.
     """
     lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
     detailed = [line for line in lines if "could not fetch" not in line]
@@ -1708,15 +2213,30 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     "empty", "timeout" oder eine Ursache aus classify_remote_check().
     """
     try:
-        r = run_git_logged(repo, "ls-remote", "--heads", "--", name, timeout=timeout)
+        remote = read_remote_configs(
+            repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(name)
+        if (remote is None or remote.fetch_invalid_reason
+                or len(remote.fetch_urls) != 1 or not remote.fetch_targets):
+            return "unsafe_url", 0, ""
+        fetch_url = remote_fetch_url(remote)
+        if not _argv_safe_remote_url(fetch_url):
+            return "unsafe_url", 0, ""
+        pin_config, pinned_url = _pinned_url_config(fetch_url)
+        r = run_git_logged(
+            repo, *pin_config, "ls-remote", "--heads", "--", pinned_url,
+            timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout", 0, ""
+    except (GitReadError, OSError, ValueError, RuntimeError) as exc:
+        return "unknown", 0, terminal_text(str(exc))[:160]
     if r.returncode == 0:
         refs = [line for line in r.stdout.splitlines() if line.strip()]
         return ("ok" if refs else "empty"), len(refs), ""
     detail = next((line.strip() for line in reversed((r.stderr or "").splitlines())
                    if line.strip()), "")
-    return classify_remote_check(r), 0, redact_remote_error(detail)[:160]
+    return classify_remote_check(
+        r, keychain_helper=remote_uses_keychain_helper(repo, name, timeout)
+    ), 0, redact_remote_error(detail)[:160]
 
 
 def remote_failure_short(name: str, outcome: str) -> str:
@@ -1739,63 +2259,18 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_empty", r=name)
     if outcome == "timeout":
         return t("check_timeout", r=name, s=timeout)
+    if outcome == "unsafe_refspec":
+        return t("check_unsafe_refspec", r=name)
+    if outcome == "unsafe_url":
+        return t("check_unsafe_url", r=name)
+    if outcome == "changed":
+        return t("check_changed", r=name)
+    if outcome == "outcome_unknown":
+        return t("check_outcome_unknown", r=name)
     if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
                    "gone"):
         return t("check_" + outcome, r=name)
     return t("check_unknown", r=name, e=detail or outcome)
-
-
-def failed_fetch_remotes(result: subprocess.CompletedProcess) -> list[str]:
-    """Namen der Remotes, die Git in `fetch --all` als gescheitert meldet.
-
-    Git schreibt pro erfolglosem Remote eine Zeile "error: could not fetch <name>";
-    dank LC_ALL=C ist dieser Text stabil. Findet sich nichts, bleibt die Liste leer
-    und der Aufrufer nennt eben nur den Sammelbegriff.
-    """
-    names = []
-    for line in (result.stderr or "").splitlines():
-        _, sep, rest = line.partition("could not fetch ")
-        if sep and rest.strip():
-            names.append(rest.strip())
-    return names
-
-
-def diagnose_failed_fetches(
-        repo: Path, configs: dict[str, RemoteConfig],
-        combined: subprocess.CompletedProcess, cfg: dict,
-) -> dict[str, tuple[str, str, str]]:
-    """Einen fehlgeschlagenen ``fetch --all`` je Remote sauber zuordnen.
-
-    Git nennt in seiner Sammelausgabe meist die gescheiterten Remote-Namen, aber
-    vermischt deren stderr. Nur diese Kandidaten werden einzeln erneut gefetcht;
-    so bleiben Ursache und Beleg beim richtigen Remote. Fehlt die Namenszeile
-    (unter anderem bei genau einem Remote), werden alle konfigurierten Remotes
-    geprüft. Ein inzwischen erfolgreicher Einzel-Fetch gilt als geheilt.
-    """
-    candidates = set(failed_fetch_remotes(combined)) or set(configs)
-    failures: dict[str, tuple[str, str, str]] = {}
-    for name in sorted(candidates):
-        if name not in configs:
-            # Eine inkonsistente Sammelzeile darf keinen erfundenen Remote in
-            # Status und JSON einschleusen. Die Config ist die Quelle der Namen.
-            continue
-        try:
-            result = run_git_logged(
-                repo, "fetch", "--prune", "--quiet", "--jobs=1", "--", name,
-                timeout=cfg["fetch_timeout"])
-        except subprocess.TimeoutExpired:
-            outcome, detail = "timeout", ""
-        else:
-            if result.returncode == 0:
-                continue
-            outcome = classify_remote_check(result)
-            detail = last_error_line(result)
-        failures[name] = (
-            outcome,
-            remote_check_message(name, outcome, 0, detail, cfg["fetch_timeout"]),
-            detail,
-        )
-    return failures
 
 
 def summarize_fetch_failures(st: RepoStatus) -> None:
@@ -1828,20 +2303,96 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
     einem Rutsch beenden können.
     """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        # `start_new_session=True` macht die Kind-PID zugleich zur PGID. Git
+        # selbst kann bereits beendet sein, während ein vom Hook gestartetes
+        # Kind die Pipes noch offen hält; `getpgid(proc.pid)` lieferte dann
+        # ESRCH und ließ genau dieses Kind zurück. Die bekannte PGID bleibt bis
+        # zum letzten Gruppenmitglied gültig und kann direkt beendet werden.
+        os.killpg(proc.pid, signal.SIGKILL)
     except (OSError, AttributeError):
         # Prozess schon weg, oder eine Plattform ohne Prozessgruppen: dann wenigstens
         # das direkte Kind beenden.
-        proc.kill()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _stop_and_collect_process_group(
+        proc: subprocess.Popen) -> tuple[str, str]:
+    """Eine eigene Prozessgruppe beenden und höchstens fünf Sekunden einsammeln."""
+    _kill_process_group(proc)
+    try:
+        return proc.communicate(timeout=5)
+    except Exception:
+        # Der ursprüngliche communicate()-Fehler bleibt die relevante Ursache;
+        # Cleanupfehler dürfen ihn nicht ersetzen oder unendlich warten lassen.
+        return "", ""
+
+
+def _run_process_group(cmd: list[str], *, stdin, timeout: int | None
+                       ) -> subprocess.CompletedProcess:
+    """Einen Prozess mit eigener, bei Timeout vollständig beendeter Gruppe starten."""
+    with subprocess.Popen(
+        cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="surrogateescape",
+        start_new_session=True,
+    ) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            out, err = _stop_and_collect_process_group(proc)
+            raise subprocess.TimeoutExpired(
+                cmd, timeout, output=out, stderr=err) from None
+        except Exception:
+            _stop_and_collect_process_group(proc)
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def run_git(repo: Path, *args: str, timeout: int = 10,
             env: dict | None = None) -> subprocess.CompletedProcess:
     cmd = ["git", "-C", str(repo), *args]
+    child_env = dict(os.environ)
+    for key in list(child_env):
+        if (key == "GIT_CONFIG_PARAMETERS" or key == "GIT_CONFIG_COUNT"
+                or re.fullmatch(r"GIT_CONFIG_(?:KEY|VALUE)_\d+", key)):
+            child_env.pop(key, None)
+    for key in REPOSITORY_GIT_ENV:
+        child_env.pop(key, None)
+    if env:
+        child_env.update({key: value for key, value in env.items()
+                          if key not in REPOSITORY_GIT_ENV})
+        if "GIT_INDEX_FILE" in env:
+            child_env["GIT_INDEX_FILE"] = env["GIT_INDEX_FILE"]
+        if env.get("GIT_GRAFT_FILE") == os.devnull:
+            child_env["GIT_GRAFT_FILE"] = os.devnull
+        if env.get("GIT_SHALLOW_FILE") == os.devnull:
+            child_env["GIT_SHALLOW_FILE"] = os.devnull
+    config_entries = [
+        ("core.fsmonitor", "false"),
+        ("log.showSignature", "false"),
+    ]
+    pins = {(arg.remote_url, str(arg)) for arg in args
+            if isinstance(arg, _PinnedRemoteURL)}
+    if pins:
+        if len(pins) != 1:
+            raise ValueError("conflicting pinned remote URLs")
+        remote_url, alias = pins.pop()
+        config_entries.extend((
+            (f"url.{remote_url}.insteadOf", alias),
+            (f"url.{remote_url}.pushInsteadOf", alias),
+        ))
+    child_env["GIT_CONFIG_COUNT"] = str(len(config_entries))
+    for number, (key, value) in enumerate(config_entries):
+        child_env[f"GIT_CONFIG_KEY_{number}"] = key
+        child_env[f"GIT_CONFIG_VALUE_{number}"] = value
+    child_env.update(NONINTERACTIVE_GIT_ENV)
     with subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env=dict(env or os.environ, **NONINTERACTIVE_GIT_ENV),
+        encoding="utf-8", errors="surrogateescape",
+        env=child_env,
         stdin=subprocess.DEVNULL,
         # Eigene Session = kein kontrollierendes Terminal. Damit kommt auch ein
         # von Git gestartetes ssh nicht mehr an unser /dev/tty, um dort nach einer
@@ -1851,14 +2402,12 @@ def run_git(repo: Path, *args: str, timeout: int = 10,
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc)
-            try:
-                # Jetzt sind alle Schreiber tot, das Einsammeln der Reste ist kurz.
-                out, err = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                out, err = "", ""
+            out, err = _stop_and_collect_process_group(proc)
             raise subprocess.TimeoutExpired(cmd, timeout, output=out,
                                             stderr=err) from None
+        except Exception:
+            _stop_and_collect_process_group(proc)
+            raise
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -1872,20 +2421,50 @@ COMMAND_LOG_MAX = 200
 
 def format_git_command(args: tuple[str, ...] | list[str]) -> str:
     """Den Befehl so schreiben, wie man ihn im Repo-Ordner selbst eintippen würde."""
-    return "git " + " ".join(shlex.quote(a) for a in args)
+    def visible_quote(value) -> str:
+        value = str(value)
+        return (shlex.quote(value) if terminal_text(value) == value
+                else zsh_quote(value))
+
+    pins = {(arg.remote_url, str(arg)) for arg in args
+            if isinstance(arg, _PinnedRemoteURL)}
+    prefix = ""
+    if pins:
+        if len(pins) != 1:
+            raise ValueError("conflicting pinned remote URLs")
+        url, alias = pins.pop()
+        assignments = (
+            ("GIT_CONFIG_COUNT", "4"),
+            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_0", "false"),
+            ("GIT_CONFIG_KEY_1", "log.showSignature"),
+            ("GIT_CONFIG_VALUE_1", "false"),
+            ("GIT_CONFIG_KEY_2", f"url.{url}.insteadOf"),
+            ("GIT_CONFIG_VALUE_2", alias),
+            ("GIT_CONFIG_KEY_3", f"url.{url}.pushInsteadOf"),
+            ("GIT_CONFIG_VALUE_3", alias),
+        )
+        prefix = " ".join(f"{key}={visible_quote(value)}"
+                          for key, value in assignments) + " "
+    return prefix + "git " + " ".join(visible_quote(a) for a in args)
 
 
-def commit_undo_command(head_before: str | None, head_after: str) -> str:
+def commit_undo_command(head_before: str | None, head_after: str,
+                        head_ref: str) -> str:
     """Passenden Rückgängig-Befehl für einen gerade erzeugten Commit liefern.
 
-    Ein normaler Commit hat einen Eltern-Commit und kann weich auf ``HEAD~1``
-    zurückgesetzt werden. Beim Erst-Commit existiert dieser Name nicht. Dort
-    löscht ``update-ref`` nur dann den neuen Branch-Ref, wenn er noch exakt auf
-    der gerade erzeugten OID steht; Index und Arbeitsbaum bleiben erhalten.
+    Beide Seiten sind an volle OIDs gebunden, zusätzlich steht der freigegebene
+    vollständige Branch-Ref im Befehl. Ein später ausgecheckter anderer Branch
+    kann dadurch nie zum versehentlichen Ziel werden. Index und Arbeitsbaum
+    bleiben erhalten, also wie bei einem weichen Reset.
     """
     if head_before is None:
-        return format_git_command(("update-ref", "-d", "HEAD", head_after))
-    return "git reset --soft HEAD~1"
+        return format_git_command(
+            safe_update_ref_args(
+                "--no-deref", "-d", head_ref, head_after))
+    return format_git_command(
+        safe_update_ref_args(
+            "--no-deref", head_ref, head_before, head_after))
 
 
 def log_command(repo: Path, args: tuple[str, ...] | list[str],
@@ -1917,7 +2496,7 @@ def run_git_logged(repo: Path, *args: str, timeout: int = 10,
     """Wie run_git, protokolliert den Aufruf aber für die Befehlsansicht (H)."""
     try:
         r = run_git(repo, *args, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         log_command(repo, args, returncode=None)
         raise
     log_command(repo, args, r.returncode)
@@ -1933,9 +2512,23 @@ def timeout_message(exc: subprocess.TimeoutExpired) -> str:
     und die häufigsten Ursachen.
     """
     cmd = list(exc.cmd or [])
-    # Der Aufruf sieht immer so aus: ["git", "-C", "<repo>", "<unterbefehl>", …]
-    name = cmd[3] if len(cmd) > 3 else "git"
-    return t("action_timeout", cmd=name, s=int(exc.timeout or 0))
+    # Nach `git -C <repo>` können globale Optionen stehen. Die URL-Bindung
+    # verwendet etwa zwei `-c <key=value>`-Paare vor `fetch`/`push`; die Meldung
+    # soll trotzdem den verständlichen Unterbefehl nennen.
+    index = 3
+    takes_value = {"-c", "--config-env", "-C", "--git-dir", "--work-tree",
+                   "--namespace", "--super-prefix"}
+    while index < len(cmd):
+        token = cmd[index]
+        if token in takes_value:
+            index += 2
+        elif token.startswith("-"):
+            index += 1
+        else:
+            break
+    name = cmd[index] if index < len(cmd) else "git"
+    key = "transfer_timeout" if name in {"fetch", "push"} else "action_timeout"
+    return t(key, cmd=name, s=int(exc.timeout or 0))
 
 
 class GitReadError(RuntimeError):
@@ -1976,6 +2569,23 @@ def _normal_host(host: str) -> str:
         return host
 
 
+def _canonical_network_path(path: str) -> str:
+    """Nur unkritische Prozent-Escapes einer Netzwerk-URL normalisieren.
+
+    Reservierte Zeichen wie `/`, `%`, `?` und `#` bleiben codiert. Auch ein
+    codierter Punkt bleibt codiert, damit `%2e%2e` niemals durch `normpath()`
+    zum Elternsegment einer anderen Remote-Adresse wird.
+    """
+    def replace(match: re.Match) -> str:
+        value = int(match.group(1), 16)
+        char = chr(value)
+        if char.isascii() and (char.isalnum() or char in "-_~"):
+            return char
+        return "%" + match.group(1).upper()
+
+    return re.sub(r"%([0-9A-Fa-f]{2})", replace, path)
+
+
 def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     """Credential-free host/repository identity for URL, SCP, and local syntax."""
     raw = url.strip()
@@ -1983,10 +2593,12 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     port = None
     path = raw
     user = ""
+    scheme = ""
     home_relative = False   # Pfad wird im Home-Verzeichnis des SSH-Benutzers aufgelöst
     if "://" not in raw and ":" in raw and not raw.startswith(("/", "./", "../", "~")):
         hostpart, rest = raw.split(":", 1)
         if "/" not in hostpart:
+            scheme = "scp"
             host = _normal_host(hostpart.rsplit("@", 1)[-1])
             path = rest
             user = hostpart.rsplit("@", 1)[0] if "@" in hostpart else ""
@@ -2000,41 +2612,49 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             # der HTTPS-Pfad: git@host:org/repo und https://host/org/repo
             # meinen dasselbe Repository. Ohne diese Ausnahme gälte der übliche
             # Mix (Fetch per HTTPS, Push per SSH) als zwei verschiedene Ziele,
-            # und P/L/G verweigerten die Übertragung. Ein ausdrückliches "~" im
+            # und P/G verweigerten die Übertragung. Ein ausdrückliches "~" im
             # Pfad bleibt benutzerabhängig (Prüfung unten).
             if user == "git" and not rest.startswith("~"):
                 home_relative = False
     elif urllib.parse.urlsplit(raw).scheme:
         parsed = urllib.parse.urlsplit(raw)
+        scheme = parsed.scheme.lower()
         if parsed.scheme == "file":
             path = urllib.parse.unquote(parsed.path)
         else:
             host = _normal_host(parsed.hostname or "")
             port = parsed.port
-            path = urllib.parse.unquote(parsed.path)
+            path = _canonical_network_path(parsed.path)
             user = parsed.username or ""
     if host == "local":
         local = Path(path).expanduser()
         if not local.is_absolute() and repo is not None:
             local = repo / local
         repo_id = str(local.resolve(strict=False))
-        canonical = "local:" + repo_id
+        canonical = json.dumps(["local", repo_id], separators=(",", ":"))
     else:
-        repo_id = posixpath.normpath("/" + path.lstrip("/"))
+        # Netzwerkpfade sind keine lokalen Dateipfade: `//`, `.` und `..` koennen
+        # serverseitig eigene Segmentnamen beziehungsweise Routing-Semantik
+        # besitzen. Nur ein fehlender fuehrender Slash der SCP-Syntax wird fuer
+        # die Anzeige ergaenzt; der Rest bleibt bytegenau normalisiert.
+        repo_id = path if path.startswith("/") else "/" + path
         if repo_id.endswith(".git"):
             repo_id = repo_id[:-4]
         # Auch "~"-Pfade (ssh://host/~/repo, host:~/repo) hängen am Benutzer.
-        home_relative = home_relative or repo_id.startswith("/~")
+        home_relative = home_relative or (
+            scheme in {"scp", "ssh", "git+ssh", "ssh+git"}
+            and repo_id.startswith("/~"))
         default_port = ((raw.startswith("ssh://") and port == 22)
                         or (raw.startswith("https://") and port == 443)
                         or (raw.startswith("http://") and port == 80))
-        authority = host if not port or default_port else f"{host}:{port}"
         # Der Benutzername bleibt aus der Anzeige (repo_id) heraus, gehört bei
         # benutzerabhängigen Pfaden aber in die Identität: sonst gälten zwei
         # verschiedene Home-Verzeichnisse als dasselbe Ziel — und ein
         # "sicherer" Push ginge in das Repository des falschen Benutzers.
         qualifier = f"~{user}" if home_relative else ""
-        canonical = authority + ":" + qualifier + repo_id
+        canonical = json.dumps(
+            ["network", host, None if default_port else port, qualifier, repo_id],
+            separators=(",", ":"))
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
     return RemoteTarget(host, repo_id, fingerprint)
 
@@ -2062,11 +2682,26 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
         push_urls = [line for line in push_r.stdout.splitlines() if line]
         if not fetch_urls or not push_urls:
             raise GitReadError("remote target is empty")
+        try:
+            fetch_targets = [canonical_remote_target(url, repo)
+                             for url in fetch_urls]
+            fetch_invalid_reason = ""
+        except (ValueError, RuntimeError, OSError):
+            fetch_targets = []
+            fetch_invalid_reason = "unsafe_url"
+        try:
+            push_targets = [canonical_remote_target(url, repo)
+                            for url in push_urls]
+            push_invalid_reason = ""
+        except (ValueError, RuntimeError, OSError):
+            push_targets = []
+            push_invalid_reason = "unsafe_url"
+        # Eine kaputte Seite sperrt nur die Richtung dieses Remotes. Andere
+        # Remotes — und ein sicherer Fetch bei kaputter Push-URL — bleiben
+        # funktionsfähig; Roh-URLs gelangen dabei nie in UI oder JSON.
         result[name] = RemoteConfig(
-            name, fetch_urls, push_urls,
-            [canonical_remote_target(url, repo) for url in fetch_urls],
-            [canonical_remote_target(url, repo) for url in push_urls],
-            settings,
+            name, fetch_urls, push_urls, fetch_targets, push_targets, settings,
+            fetch_invalid_reason, push_invalid_reason,
         )
     return result
 
@@ -2098,8 +2733,8 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt.
 
     `fetch_failures` ordnet jedem gerade gescheiterten Remote Ursache, erklärenden
-    Satz und redigierten Git-Beleg zu. Dadurch kann ein gemischter `fetch --all`-
-    Fehler nicht mehr allen Remotes dieselbe falsche Diagnose geben.
+    Satz und redigierten Git-Beleg zu. Da jedes Remote einzeln gefetcht wird,
+    können sich die Diagnosen nicht über einen kombinierten stderr vermischen.
     """
     states: list[RemoteStatus] = []
     configs = configs if configs is not None else read_remote_configs(repo, cfg)
@@ -2115,9 +2750,19 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
             is_sync=name == sync_remote,
             fetch_fingerprint=(remote.fetch_targets[0].fingerprint
                                if len(remote.fetch_targets) == 1 else ""),
+            fetch_fingerprints=[target.fingerprint for target in remote.fetch_targets],
             push_fingerprints=[target.fingerprint for target in remote.push_targets],
             target_mismatch=not remote.transfer_safe,
             multiple_pushurls=len(remote.push_targets) != 1,
+            fetch_refspecs_safe=fetch_refspecs_safe(remote),
+            fetch_refspec_fingerprint=hashlib.sha256("\0".join(
+                value for key, value in remote.settings
+                if key.lower() == "fetch").encode(
+                    "utf-8", "surrogateescape")).hexdigest()[:20],
+            branch_mapping_safe=(branch not in ("?", "(detached)")
+                                 and fetch_maps_branch_exactly(remote, branch)),
+            fetch_url_safe=remote_fetch_url_safe(remote),
+            push_url_safe=remote_push_url_safe(remote),
             fetch_failed=name in failures,
             fetch_outcome=failure[0],
             fetch_error_long=failure[1],
@@ -2146,8 +2791,8 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
 def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[BranchInfo]:
     """Alle lokalen Branches mit Stand, Upstream und Merge-Zustand lesen.
 
-    Zwei Git-Aufrufe reichen: einer für die Daten, einer für die Frage, welche
-    Branches vollständig in HEAD stecken (nur solche darf `X` löschen).
+    Zwei Git-Aufrufe reichen: einer für die Daten, einer für die rein lesende
+    Anzeige, welche Branches vollständig in HEAD stecken.
     """
     t_ = cfg["git_timeout"]
     fields = ("%(HEAD)", "%(refname:short)", "%(upstream:short)", "%(upstream:track)",
@@ -2186,82 +2831,6 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     return branches
 
 
-def remote_restore_commands(remote: RemoteConfig,
-                            branches: list[BranchInfo]) -> list[str]:
-    """Befehle, die die lokale Konfiguration eines Remotes wiederherstellen.
-
-    `git remote remove` löscht mehr als eine URL-Zeile: zusätzliche Fetch-/
-    Push-URLs und die Upstream-Verknüpfung jedes Branches, der dieses Remote
-    verfolgt. Ein einzelner `git remote add` wäre als "Rückgängig" eine falsche
-    Zusage — gerade abweichende Push-Ziele würden danach still auf die Fetch-URL
-    zeigen. Die URLs laufen durch display_remote_url(): der Befehl ist Anzeige,
-    ein eingebettetes Token gehört nicht auf den Bildschirm. (Die gelöschten
-    Tracking-Refs holt der eingefügte Fetch zurück — ohne sie scheitert die
-    Upstream-Zeile.)
-    """
-    name = remote.name
-    # `get-url` liefert die effektive, durch url.*.insteadOf expandierte Adresse.
-    # Für die Wiederherstellung ist dagegen der rohe Config-Wert maßgeblich.
-    raw_fetch_urls = [value for key, value in remote.settings
-                      if key.lower() == "url"] or remote.fetch_urls
-    raw_push_urls = [value for key, value in remote.settings
-                     if key.lower() == "pushurl"] or remote.push_urls
-    commands = [format_git_command(("remote", "add", name,
-                                    display_remote_url(raw_fetch_urls[0])))]
-    for url in raw_fetch_urls[1:]:
-        commands.append(format_git_command(
-            ("remote", "set-url", "--add", name, display_remote_url(url))))
-    if raw_push_urls != raw_fetch_urls:
-        for index, url in enumerate(raw_push_urls):
-            option = ("--push",) if index == 0 else ("--add", "--push")
-            commands.append(format_git_command(
-                ("remote", "set-url", *option, name, display_remote_url(url))))
-
-    # `git remote add` erfindet eine Standard-Refspec. Die ursprünglichen
-    # remote.<name>.*-Werte ersetzen sie vollständig und stellen auch tagOpt,
-    # mirror, promisor usw. wieder her. URL/pushurl wurden oben separat gesetzt,
-    # weil Git dafür die verständlicheren Remote-Befehle anbietet.
-    extra_settings: dict[str, list[tuple[str, str]]] = {}
-    for key, value in remote.settings:
-        if key.lower() in ("url", "pushurl"):
-            continue
-        extra_settings.setdefault(key.lower(), []).append((key, value))
-    if remote.settings and "fetch" not in extra_settings:
-        commands.append(format_git_command(
-            ("config", "--unset-all", f"remote.{name}.fetch")))
-    for entries in extra_settings.values():
-        for index, (key, value) in enumerate(entries):
-            option = "--replace-all" if index == 0 else "--add"
-            shown = display_remote_url(value) if "://" in value else terminal_text(value)
-            commands.append(format_git_command(
-                ("config", option, f"remote.{name}.{key}", shown)))
-    tracking = [b for b in branches if b.upstream.startswith(name + "/")]
-    if tracking:
-        # `git remote remove` hat auch refs/remotes/<name>/* gelöscht, und
-        # `--set-upstream-to=<name>/<branch>` verlangt genau diese Ref: ohne sie
-        # bricht Git ab ("the requested upstream branch does not exist"). Der
-        # Fetch holt sie zurück und muss deshalb VOR den Upstream-Zeilen stehen.
-        commands.append(format_git_command(("fetch", name)))
-    for branch in tracking:
-        commands.append(format_git_command(
-            ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
-    return commands
-
-
-def branch_restore_commands(branch: BranchInfo) -> list[str]:
-    """Befehle, die einen gelöschten Branch samt Upstream wiederherstellen.
-
-    `git branch -d` entfernt neben dem Ref auch branch.<name>.remote/merge —
-    ohne den zweiten Befehl wäre die Upstream-Verknüpfung nach dem "Undo" weg
-    und Ahead-/Behind- sowie Push-Verhalten stünden anders da als vorher.
-    """
-    commands = [format_git_command(("branch", branch.name, branch.oid))]
-    if branch.upstream:
-        commands.append(format_git_command(
-            ("branch", f"--set-upstream-to={branch.upstream}", branch.name)))
-    return commands
-
-
 def repo_has_head(repo: Path, timeout: int) -> bool:
     """Gibt es in diesem Repo überhaupt schon einen Commit?
 
@@ -2277,51 +2846,33 @@ def repo_has_head(repo: Path, timeout: int) -> bool:
     raise GitReadError("git rev-parse HEAD failed (exit %d)" % result.returncode)
 
 
-def count_changed_lines(diff_text: str) -> int:
-    """Geänderte Zeilen in einem Diff zählen — als Maß fürs Auge.
-
-    Die Zahl steht im Verwerfen-Dialog: An ihr merkt man, ob dort echte Arbeit
-    hängt oder nur eine Datei, die ein Programm beim Start angefasst hat. Die
-    Kopfzeilen (``+++``/``---``) gehören nicht dazu, sie nennen nur Dateinamen.
-
-    ``in_hunk`` trennt Kopf von Inhalt: Erst ab der ersten ``@@``-Zeile stehen
-    echte Zeilen der Datei da. Ohne diese Trennung verschwanden die Änderungen an
-    einer eingecheckten ``.patch``-Datei aus der Zählung — deren Inhalt beginnt
-    selbst mit ``+++``/``---``, und mit dem Diff-Vorzeichen davor (``++++``,
-    ``----``) sah jede solche Zeile wie eine Kopfzeile aus.
-    """
-    count = 0
-    in_hunk = False
-    for line in diff_text.splitlines():
-        # Eine neue Datei beginnt wieder mit einem Kopf. Im Inhalt eines Hunks
-        # trägt jede Zeile ein Vorzeichen (" ", "+", "-"), am Zeilenanfang kann
-        # "diff " deshalb nur eine echte Kopfzeile sein.
-        if line.startswith("diff "):
-            in_hunk = False
-            continue
-        if line.startswith("@@"):
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if line.startswith(("+", "-")):
-            count += 1
-    return count
-
-
 def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
     """Diff einer einzelnen Datei, ohne Index oder Arbeitsbaum anzufassen.
 
     Unversionierte Dateien kennt `git diff` nicht — sie werden über `--no-index`
     gegen /dev/null gezeigt, damit auch neue Dateien sichtbar sind.
     """
+    safe_diff = ("diff", "--no-ext-diff", "--no-textconv",
+                 "--ignore-submodules=none")
     if code == "U":
-        r = run_git(repo, "diff", "--no-index", "--", os.devnull, path, timeout=timeout)
+        r = run_git(
+            repo, *safe_diff, "--no-index", "--", os.devnull, path,
+            timeout=timeout)
     elif repo_has_head(repo, timeout):
         # Gegen HEAD, damit gestagte UND ungestagte Änderungen zusammen erscheinen.
-        r = run_git(repo, "diff", "HEAD", "--", path, timeout=timeout)
+        r = run_git(
+            repo, *safe_diff, "HEAD", "--", path, timeout=timeout,
+            env={**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"})
     else:
-        r = run_git(repo, "diff", "--cached", "--", path, timeout=timeout)
+        # Vor dem ersten Commit ist der Index kein ehrlicher Vergleichspunkt:
+        # bei Status `AM` kann dort eine ältere Fassung liegen, während die
+        # Commit-Hilfe anschließend absichtlich den aktuellen Arbeitsbaum stagt.
+        # Deshalb genau den jetzigen Pfad vollständig gegen /dev/null zeigen.
+        if not os.path.lexists(repo / path):
+            return True, ""
+        r = run_git(
+            repo, *safe_diff, "--no-index", "--", os.devnull, path,
+            timeout=timeout)
     # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist
     # Erfolg. Exit 1 mit leerer Ausgabe und einer Fehlermeldung ist dagegen ein
     # echter Fehler: `--no-index` gegen ein unversioniertes VERZEICHNIS (Status
@@ -2332,97 +2883,13 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
     return False, (r.stderr or "").strip()[:240]
 
 
-def _worktree_file_fingerprint(path: Path) -> str:
-    """Rohen Dateiinhalt für eine spätere Destruktiv-Prüfung festhalten.
-
-    Reguläre Dateien werden ohne Symlink-Folgen gestreamt; bei Symlinks gehört
-    das Linkziel selbst zum Zustand. Fehlende Dateien und andere Dateitypen
-    bekommen ebenfalls eine eindeutige Kennung. Metadaten wie die mtime zählen
-    bewusst nicht: Wenn Inhalt und Git-relevanter Modus gleich sind, würde
-    ``git restore`` auch nichts anderes verwerfen.
-    """
-    try:
-        before = path.lstat()
-    except FileNotFoundError:
-        return "missing"
-    kind = stat.S_IFMT(before.st_mode)
-    executable = bool(before.st_mode & 0o111)
-    digest = hashlib.sha256()
-    if stat.S_ISLNK(before.st_mode):
-        try:
-            target = os.readlink(path)
-        except OSError as exc:
-            raise CommitSafetyError(f"cannot read selected symlink: {exc}") from exc
-        digest.update(os.fsencode(target))
-    elif stat.S_ISREG(before.st_mode):
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(path, flags)
-        except OSError as exc:
-            raise CommitSafetyError(f"cannot read selected file: {exc}") from exc
-        try:
-            opened = os.fstat(fd)
-            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-                raise CommitSafetyError("selected file changed while it was read")
-            while True:
-                chunk = os.read(fd, 1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-            after = os.fstat(fd)
-        finally:
-            os.close(fd)
-        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
-            raise CommitSafetyError("selected file changed while it was read")
-    else:
-        digest.update(str((before.st_rdev, before.st_size)).encode("ascii"))
-    return f"{kind}:{int(executable)}:{digest.hexdigest()}"
-
-
-def discard_snapshot(repo: Path, entry: ChangedFile, timeout: int) -> DiscardSnapshot:
-    """Den Zustand erfassen, den ein Datei-Verwerfen tatsächlich verändern würde.
-
-    Die TUI hält einen zuvor gescannten ``ChangedFile``. Vor der Vorschau und
-    unmittelbar nach der Bestätigung wird dieser Snapshot neu gebaut. Schon eine
-    inhaltliche Änderung mit unverändertem Porcelain-Code (etwa weiterhin `` M``)
-    ändert den Fingerprint und stoppt die destruktive Aktion.
-    """
-    status_r = _required_git(
-        repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-        "--", entry.path, timeout=timeout)
-    _, _, _, _, current_files = parse_porcelain(status_r.stdout)
-    current_files = mark_gitlinks(repo, current_files, timeout)
-    current = next((item for item in current_files if item.path == entry.path), None)
-    if current != entry:
-        raise CommitSafetyError("selected file changed after the repository scan")
-
-    has_head = repo_has_head(repo, timeout)
-    plan = plan_discard(current, has_head)
-    if plan.refused:
-        raise CommitSafetyError("selected file is no longer safe to discard")
-
-    index_r = _required_git(repo, "ls-files", "-s", "-z", "--", entry.path,
-                            timeout=timeout)
-    if has_head:
-        head_r = _required_git(repo, "ls-tree", "-z", "HEAD", "--", entry.path,
-                               timeout=timeout)
-    else:
-        head_r = subprocess.CompletedProcess([], 0, "", "")
-    diff_ok, diff_text = file_diff(repo, current.code, current.path, timeout)
-    if not diff_ok:
-        raise GitReadError(diff_text or "cannot read selected file diff")
-
-    digest = hashlib.sha256()
-    for value in (status_r.stdout, index_r.stdout, head_r.stdout,
-                  _worktree_file_fingerprint(repo / entry.path)):
-        digest.update(value.encode("utf-8", "surrogateescape"))
-        digest.update(b"\0")
-    return DiscardSnapshot(plan, diff_text, digest.hexdigest())
-
-
 def display_remote_url(url: str) -> str:
     """Remote-Adresse für die lokale Anzeige, aber ohne eingebettete Secrets."""
     raw = url.strip()
+    # Externe Remote-Helper erhalten nach ``transport::`` beliebige Befehlsdaten.
+    # Deren Grammatik kennt gmf nicht; Optionen oder Payload können Secrets sein.
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*::", raw):
+        return "(remote helper hidden)"
     if "://" not in raw:
         # SCP-Syntax (git@host:org/repo.git) enthält normalerweise keine Query.
         if ":" in raw and "/" not in raw.split(":", 1)[0]:
@@ -2445,10 +2912,11 @@ def display_remote_url(url: str) -> str:
             port = None
         if port is not None:
             host += f":{port}"
-        # Bei SSH ist der Benutzer (meist "git") Teil der hilfreichen Adresse.
-        # Bei HTTP(S) kann genau dieses Feld dagegen ein Personal Access Token sein.
+        # Nur bei ausdruecklichen SSH-Schemata ist der Benutzer (meist `git`)
+        # Teil der hilfreichen Adresse. Bei allen anderen Schemata kann schon das
+        # einzelne Userinfo-Feld ein Token sein und wird vollstaendig entfernt.
         user = ""
-        if parsed.scheme.lower() not in ("http", "https") and parsed.username:
+        if parsed.scheme.lower() in _SSH_URL_SCHEMES and parsed.username:
             user = urllib.parse.quote(
                 urllib.parse.unquote(parsed.username), safe="") + "@"
         clean = urllib.parse.urlunsplit(
@@ -2481,7 +2949,7 @@ class InfoView:
 
     lines: list[str] = field(default_factory=list)
     # (Art, Name, erste Zeile, letzte Zeile) — Art ist "remote" oder "branch".
-    # Beide sind auswählbar, weil beide lokal aufräumbar sind.
+    # Beide sind auswählbar, damit ihre rein lesenden Details navigierbar sind.
     blocks: list[tuple[str, str, int, int]] = field(default_factory=list)
 
     @property
@@ -2670,9 +3138,9 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
 def branch_block_specs(branches: list[BranchInfo]) -> list:
     """Lokale Branches als Blöcke — der zweite Zustand, den Git nie überträgt.
 
-    Genau wie bei Remotes sammeln sich hier Reste an (abgeschlossene Features, alte
-    Experimente), die niemand sieht, weil man immer nur den aktuellen Branch
-    betrachtet. Deshalb stehen sie auf der Info-Seite und sind mit `X` löschbar.
+    Genau wie bei Remotes sammeln sich hier Reste an (abgeschlossene Features,
+    alte Experimente), die niemand sieht, weil man immer nur den aktuellen
+    Branch betrachtet. Die Info-Seite macht sie rein lesend sichtbar.
     """
     specs = []
     for branch in branches:
@@ -2709,8 +3177,9 @@ def render_info_blocks(view: InfoView, specs: list, width: int) -> None:
 
 
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
-                     timeout: int = 10) -> TransferCheck:
-    """Prüft Push/Pull, ohne etwas zu verändern.
+                     timeout: int = 10, *,
+                     expected_public: bool | None = None) -> TransferCheck:
+    """Prüft einen Push, ohne etwas zu verändern.
 
     Bewusst eng: sauberer Tree, vorhandener Remote-Branch und verwandte,
     fast-forward-fähige History. Neue Branches und Divergenzen gehören ins
@@ -2719,91 +3188,193 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     if branch in ("?", "(detached)"):
         return TransferCheck("detached")
     cfg = {**DEFAULT_CONFIG, "git_timeout": timeout}
+    raw_env = RAW_OBJECT_ENV
     try:
         configs = read_remote_configs(repo, cfg)
         remote_cfg = configs.get(remote)
-        if remote_cfg is None or not remote_cfg.transfer_safe:
+        if (remote_cfg is None or not remote_cfg.transfer_safe
+                or not fetch_maps_branch_exactly(remote_cfg, branch)):
             return TransferCheck("remote-unsafe")
-        branch_r = _required_git(repo, "symbolic-ref", "--short", "-q", "HEAD",
-                                 timeout=timeout)
-        current_branch = branch_r.stdout.strip()
-        if current_branch != branch:
+        actual_public = remote_cfg.fetch_targets[0].is_github
+        if expected_public is not None and actual_public != expected_public:
+            return TransferCheck("remote-unsafe")
+        if action != "push":
+            raise ValueError(f"unknown transfer action: {action}")
+        urls = remote_cfg.push_urls
+        if len(urls) != 1 or not _argv_safe_remote_url(urls[0]):
+            return TransferCheck("remote-unsafe")
+        transfer_url = (remote_cfg.push_targets[0].repo_id
+                        if remote_cfg.push_targets[0].host == "local"
+                        else urls[0])
+        if not _argv_safe_remote_url(transfer_url):
+            return TransferCheck("remote-unsafe")
+        branch_r = _required_git(
+            repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
+            env=raw_env)
+        approved_ref = branch_r.stdout.strip()
+        if approved_ref != f"refs/heads/{branch}":
             return TransferCheck("inspect-failed")
-        head = _required_git(repo, "rev-parse", "--verify", "HEAD", timeout=timeout).stdout.strip()
-        index_oid = _required_git(repo, "write-tree", timeout=timeout).stdout.strip()
-        dirty = _required_git(repo, "status", "--porcelain=v1", "-z", timeout=timeout)
-    except (GitReadError, ValueError):
+        head = _required_git(
+            repo, "rev-parse", "--verify", approved_ref, timeout=timeout,
+            env=raw_env).stdout.strip()
+        index_oid = _required_git(
+            repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
+        dirty = _required_git(
+            repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            timeout=timeout,
+            env=raw_env)
+    except (GitReadError, ValueError, RuntimeError, OSError):
         return TransferCheck("inspect-failed")
-    worktree_fingerprint = hashlib.sha256(dirty.stdout.encode("utf-8")).hexdigest()
+    worktree_fingerprint = hashlib.sha256(
+        dirty.stdout.encode("utf-8", "surrogateescape")).hexdigest()
     if dirty.stdout:
         return TransferCheck("dirty")
     ref = f"refs/remotes/{remote}/{branch}"
-    exists = run_git(repo, "show-ref", "--verify", "--quiet", ref, timeout=timeout)
+    exists = run_git(
+        repo, "show-ref", "--verify", "--quiet", ref, timeout=timeout,
+        env=raw_env)
     if exists.returncode == 1:
         return TransferCheck("missing-branch", remote_ref=ref)
     if exists.returncode != 0:
         return TransferCheck("inspect-failed", remote_ref=ref)
     try:
-        target_oid = _required_git(repo, "rev-parse", "--verify", ref,
-                                   timeout=timeout).stdout.strip()
+        target_oid = _required_git(
+            repo, "rev-parse", "--verify", ref, timeout=timeout,
+            env=raw_env).stdout.strip()
     except GitReadError:
         return TransferCheck("inspect-failed", remote_ref=ref)
-    delta = run_git(repo, "rev-list", "--left-right", "--count",
-                    f"{head}...{target_oid}", timeout=timeout)
+    delta = run_git(
+        repo, "rev-list", "--left-right", "--count",
+        f"{head}...{target_oid}", timeout=timeout, env=raw_env)
     if delta.returncode != 0 or len(delta.stdout.split()) != 2:
         return TransferCheck("inspect-failed", remote_ref=ref)
     ahead_s, behind_s = delta.stdout.split()
     ahead, behind = int(ahead_s), int(behind_s)
     if ahead and behind:
         return TransferCheck("divergent", ahead=ahead, behind=behind, remote_ref=ref)
-    if action == "push":
-        if behind:
-            return TransferCheck("behind", ahead=ahead, behind=behind, remote_ref=ref)
-        if not ahead:
-            return TransferCheck("nothing-push", remote_ref=ref)
-        commits_r = run_git(repo, "log", "--oneline", "--no-decorate",
-                            f"{target_oid}..{head}", timeout=timeout)
-        files_r = run_git(repo, "diff", "--name-status", f"{target_oid}..{head}",
-                          timeout=timeout)
-        if commits_r.returncode != 0 or files_r.returncode != 0:
-            return TransferCheck("inspect-failed", ahead, behind, ref)
-        return TransferCheck(
-            "ready", ahead=ahead, behind=behind, remote_ref=ref,
-            commits=[line for line in commits_r.stdout.splitlines() if line.strip()],
-            files=[line for line in files_r.stdout.splitlines() if line.strip()],
-            branch=current_branch, head_oid=head, index_oid=index_oid,
-            worktree_fingerprint=worktree_fingerprint,
-            fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
-            push_fingerprint=remote_cfg.push_targets[0].fingerprint,
-            target_oid=target_oid,
-        )
-    if action == "pull":
-        if ahead:
-            return TransferCheck("nothing-pull", ahead, behind, ref)
-        if not behind:
-            return TransferCheck("nothing-pull", remote_ref=ref)
-        return TransferCheck(
-            "ready", ahead=ahead, behind=behind, remote_ref=ref,
-            branch=current_branch, head_oid=head, index_oid=index_oid,
-            worktree_fingerprint=worktree_fingerprint,
-            fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
-            push_fingerprint=remote_cfg.push_targets[0].fingerprint,
-            target_oid=target_oid,
-        )
-    raise ValueError(f"unknown transfer action: {action}")
+    if behind:
+        return TransferCheck("behind", ahead=ahead, behind=behind, remote_ref=ref)
+    if not ahead:
+        return TransferCheck("nothing-push", remote_ref=ref)
+    commits_r = run_git(
+        repo, "log", "--oneline", "--no-decorate",
+        f"{target_oid}..{head}", timeout=timeout, env=raw_env)
+    # Nicht nur die beiden Endbaeume vergleichen: Eine Datei kann in einem
+    # ausgehenden Commit hinzugefuegt und in einem spaeteren wieder geloescht
+    # worden sein. Sie waere trotzdem Teil der veroeffentlichten Historie. `-m`
+    # zeigt Merge-Commits gegen jeden Elternteil; doppelte Statuszeilen sind als
+    # konservativer Privacy-Hinweis beabsichtigt.
+    files_r = run_git(
+        repo, "log", "-m", "--root", "--format=", "--name-status",
+        "--no-renames", "--no-ext-diff", "--no-textconv",
+        "--ignore-submodules=none",
+        f"{target_oid}..{head}", timeout=timeout, env=raw_env)
+    if commits_r.returncode != 0 or files_r.returncode != 0:
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    try:
+        # Die getrennten Git-Leser bilden nur dann einen freigegebenen Snapshot,
+        # wenn Branch-Ref, dessen OID, Index und Arbeitsbaum am Ende noch exakt
+        # zusammenpassen. Der Push selbst verwendet anschließend diese feste OID.
+        final_ref = _required_git(
+            repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
+            env=raw_env).stdout.strip()
+        final_head = _required_git(
+            repo, "rev-parse", "--verify", approved_ref, timeout=timeout,
+            env=raw_env).stdout.strip()
+        final_index = _required_git(
+            repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
+        final_dirty = _required_git(
+            repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            timeout=timeout, env=raw_env)
+    except GitReadError:
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    if (final_ref != approved_ref or final_head != head
+            or final_index != index_oid or final_dirty.stdout != dirty.stdout):
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    return TransferCheck(
+        "ready", ahead=ahead, behind=behind, remote_ref=ref,
+        commits=[line for line in commits_r.stdout.splitlines() if line.strip()],
+        files=[line for line in files_r.stdout.splitlines() if line.strip()],
+        branch=branch, head_oid=head, index_oid=index_oid,
+        worktree_fingerprint=worktree_fingerprint,
+        fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
+        push_fingerprint=remote_cfg.push_targets[0].fingerprint,
+        remote_name=remote,
+        remote_config_signature=(tuple(remote_cfg.fetch_urls),
+                                 tuple(remote_cfg.push_urls),
+                                 tuple(remote_cfg.settings)),
+        transfer_url=transfer_url,
+        target_oid=target_oid,
+    )
 
 
-def safe_push_args(remote: str, branch: str, source_oid: str,
+def safe_push_args(destination: str, branch: str, source_oid: str,
                    target_oid: str) -> tuple[str, ...]:
-    """Push approved OID only, leased to the approved target OID, without tags."""
+    """Push an die geprüfte URL, OID-/Lease-gebunden, ohne Hooks/Submodule/Tags."""
     lease = f"--force-with-lease=refs/heads/{branch}:{target_oid}"
-    return ("push", "--porcelain", "--no-follow-tags", lease, "--", remote,
+    pin_config, pinned_url = _pinned_url_config(destination)
+    return (*pin_config, "-c", "core.hooksPath=/dev/null",
+            "-c", "push.pushOption=",
+            "push", "--porcelain", "--no-follow-tags",
+            "--no-signed", "--recurse-submodules=no", lease, "--", pinned_url,
             f"{source_oid}:refs/heads/{branch}")
 
 
-def safe_pull_args(target_oid: str) -> tuple[str, ...]:
-    """Pull ohne Fetch-Konfigurationsmagie: nur lokaler Fast-forward-Merge."""
-    return ("merge", "--ff-only", "--", target_oid)
+def update_tracking_after_push(repo: Path, check: TransferCheck,
+                               timeout: int) -> bool:
+    """Den geprüften Tracking-Ref nach belegtem Push-Erfolg per OID-CAS nachziehen.
+
+    Der Remote-Name ist veränderliche Konfiguration. Vor und nach der Mutation
+    muss deshalb exakt derselbe URL-/Refspec-Snapshot gelten wie beim Push.
+    Ändert er sich im Fenster, wird unsere eigene CAS-Aktualisierung ebenfalls
+    per CAS zurückgenommen; ein paralleler Fetch wird dabei nie überschrieben.
+    """
+    def config_matches() -> bool:
+        try:
+            remote = read_remote_configs(
+                repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(
+                    check.remote_name)
+        except (subprocess.TimeoutExpired, GitReadError, OSError,
+                ValueError, RuntimeError):
+            return False
+        if remote is None:
+            return False
+        signature = (tuple(remote.fetch_urls), tuple(remote.push_urls),
+                     tuple(remote.settings))
+        return (signature == check.remote_config_signature
+                and remote.transfer_safe
+                and fetch_maps_branch_exactly(remote, check.branch))
+
+    if not config_matches():
+        return False
+    try:
+        updated = run_git_logged(
+            repo, *safe_update_ref_args(
+                "--no-deref", check.remote_ref,
+                check.head_oid, check.target_oid), timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if updated.returncode == 0:
+        if config_matches():
+            return True
+        try:
+            run_git_logged(
+                repo, *safe_update_ref_args(
+                    "--no-deref", check.remote_ref,
+                    check.target_oid, check.head_oid), timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return False
+    # Ein paralleler Fetch kann denselben Zielstand schon eingetragen haben.
+    try:
+        current = run_git(
+            repo, "rev-parse", "--verify", check.remote_ref, timeout=timeout,
+            env=RAW_OBJECT_ENV)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return (current.returncode == 0
+            and current.stdout.strip() == check.head_oid
+            and config_matches())
 
 
 def upstream_delta(repo: Path, sync_remote: str | None,
@@ -2830,46 +3401,6 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     return up, int(ahead), int(behind)
 
 
-def mark_gitlinks(repo: Path, files: list[ChangedFile],
-                  timeout: int) -> list[ChangedFile]:
-    """Submodule (Gitlinks) in der Dateiliste kennzeichnen.
-
-    ``git status --porcelain=v1`` sieht für ein Submodul genauso aus wie für
-    eine Datei (`` M sub``). Erst der Modus 160000 im Index bzw. im HEAD-Baum
-    verrät den Gitlink. Beide Quellen sind nötig: ein geändertes oder neu
-    hinzugefügtes Submodul steht im Index, ein zum Löschen vorgemerktes
-    (``D ``) nur noch in HEAD. Unverfolgte Einträge (``??``) können keine
-    Gitlinks sein und bleiben außen vor.
-    """
-    tracked = [f.path for f in files if f.xy != "??"]
-    if not tracked:
-        return files
-    links: set[str] = set()
-    # Beide Abfragen sind eine SCHUTZprüfung: Fällt eine still aus, gilt ein
-    # Submodul als gewöhnliche Datei und das Verwerfen (Z) gäbe es frei. Ein
-    # unerwarteter Fehler bricht deshalb geschlossen ab (GitReadError), statt
-    # "keine Gitlinks" zu behaupten.
-    # Index: "MODE OID STAGE\tPFAD", NUL-getrennt (Pfade bleiben unmaskiert).
-    index = _required_git(repo, "ls-files", "-s", "-z", "--", *tracked,
-                          timeout=timeout)
-    for record in index.stdout.split("\0"):
-        if record.startswith("160000 "):
-            links.add(record.split("\t", 1)[1])
-    # HEAD-Baum: "MODE commit OID\tPFAD". In einem Repo ohne Commit scheitert der
-    # Aufruf — dann kann HEAD auch keine Submodule verzeichnen. Genau dieser eine
-    # Fall wird geduldet, und zwar erst nachdem er belegt ist.
-    head = run_git(repo, "ls-tree", "-z", "HEAD", "--", *tracked, timeout=timeout)
-    if head.returncode != 0 and repo_has_head(repo, timeout):
-        raise GitReadError("git ls-tree failed (exit %d)" % head.returncode)
-    if head.returncode == 0:
-        for record in head.stdout.split("\0"):
-            if record.startswith("160000 "):
-                links.add(record.split("\t", 1)[1])
-    if not links:
-        return files
-    return [f._replace(submodule=f.path in links) for f in files]
-
-
 def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> RepoStatus:
     """Kompletten Zustand eines Repos einsammeln (läuft parallel in Threads)."""
     rel = str(repo.relative_to(root)) if repo != root else repo.name
@@ -2893,14 +3424,13 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             st.branch = "(detached)"
             st.remote_state = "detached"
             detached = True
+        st.head_oid = current_head(repo, t_)
 
         # Arbeitsverzeichnis-Zustand
-        r = _required_git(repo, "status", "--porcelain=v1", "-z", timeout=t_)
+        r = _required_git(repo, "status", "--porcelain=v1", "-z",
+                          "--untracked-files=all", timeout=t_)
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
             r.stdout)
-        # Submodule kennzeichnen — das Verwerfen (Z) entscheidet daran.
-        st.files = mark_gitlinks(repo, st.files, t_)
-
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
         st.stashes = [l for l in r.stdout.splitlines() if l.strip()]
@@ -2913,40 +3443,74 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
             # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
-            try:
-                # `--jobs=1`: Die Begrenzung auf acht Repos gleichzeitig hilft
-                # nichts, wenn Git INNERHALB eines Aufrufs weitere Verbindungen
-                # aufmacht. Genau das täte es mit `fetch.parallel` oder
-                # `submodule.fetchJobs` in der Benutzerkonfiguration — und der
-                # sshd-Default MaxStartups verwürfe wieder zufällig einzelne.
-                # Der Schalter gilt für Remotes UND Submodule.
-                fetched = run_git_logged(repo, "fetch", "--all", "--prune", "--quiet",
-                                         "--jobs=1", timeout=cfg["fetch_timeout"])
-            except subprocess.TimeoutExpired:
-                for name in configs:
+            for name, remote in configs.items():
+                block_reason = fetch_remote_block_reason(remote, st.branch)
+                if block_reason is not None:
                     fetch_failures[name] = (
-                        "timeout",
+                        block_reason,
                         remote_check_message(
-                            name, "timeout", 0, "", cfg["fetch_timeout"]),
+                            name, block_reason, 0, "", cfg["fetch_timeout"]),
                         "",
                     )
-            else:
-                if fetched.returncode != 0:
-                    # Die Sammelausgabe vermischt Ursachen mehrerer Remotes. Nur
-                    # die gescheiterten Kandidaten einzeln nachprüfen, damit etwa
-                    # "Repo weg" und "kein Netz" nicht beide als Login-Fehler
-                    # erscheinen. Ein transient geheilter Kandidat fällt heraus.
-                    fetch_failures = diagnose_failed_fetches(
-                        repo, configs, fetched, cfg)
+                    continue
+                try:
+                    fetched = fetch_remote_safely(
+                        repo, remote, st.branch, cfg["fetch_timeout"])
+                except RemoteConfigChangedError:
+                    outcome, detail = "changed", ""
+                except FetchTrackingTimeout:
+                    outcome, detail = "outcome_unknown", ""
+                except subprocess.TimeoutExpired:
+                    outcome, detail = "timeout", ""
+                except OSError:
+                    # Fetch oder Tracking-CAS können bereits gewirkt haben.
+                    # Der Fehler gehört nur zu diesem Remote; weitere sichere
+                    # Remotes werden trotzdem aktualisiert und angezeigt.
+                    outcome, detail = "outcome_unknown", ""
+                else:
+                    if fetched.returncode == 0:
+                        continue
+                    outcome = classify_remote_check(
+                        fetched,
+                        keychain_helper=remote_uses_keychain_helper(
+                            repo, name, cfg["git_timeout"]),
+                    )
+                    detail = last_error_line(fetched)
+                fetch_failures[name] = (
+                    outcome,
+                    remote_check_message(
+                        name, outcome, 0, detail, cfg["fetch_timeout"]),
+                    detail,
+                )
             # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
             # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
             # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
+            fetched_configs = configs
             configs = read_remote_configs(repo, cfg)
+            for name in set(fetched_configs) | set(configs):
+                if fetched_configs.get(name) != configs.get(name):
+                    fetch_failures[name] = (
+                        "changed",
+                        remote_check_message(
+                            name, "changed", 0, "", cfg["fetch_timeout"]),
+                        "",
+                    )
             st.remote = detect_sync_remote(repo, cfg, configs)
         st.remotes = collect_remote_statuses(
             repo, st.branch, st.remote, cfg, configs,
             fetch_failures=fetch_failures)
         summarize_fetch_failures(st)
+        removed_during_fetch = set(fetch_failures) - set(configs)
+        if removed_during_fetch:
+            messages = [remote_check_message(
+                name, "changed", 0, "", cfg["fetch_timeout"])
+                for name in sorted(removed_during_fetch)]
+            st.error = "; ".join(filter(None, [st.error, *(
+                f"{name}: {t('short_changed')}" for name in sorted(
+                    removed_during_fetch))]))
+            st.error_long = " ".join(filter(None, [st.error_long, *messages]))
+            st.remote_state = "error"
+            st.fetch_error = True
         if st.remote is None:
             if not st.error and not detached:
                 st.remote_state = "no-remote"
@@ -2997,7 +3561,32 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
         return
     for remote in new.remotes:
         previous = failed.get(remote.name)
-        if previous:
+        same_endpoint = previous and (
+            tuple(previous.fetch_fingerprints),
+            tuple(previous.push_fingerprints),
+            previous.public,
+            previous.mixed_public,
+            previous.target_mismatch,
+            previous.multiple_pushurls,
+            previous.fetch_refspecs_safe,
+            previous.fetch_refspec_fingerprint,
+            previous.branch_mapping_safe,
+            previous.fetch_url_safe,
+            previous.push_url_safe,
+        ) == (
+            tuple(remote.fetch_fingerprints),
+            tuple(remote.push_fingerprints),
+            remote.public,
+            remote.mixed_public,
+            remote.target_mismatch,
+            remote.multiple_pushurls,
+            remote.fetch_refspecs_safe,
+            remote.fetch_refspec_fingerprint,
+            remote.branch_mapping_safe,
+            remote.fetch_url_safe,
+            remote.push_url_safe,
+        )
+        if same_endpoint:
             remote.fetch_failed = True
             remote.fetch_outcome = previous.fetch_outcome
             remote.fetch_error_long = previous.fetch_error_long
@@ -3031,7 +3620,8 @@ def collect_all(root: Path, cfg: dict, fetch: bool = False,
 
 def status_dict(st: RepoStatus) -> dict:
     return {
-        "path": str(st.path), "rel": st.rel, "branch": st.branch,
+        "path": terminal_text(st.path), "rel": terminal_text(st.rel),
+        "branch": st.branch,
         "remote": st.remote, "remote_state": st.remote_state,
         "ahead": st.ahead, "behind": st.behind,
         "upstream": st.upstream,
@@ -3041,9 +3631,15 @@ def status_dict(st: RepoStatus) -> dict:
              "sync": r.is_sync,
              "branch_exists": r.branch_exists, "ahead": r.ahead, "behind": r.behind,
              "fetch_fingerprint": r.fetch_fingerprint,
+             "fetch_fingerprints": r.fetch_fingerprints,
              "push_fingerprints": r.push_fingerprints,
              "target_mismatch": r.target_mismatch,
              "multiple_pushurls": r.multiple_pushurls,
+             "fetch_refspecs_safe": r.fetch_refspecs_safe,
+            "fetch_refspec_fingerprint": r.fetch_refspec_fingerprint,
+            "branch_mapping_safe": r.branch_mapping_safe,
+            "fetch_url_safe": r.fetch_url_safe,
+            "push_url_safe": r.push_url_safe,
              # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
              # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
              "fetch_failed": r.fetch_failed,
@@ -3093,8 +3689,60 @@ def _remote_root(local_root: Path, spec_path: str | None) -> str:
         return str(local_root)
 
 
-def fetch_remote_status(host: str, root: str, *, fetch: bool) -> dict:
+def _valid_remote_payload(payload) -> bool:
+    """Den --json-Vertrag direkt an der nicht vertrauenswürdigen ssh-Grenze prüfen."""
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("version"), str):
+        return False
+    repos = payload.get("repos")
+    if not isinstance(repos, list):
+        return False
+    for repo in repos:
+        if not isinstance(repo, dict) or not isinstance(repo.get("rel"), str):
+            return False
+        for field_name in ("modified", "deleted", "untracked", "conflicts", "stashes"):
+            if field_name in repo and type(repo[field_name]) is not int:
+                return False
+        if "fetch_error" in repo and type(repo["fetch_error"]) is not bool:
+            return False
+        for field_name in ("branch", "remote_state", "error"):
+            if field_name in repo and not isinstance(repo[field_name], str):
+                return False
+        remotes = repo.get("remotes", [])
+        if not isinstance(remotes, list):
+            return False
+        for remote in remotes:
+            if not isinstance(remote, dict) or not isinstance(remote.get("name"), str):
+                return False
+            for field_name in ("ahead", "behind"):
+                if field_name in remote and type(remote[field_name]) is not int:
+                    return False
+            for field_name in ("public", "mixed_public", "sync", "branch_exists",
+                               "target_mismatch", "multiple_pushurls",
+                               "fetch_refspecs_safe", "branch_mapping_safe",
+                               "fetch_url_safe", "push_url_safe",
+                               "fetch_failed"):
+                if field_name in remote and type(remote[field_name]) is not bool:
+                    return False
+            for field_name in ("fetch_fingerprint", "fetch_refspec_fingerprint",
+                               "fetch_outcome",
+                               "fetch_error_long", "fetch_error_detail"):
+                if field_name in remote and not isinstance(remote[field_name], str):
+                    return False
+            for field_name in ("fetch_fingerprints", "push_fingerprints"):
+                values = remote.get(field_name, [])
+                if (not isinstance(values, list)
+                        or any(not isinstance(value, str) for value in values)):
+                    return False
+    return True
+
+
+def fetch_remote_status(host: str, root: str, *, fetch: bool,
+                        process_timeout: int | None = 300) -> dict:
     """Run this very script on `host` over ssh and return its --json output."""
+    if not host or host.startswith("-") or terminal_text(host) != host:
+        raise RuntimeError(t("diff_bad_host"))
     # Die Fehlertexte im JSON (z.B. `error`) sind lokalisiert. Ohne --lang wählte
     # die Gegenseite ihre Sprache selbst (Config/Locale) — derselbe Fetch-Fehler
     # sähe im Vergleich dann wie DRIFT aus. Deshalb bekommt sie unsere UI-Sprache
@@ -3102,34 +3750,45 @@ def fetch_remote_status(host: str, root: str, *, fetch: bool) -> dict:
     remote_args = ["python3", "-", "--json", "--lang", UI_LANG]
     if fetch:
         remote_args.append("--fetch")
+    # Ein Pfad darf selbst mit `-` beginnen. Ohne Optionsende würde etwa der
+    # ausdrücklich angegebene Ordner `--fetch` auf der Gegenseite zum Schalter
+    # und löste einen nicht freigegebenen Netz-Fetch im falschen Verzeichnis aus.
+    remote_args.append("--")
     remote_args.append(root)
     # ssh passes one remote command string to the remote shell. Quote every argv
     # element here; root remains exactly one argument even with spaces/metacharacters.
     inner = shlex.join(remote_args)
+    safe_host = terminal_text(host)[:120]
+
+    def ssh_error(detail: str) -> RuntimeError:
+        safe_detail = terminal_text(redact_remote_error(detail))[:120]
+        return RuntimeError(t("diff_ssh_failed", h=safe_host, e=safe_detail))
+
     try:
         with open(os.path.abspath(__file__), "rb") as fh:
-            r = subprocess.run(
+            r = _run_process_group(
                 ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", host, inner],
-                stdin=fh, capture_output=True, text=True, timeout=300)
+                stdin=fh, timeout=process_timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        raise RuntimeError(t("diff_ssh_failed", h=host, e=str(e)[:100]))
+        raise ssh_error(str(e)[:100])
     # `--json` behält den normalen CLI-Exit-Code bei: 1 bedeutet, dass mindestens
     # ein Repo Aufmerksamkeit braucht. Das JSON ist trotzdem vollständig und muss
     # für den Rechnervergleich ausgewertet werden. Nur echte SSH-/Prozessfehler
     # (Exit-Codes außerhalb 0/1) machen die Gegenstelle unerreichbar.
     if r.returncode not in (0, 1):
         last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
-        raise RuntimeError(t("diff_ssh_failed", h=host,
-                             e=(last[-1][:120] if last else
-                                t("diff_ssh_exit", code=r.returncode))))
+        raise ssh_error(last[-1] if last else
+                        t("diff_ssh_exit", code=r.returncode))
     if not (r.stdout or "").strip():
         last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
-        raise RuntimeError(t("diff_ssh_failed", h=host,
-                             e=(last[-1][:120] if last else t("diff_ssh_no_output"))))
+        raise ssh_error(last[-1] if last else t("diff_ssh_no_output"))
     try:
-        return json.loads(r.stdout)
+        payload = json.loads(r.stdout)
     except json.JSONDecodeError:
-        raise RuntimeError(t("diff_ssh_failed", h=host, e=t("diff_ssh_bad_json")))
+        raise ssh_error(t("diff_ssh_bad_json"))
+    if not _valid_remote_payload(payload):
+        raise ssh_error(t("diff_ssh_bad_schema"))
+    return payload
 
 
 def _remotes_by_name(repo: dict) -> dict:
@@ -3189,10 +3848,23 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             # Rechner mit identischen Remotes, aber verschiedenen Branches,
             # meldeten sonst dauerhaft eine Sicherheits-Drift.
             security_fields = ("public", "mixed_public", "sync",
-                               "fetch_fingerprint", "push_fingerprints",
-                               "target_mismatch", "multiple_pushurls")
-            if tuple(pa.get(k) for k in security_fields) != tuple(
-                    pb.get(k) for k in security_fields):
+                               "fetch_fingerprints", "push_fingerprints",
+                               "target_mismatch", "multiple_pushurls",
+                               "fetch_refspecs_safe", "fetch_refspec_fingerprint",
+                               "fetch_url_safe", "push_url_safe")
+            left = tuple(pa.get(k) for k in security_fields)
+            right = tuple(pb.get(k) for k in security_fields)
+            # Abwaertskompatibel zu Payloads vor 0.18.8: Dort gab es nur den
+            # Singularwert, der bei genau einer URL dieselbe Aussage traegt.
+            if "fetch_fingerprints" not in pa:
+                left = (*left[:3], [pa.get("fetch_fingerprint")], *left[4:])
+            if "fetch_fingerprints" not in pb:
+                right = (*right[:3], [pb.get("fetch_fingerprint")], *right[4:])
+            valid_same_branch = (x.get("branch") == y.get("branch")
+                                 and x.get("branch") not in (None, "?", "(detached)"))
+            if (left != right or (valid_same_branch
+                                  and pa.get("branch_mapping_safe")
+                                  != pb.get("branch_mapping_safe"))):
                 out.append(t("diff_remote_security", rel=rel, r=rn))
             if pa.get("fetch_failed") or pb.get("fetch_failed"):
                 # Scheiterte der Fetch dieses Remotes auf einer Seite, steht dort
@@ -3265,13 +3937,20 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
 
 
 def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool) -> int:
-    """--diff HOST[:PATH]: compare this machine with `HOST`. Read-only."""
+    """Rechner vergleichen; Config-Erzeugung und optionaler Fetch sind die Ausnahmen."""
     host, _, path = spec.partition(":")
-    if not host:
-        print(t("diff_need_host"), file=sys.stderr)
+    if not host or host.startswith("-") or terminal_text(host) != host:
+        print(t("diff_bad_host") if host else t("diff_need_host"), file=sys.stderr)
         return 2
     try:
-        there = fetch_remote_status(host, _remote_root(root, path or None), fetch=fetch)
+        remote_root = _remote_root(root, path or None)
+        # Die Gegenseite begrenzt jeden Git-Aufruf einzeln. Zusätzlich bleibt
+        # eine großzügige, konfigurierbare harte Grenze für den gesamten SSH-
+        # Prozess: Nach erfolgreichem Verbindungsaufbau können auch Python,
+        # Dateisystem oder Sitzung selbst hängen bleiben.
+        there = fetch_remote_status(
+            host, remote_root, fetch=fetch,
+            process_timeout=cfg["diff_timeout"])
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -3483,9 +4162,46 @@ def terminal_text(value) -> str:
             out.append("\\x1b")
         elif code < 0x20 or 0x7F <= code <= 0x9F:
             out.append("\\x%02x" % code if code <= 0xFF else "\\u%04x" % code)
+        elif unicodedata.category(ch) in {"Cf", "Zl", "Zp"}:
+            out.append("\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code)
+        elif unicodedata.category(ch) == "Cs":
+            out.append("\\u%04x" % code)
         else:
             out.append(ch)
     return "".join(out)
+
+
+def zsh_quote(value) -> str:
+    """Einen Pfad als sichtbares, direkt ausführbares zsh-Wort serialisieren."""
+    out = []
+    for ch in str(value):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "'":
+            out.append("\\'")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif code < 0x20 or 0x7F <= code <= 0x9F:
+            # \xNN beschreibt in zsh ein einzelnes Byte. Nicht-ASCII-Codepoints
+            # müssen als Unicode-Escape stehen, damit ihr UTF-8-Pfadbytebild
+            # unverändert bleibt.
+            out.append("\\x%02x" % code if code < 0x80 else "\\u%04x" % code)
+        elif unicodedata.category(ch) in {"Cf", "Zl", "Zp"}:
+            out.append("\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code)
+        elif 0xDC80 <= code <= 0xDCFF:
+            # Pythons surrogateescape bildet ein nicht dekodierbares Pfadbyte
+            # b auf U+DC00+b ab. zshs ANSI-C-Quote stellt genau dieses Byte her.
+            out.append("\\x%02x" % (code - 0xDC00))
+        elif unicodedata.category(ch) == "Cs":
+            out.append("\\u%04x" % code)
+        else:
+            out.append(ch)
+    return "$'" + "".join(out) + "'"
 
 
 def cell_width(text: str) -> int:
@@ -3512,6 +4228,28 @@ def truncate_cells(text: str, limit: int) -> str:
         out.append(ch)
         used += char_width
     return "".join(out)
+
+
+def wrap_cells(text: str, limit: int) -> list[str]:
+    """Eine Anzeigezeile verlustfrei an Terminalzellen umbrechen."""
+    if limit <= 0:
+        return [text]
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current: list[str] = []
+    width = 0
+    for char in text:
+        char_width = cell_width(char)
+        if current and width + char_width > limit:
+            lines.append("".join(current))
+            current = []
+            width = 0
+        current.append(char)
+        width += char_width
+    if current:
+        lines.append("".join(current))
+    return lines
 
 
 def pad_cells(text: str, width: int) -> str:
@@ -3932,48 +4670,9 @@ class TUI:
             Path(self.cd_file).write_text(str(st.path))
         else:
             # Ohne Wrapper können wir das cwd der Shell nicht ändern — Hinweis geben.
-            print(f"\ncd {st.path}")
+            print(f"\ncd -- {zsh_quote(st.path)}")
             print(t("cd_hint"))
         return True
-
-    def action_stash_pop(self):
-        st = self.current()
-        if not st or not st.stashes:
-            self.message = t("no_stash")
-            return
-        # Auf einen bereits konfliktbehafteten Baum lässt sich nicht poppen
-        # (git: „konnte Index nicht schreiben"). Erst die Konflikte auflösen.
-        if st.conflicts:
-            self.message = t("resolve_conflicts_first")
-            return
-        try:
-            approved = latest_stash(st.path, self.cfg["git_timeout"])
-        except (GitReadError, OSError):
-            approved = None
-        if approved is None or approved[1] != st.stashes[0]:
-            self.message = t("stash_changed")
-            return
-        if not self.confirm(t("confirm_pop", rel=st.rel)):
-            self.message = t("cancelled")
-            return
-        try:
-            current = latest_stash(st.path, self.cfg["git_timeout"])
-        except (GitReadError, OSError):
-            current = None
-        if current != approved:
-            log_cancelled(st.path, ("stash", "pop", "stash@{0}"))
-            self.message = t("stash_changed")
-            return
-        r = run_git_logged(st.path, "stash", "pop", timeout=self.cfg["git_timeout"])
-        new = self.refresh_one(st)
-        if r.returncode == 0:
-            self.message = t("stash_applied", rel=st.rel)
-        elif new.conflicts:
-            # Git hat den Stash mit Konfliktmarkern eingespielt und ihn ABSICHTLICH
-            # behalten — nichts geht verloren. Konflikte müssen von Hand gelöst werden.
-            self.message = t("stash_conflict", n=new.conflicts)
-        else:
-            self.message = t("stash_pop_failed", e=r.stderr.strip()[:120])
 
     def action_stash_show(self):
         """Neuesten Stash als Diff anzeigen (read-only), scrollbar. Für den
@@ -3982,45 +4681,22 @@ class TUI:
         if not st or not st.stashes:
             self.message = t("no_stash")
             return
-        ok, preview = stash_preview(st.path, self.cfg["git_timeout"])
+        try:
+            snapshot = latest_stash(st.path, self.cfg["git_timeout"])
+        except (GitReadError, OSError) as exc:
+            self.message = t("stash_preview_failed", e=str(exc)[:120])
+            return
+        if snapshot is None:
+            self.message = t("no_stash")
+            return
+        oid, label = snapshot
+        ok, preview = stash_preview(st.path, self.cfg["git_timeout"], oid)
         if not ok:
             text = t("stash_preview_failed", e=preview)
         else:
             text = preview or t("stash_preview_empty")
-        title = t("stash_preview_title", rel=st.rel, s=st.stashes[0])
+        title = t("stash_preview_title", rel=st.rel, s=label)
         self.show_pager(title, text.splitlines())
-
-    def action_stash_drop(self):
-        """Neuesten Stash endgültig verwerfen (destruktiv -> Rückfrage)."""
-        st = self.current()
-        if not st or not st.stashes:
-            self.message = t("no_stash")
-            return
-        try:
-            approved = latest_stash(st.path, self.cfg["git_timeout"])
-        except (GitReadError, OSError):
-            approved = None
-        if approved is None or approved[1] != st.stashes[0]:
-            self.message = t("stash_changed")
-            return
-        if not self.confirm(t("confirm_drop", rel=st.rel)):
-            self.message = t("drop_cancelled")
-            return
-        try:
-            current = latest_stash(st.path, self.cfg["git_timeout"])
-        except (GitReadError, OSError):
-            current = None
-        if current != approved:
-            log_cancelled(st.path, ("stash", "drop", "stash@{0}"))
-            self.message = t("stash_changed")
-            return
-        r = run_git_logged(st.path, "stash", "drop", "stash@{0}",
-                           timeout=self.cfg["git_timeout"])
-        if r.returncode == 0:
-            self.message = t("stash_dropped", rel=st.rel)
-        else:
-            self.message = t("stash_drop_failed", e=r.stderr.strip()[:120])
-        self.refresh_one(st)
 
     def show_pager(self, title: str, lines: list[str]):
         """Einfacher scrollbarer Textbetrachter (↑/↓/PgUp/PgDn, q/Esc schließt)."""
@@ -4030,7 +4706,14 @@ class TUI:
             h, w = self.scr.getmaxyx()
             safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
             body_h = h - 2
-            for y, line in enumerate(lines[top:top + body_h], start=1):
+            # Erst neutralisieren, dann nach sichtbaren Terminalzellen umbrechen.
+            # Sonst wird etwa U+202E nach dem Umbruch zu sechs sichtbaren Zeichen
+            # und die verlustfreie H-Ansicht schneidet sie wieder ab.
+            wrapped = [part for line in lines
+                       for part in wrap_cells(
+                           terminal_text(line), max(1, w - 1))]
+            top = min(top, max(0, len(wrapped) - body_h))
+            for y, line in enumerate(wrapped[top:top + body_h], start=1):
                 # Diff-Zeilen leicht einfärben: + grün, - rot, @@ gelb.
                 pair = 0
                 if line.startswith("+") and not line.startswith("+++"):
@@ -4041,9 +4724,9 @@ class TUI:
                     pair = curses.color_pair(C_YELLOW)
                 safe_addstr(self.scr, y, 0, line, pair)
             a = top + 1
-            b = min(len(lines), top + body_h)
+            b = min(len(wrapped), top + body_h)
             safe_addstr(self.scr, h - 1, 0,
-                        t("pager_footer", a=a, b=b, n=len(lines)).ljust(w - 1),
+                        t("pager_footer", a=a, b=b, n=len(wrapped)).ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
             ch = self.scr.getch()
@@ -4052,26 +4735,73 @@ class TUI:
             elif ch == curses.KEY_UP:
                 top = max(0, top - 1)
             elif ch == curses.KEY_DOWN:
-                top = min(max(0, len(lines) - body_h), top + 1)
+                top = min(max(0, len(wrapped) - body_h), top + 1)
             elif ch == curses.KEY_NPAGE:
-                top = min(max(0, len(lines) - body_h), top + body_h)
+                top = min(max(0, len(wrapped) - body_h), top + body_h)
             elif ch == curses.KEY_PPAGE:
                 top = max(0, top - body_h)
 
-    # -- Sichere Push-/Pull-Aktionen ---------------------------------------
+    # -- Sichere Push-Aktionen ---------------------------------------------
 
     @staticmethod
     def _remote(st: RepoStatus, name: str | None) -> RemoteStatus | None:
         return next((remote for remote in st.remotes if remote.name == name), None)
 
+    @staticmethod
+    def _remote_approval_signature(remote: RemoteStatus | None) -> tuple | None:
+        """Die im Listen-Screen sichtbare Remote- und Sicherheitsidentitaet."""
+        if remote is None:
+            return None
+        return (
+            tuple(remote.fetch_fingerprints), tuple(remote.push_fingerprints),
+            remote.public, remote.mixed_public, remote.target_mismatch,
+            remote.multiple_pushurls, remote.fetch_refspecs_safe,
+            remote.fetch_refspec_fingerprint, remote.branch_mapping_safe,
+            remote.fetch_url_safe, remote.push_url_safe,
+        )
+
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
-        r = run_git_logged(st.path, "fetch", "--prune", "--quiet", "--", remote,
-                           timeout=self.cfg["fetch_timeout"])
+        try:
+            config = read_remote_configs(st.path, self.cfg).get(remote)
+        except (subprocess.TimeoutExpired, GitReadError, OSError,
+                ValueError, RuntimeError):
+            config = None
+        block_reason = ("unsafe_refspec" if config is None
+                        else fetch_remote_block_reason(config, st.branch))
+        if block_reason is not None:
+            self.message = remote_check_message(
+                remote, block_reason, 0, "", self.cfg["fetch_timeout"])
+            return None
+        try:
+            r = fetch_remote_safely(
+                st.path, config, st.branch, self.cfg["fetch_timeout"])
+        except RemoteConfigChangedError:
+            self.refresh_one(st)
+            self.message = t("transfer_changed")
+            return None
+        except OSError:
+            # Der Netz-Fetch oder die anschließende OID-CAS-Übernahme kann
+            # bereits gewirkt haben. Ein lokaler Start-/Dateifehler beweist
+            # deshalb keinen unveränderten Tracking-Ref.
+            self.refresh_one(st)
+            self.message = t("fetch_outcome_unknown", r=remote)
+            return None
         if r.returncode != 0:
             self.message = (t("transfer_auth_missing", r=remote)
-                            if credentials_missing(r)
+                            if credentials_missing(
+                                r, keychain_helper=remote_uses_keychain_helper(
+                                    st.path, remote, self.cfg["git_timeout"]))
                             else t("transfer_fetch_failed", r=remote,
                                    code=r.returncode))
+            return None
+        try:
+            after = read_remote_configs(st.path, self.cfg).get(remote)
+        except (subprocess.TimeoutExpired, GitReadError, OSError,
+                ValueError, RuntimeError):
+            after = None
+        if after != config:
+            self.refresh_one(st)
+            self.message = t("transfer_changed")
             return None
         # Der Fetch hat gerade bewiesen, dass DIESES Remote wieder erreichbar
         # ist — ein alter Fetch-Fehler dazu darf den Refresh nicht überleben.
@@ -4095,9 +4825,23 @@ class TUI:
             return t("transfer_behind", n=check.behind, r=remote)
         if check.reason == "nothing-push":
             return t("nothing_to_push", r=remote)
-        if check.reason == "nothing-pull":
-            return t("nothing_to_pull", r=remote)
         return check.reason
+
+    def _run_approved_push(self, st: RepoStatus,
+                           check: TransferCheck) -> subprocess.CompletedProcess | None:
+        """Den gebundenen Push ausführen; fehlendes Prozessergebnis bleibt unklar."""
+        args = safe_push_args(
+            check.transfer_url, check.branch, check.head_oid, check.target_oid)
+        try:
+            return run_git_logged(
+                st.path, *args, timeout=self.cfg["fetch_timeout"],
+                env=RAW_OBJECT_ENV)
+        except OSError:
+            # Wie beim Commit kann der Prozess bereits serverseitig gewirkt
+            # haben, obwohl Python sein Ergebnis nicht mehr lesen konnte.
+            self.refresh_one(st)
+            self.message = t("push_io_unknown")
+            return None
 
     def action_sync_push(self):
         """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
@@ -4118,76 +4862,49 @@ class TUI:
         fresh = self._fetch_remote(st, remote.name)
         if not fresh:
             return
+        if (fresh.branch != st.branch
+                or self._remote_approval_signature(
+                    self._remote(fresh, remote.name))
+                != self._remote_approval_signature(remote)):
+            self.message = t("transfer_changed")
+            return
         check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
-                                 self.cfg["git_timeout"])
+                                 self.cfg["git_timeout"], expected_public=False)
         if not check.ready:
             self.message = self._transfer_message(check, remote.name, fresh.branch)
             return
         if not self.confirm(t("confirm_sync_push", n=check.ahead, r=remote.name)):
+            log_cancelled(fresh.path, safe_push_args(
+                check.transfer_url, check.branch, check.head_oid,
+                check.target_oid))
             self.message = t("cancelled")
             return
         newest = self._fetch_remote(fresh, remote.name)
         if not newest:
             return
         final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
-                                 self.cfg["git_timeout"])
+                                 self.cfg["git_timeout"], expected_public=False)
         if not final.ready or final.approval_signature() != check.approval_signature():
             self.message = t("transfer_changed")
             return
-        r = run_git_logged(newest.path, *safe_push_args(
-                               remote.name, check.branch, check.head_oid,
-                               check.target_oid),
-                           timeout=self.cfg["fetch_timeout"])
-        self.refresh_one(newest)
+        r = self._run_approved_push(newest, final)
+        if r is None:
+            return
         if r.returncode == 0:
-            self.message = t("sync_pushed", r=remote.name)
-        elif credentials_missing(r):
+            tracking_ok = update_tracking_after_push(
+                newest.path, final, self.cfg["git_timeout"])
+            self.refresh_one(newest)
+            self.message = (t("sync_pushed", r=remote.name) if tracking_ok
+                            else t("push_tracking_changed"))
+        elif credentials_missing(
+                r, keychain_helper=remote_uses_keychain_helper(
+                    newest.path, remote.name, self.cfg["git_timeout"],
+                    for_push=True)):
+            self.refresh_one(newest)
             self.message = t("transfer_auth_missing", r=remote.name)
         else:
-            self.message = t("push_failed", code=r.returncode)
-
-    def action_sync_pull(self):
-        """Einfacher Pull = Fetch + lokaler --ff-only-Merge vom privaten Sync."""
-        st = self.current()
-        if not st or not st.remote:
-            self.message = t("no_sync_for_action")
-            return
-        remote = self._remote(st, st.remote)
-        if not remote:
-            self.message = t("no_sync_for_action")
-            return
-        if not remote.transfer_safe:
-            self.message = t("remote_url_mismatch", r=remote.name)
-            return
-        if remote.public:
-            self.message = t("public_simple_block")
-            return
-        fresh = self._fetch_remote(st, remote.name)
-        if not fresh:
-            return
-        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "pull",
-                                 self.cfg["git_timeout"])
-        if not check.ready:
-            self.message = self._transfer_message(check, remote.name, fresh.branch)
-            return
-        if not self.confirm(t("confirm_sync_pull", n=check.behind, r=remote.name)):
-            self.message = t("cancelled")
-            return
-        newest = self._fetch_remote(fresh, remote.name)
-        if not newest:
-            return
-        final = inspect_transfer(newest.path, remote.name, newest.branch, "pull",
-                                 self.cfg["git_timeout"])
-        if not final.ready or final.approval_signature() != check.approval_signature():
-            self.message = t("transfer_changed")
-            return
-        r = run_git_logged(newest.path, *safe_pull_args(check.target_oid),
-                           timeout=self.cfg["git_timeout"])
-        self.refresh_one(newest)
-        if r.returncode == 0:
-            self.message = t("sync_pulled", r=remote.name)
-        else:
-            self.message = t("pull_failed", code=r.returncode)
+            self.refresh_one(newest)
+            self.message = t("push_outcome_unknown", code=r.returncode)
 
     def action_github_push(self):
         """Öffentlicher Push nur nach Vorschau + ausgeschriebener Bestätigung."""
@@ -4208,8 +4925,14 @@ class TUI:
         fresh = self._fetch_remote(st, remote.name)
         if not fresh:
             return
+        if (fresh.branch != st.branch
+                or self._remote_approval_signature(
+                    self._remote(fresh, remote.name))
+                != self._remote_approval_signature(remote)):
+            self.message = t("github_changed")
+            return
         check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
-                                 self.cfg["git_timeout"])
+                                 self.cfg["git_timeout"], expected_public=True)
         if not check.ready:
             self.message = self._transfer_message(check, remote.name, fresh.branch)
             return
@@ -4231,6 +4954,9 @@ class TUI:
         h, _ = self.scr.getmaxyx()
         typed = self.prompt_line(h - 4, t("github_type", phrase=phrase))
         if typed != phrase:
+            log_cancelled(fresh.path, safe_push_args(
+                check.transfer_url, check.branch, check.head_oid,
+                check.target_oid))
             self.message = t("github_cancelled")
             return
 
@@ -4240,22 +4966,29 @@ class TUI:
         if not newest:
             return
         final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
-                                 self.cfg["git_timeout"])
+                                 self.cfg["git_timeout"], expected_public=True)
         if (not final.ready
                 or final.approval_signature() != check.approval_signature()):
             self.message = t("github_changed")
             return
-        r = run_git_logged(newest.path, *safe_push_args(
-                               remote.name, check.branch, check.head_oid,
-                               check.target_oid),
-                           timeout=self.cfg["fetch_timeout"])
-        self.refresh_one(newest)
+        r = self._run_approved_push(newest, final)
+        if r is None:
+            return
         if r.returncode == 0:
-            self.message = t("github_pushed", r=remote.name)
-        elif credentials_missing(r):
+            tracking_ok = update_tracking_after_push(
+                newest.path, final, self.cfg["git_timeout"])
+            self.refresh_one(newest)
+            self.message = (t("github_pushed", r=remote.name) if tracking_ok
+                            else t("push_tracking_changed"))
+        elif credentials_missing(
+                r, keychain_helper=remote_uses_keychain_helper(
+                    newest.path, remote.name, self.cfg["git_timeout"],
+                    for_push=True)):
+            self.refresh_one(newest)
             self.message = t("transfer_auth_missing", r=remote.name)
         else:
-            self.message = t("push_failed", code=r.returncode)
+            self.refresh_one(newest)
+            self.message = t("push_outcome_unknown", code=r.returncode)
 
     def action_git_help(self):
         """Kurzhilfe — und darüber das Protokoll der wirklich abgesetzten Befehle."""
@@ -4271,15 +5004,7 @@ class TUI:
     # -- Änderungen ansehen (A) ---------------------------------------------
 
     def action_file_changes(self):
-        """Geänderte Dateien durchgehen, einzeln ansehen und verwerfen können.
-
-        Die Liste zeigt, WAS sich geändert hat — bisher stand dort nur, DASS sich
-        etwas geändert hat. Ansehen ist rein lesend: `git diff` fasst weder Index
-        noch Baum an. `Z` verwirft die Datei unter dem Cursor und ist der einzige
-        Weg in gmf, der eine nicht committete Änderung wirklich wegwirft — er
-        sitzt bewusst hier, wo man die Datei vor sich hat und mit ⏎ vorher in den
-        Diff sehen kann.
-        """
+        """Geänderte Dateien durchgehen und ihren Diff rein lesend ansehen."""
         st = self.current()
         if not st:
             return
@@ -4288,7 +5013,6 @@ class TUI:
             return
         sel = 0
         off = 0
-        note = ""           # Ergebnis der letzten Aktion, direkt über der Fußzeile
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
@@ -4307,8 +5031,6 @@ class TUI:
                 label = t("conflict_label") if entry.code == "C" else ""
                 safe_addstr(self.scr, y, 1, f"{entry.code}  {label}{entry.path}",
                             color_attr(pair, index == sel))
-            if note:
-                safe_addstr(self.scr, h - 2, 1, note, curses.color_pair(C_YELLOW))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
@@ -4330,152 +5052,10 @@ class TUI:
                     return
                 self.show_pager(t("diff_title", p=terminal_text(path)),
                                 (text or t("diff_empty")).splitlines())
-            elif ch in (ord("z"), ord("Z")):
-                changed = self.action_discard_file(st, st.files[sel])
-                note = self.message
-                if changed:
-                    # Die Liste ist jetzt eine andere: neu einlesen, sonst zeigte
-                    # die Ansicht eine Datei, die es so nicht mehr gibt.
-                    st = self.refresh_one(st)
-                    if not st.files:
-                        return
-                    sel = min(sel, len(st.files) - 1)
-                    off = min(off, sel)
-
-    def action_discard_file(self, st: RepoStatus, entry: ChangedFile) -> bool:
-        """Eine einzelne Datei zurücksetzen — hart, nach ausführlicher Ansage.
-
-        Rückgabe True, wenn etwas ausgeführt wurde und die Ansicht neu einlesen
-        muss. Ein abgelehnter Fall (unverfolgt, Konflikt, Umbenennung) sagt über
-        `self.message`, warum nichts passiert ist: Eine Taste, die wortlos nichts
-        tut, sieht aus wie ein kaputtes Programm.
-        """
-        # Für die Ablehnungsgründe ist der HEAD-Zustand irrelevant; den liest
-        # der konsistente Snapshot darunter zusammen mit Status und Index.
-        initial_plan = plan_discard(entry, has_head=True)
-        if initial_plan.refused:
-            self.message = t("discard_refused_" + initial_plan.refused)
-            return False
-        try:
-            snapshot = discard_snapshot(st.path, entry, self.cfg["git_timeout"])
-        except (CommitSafetyError, GitReadError, OSError):
-            self.message = t("discard_changed")
-            return False
-        plan = snapshot.plan
-        dim = curses.color_pair(C_DIM)
-        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
-        if plan.kind == "unstage":
-            # Hier geht nichts verloren: Die Datei bleibt liegen, nur die
-            # Vormerkung fällt weg. Deshalb steht unten auch keine Warnung.
-            rows.append((3, t("discard_effect_unstage"), 0))
-            rows.append((3, t("discard_effect_stays"), 0))
-        else:
-            rows.append((3, t("discard_effect_restore"), 0))
-            rows.append((3, t("discard_effect_history"), 0))
-        rows.append((3, t("discard_extent", n=count_changed_lines(
-            snapshot.diff_text)), 0))
-        rows.append((0, "", 0))
-        if plan.kind != "unstage":
-            rows.append((1, t("discard_no_undo"),
-                         curses.color_pair(C_RED) | curses.A_BOLD))
-            rows.append((0, "", 0))
-        # Die Ausweitung nur anbieten, wenn sie mehr umfasst als diese eine Datei —
-        # "alle 1 Dateien" wäre keine Wahl, sondern eine Stolperfalle.
-        # Submodule zählen nicht mit: `git stash` lässt sie ohnehin liegen.
-        stashable = [f for f in st.files if f.xy != "??" and not f.submodule]
-        extra_key = "A" if len(stashable) > 1 else ""
-        if extra_key:
-            rows.append((1, t("discard_offer_all", n=len(stashable)), dim))
-            rows.append((0, "", 0))
-        question = t("discard_unstage_confirm" if plan.kind == "unstage"
-                     else "discard_confirm", p=entry.path)
-        answer = self._confirm_destructive(
-            t("discard_title", p=terminal_text(entry.path)), rows,
-            format_git_command(plan.args), question, extra_key)
-        if answer is None:
-            return False
-        if extra_key and answer == extra_key:
-            return self.action_discard_all(st)
-        # confirm() liefert bei der dritten Antwort einen Buchstaben — der wäre
-        # als Wahrheitswert wahr. Deshalb ausdrücklich gegen True prüfen.
-        if answer is not True:
-            log_cancelled(st.path, plan.args)
-            self.message = t("discard_cancelled")
-            return False
-        try:
-            current = discard_snapshot(st.path, entry, self.cfg["git_timeout"])
-        except (CommitSafetyError, GitReadError, OSError):
-            current = None
-        if (current is None or current.plan != snapshot.plan
-                or current.fingerprint != snapshot.fingerprint):
-            log_cancelled(st.path, plan.args)
-            self.message = t("discard_changed")
-            return False
-        r = run_git_logged(st.path, *plan.args, timeout=self.cfg["git_timeout"])
-        if r.returncode != 0:
-            self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
-            return False
-        self.message = t("discard_done" if plan.kind == "restore"
-                         else "discard_unstage_done", p=entry.path)
-        return True
-
-    def action_discard_all(self, st: RepoStatus) -> bool:
-        """Alle verfolgten Änderungen eines Repos in einen Stash legen.
-
-        Zweite Stufe des Verwerfen-Dialogs. Bewusst NICHT hart: Bei „alle" fehlt
-        die Beurteilung der einzelnen Datei, die das harte Zurücksetzen trägt.
-        """
-        try:
-            has_head = repo_has_head(st.path, self.cfg["git_timeout"])
-        except (GitReadError, OSError) as exc:
-            self.message = t("discard_failed", e=str(exc)[:120])
-            return False
-        plan = plan_discard_all(st.files, has_head)
-        if plan.refused:
-            self.message = t("discard_all_refused_" + plan.refused)
-            return False
-        dim = curses.color_pair(C_DIM)
-        count = sum(1 for f in st.files if f.xy != "??" and not f.submodule)
-        submodule_bleibt = any(f.submodule for f in st.files)
-        effects = [
-            t("discard_all_effect_stash", n=count),
-            t("discard_all_effect_tree"),
-            t("discard_all_effect_untracked"),
-        ]
-        if submodule_bleibt:
-            # Ehrlich bleiben: `git stash` fasst Submodule nicht an — der Baum
-            # ist danach also NICHT restlos sauber.
-            effects.append(t("discard_all_effect_submodules"))
-        effects.append(t("discard_all_effect_visible"))
-        rows: list[tuple[int, str, int]] = [(1, t("remove_what_happens"), curses.A_BOLD)]
-        rows.extend((3, line, 0) for line in effects)
-        rows.append((0, "", 0))
-        rows.append((1, t("discard_all_undo"), dim))
-        rows.append((3, format_git_command(("stash", "pop")), dim))
-        rows.append((0, "", 0))
-        confirmed = self._confirm_destructive(
-            t("discard_all_title", rel=terminal_text(st.rel)), rows,
-            format_git_command(plan.args), t("discard_all_confirm", rel=st.rel))
-        if confirmed is None:
-            return False
-        if not confirmed:
-            log_cancelled(st.path, plan.args)
-            self.message = t("discard_cancelled")
-            return False
-        r = run_git_logged(st.path, *plan.args, timeout=self.cfg["git_timeout"])
-        if r.returncode != 0:
-            self.message = t("discard_failed", e=(r.stderr or "").strip()[:120])
-            return False
-        # Der Dialog hat die ausgelassenen Submodule angekündigt; die
-        # Erfolgsmeldung darf sie nicht wieder verschweigen.
-        self.message = t("discard_all_done_submodules" if submodule_bleibt
-                         else "discard_all_done", rel=st.rel)
-        return True
-
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
     def action_repo_info(self):
-        """Repo-Details; Remotes und Branches sind auswählbar (T prüfen, X entfernen)."""
+        """Repo-Details; Remotes sind mit T rein lesend prüfbar."""
         st = self.current()
         if not st:
             return
@@ -4540,19 +5120,6 @@ class TUI:
                     note = t("info_check_remote_only")
                 else:
                     note = self._check_selected_remote(fresh, block)
-            elif ch in (ord("x"), ord("X")):
-                if not block:
-                    note = t("info_nothing_selected")
-                    continue
-                kind, name = block[0], block[1]
-                removed = (self._remove_remote(fresh, name) if kind == "remote"
-                           else self._delete_branch(fresh, name))
-                if removed:
-                    # Die Liste hat sich geändert: Ansicht neu aufbauen.
-                    fresh = self.refresh_one(fresh)
-                    view = build_info_view(fresh, self.cfg)
-                    selected, top = 0, 0
-                note = self.message
 
     def _check_selected_remote(self, st: RepoStatus,
                                block: tuple[str, str, int, int] | None) -> str:
@@ -4570,168 +5137,6 @@ class TUI:
         self.message = message
         return message
 
-    def _confirm_destructive(self, title: str, rows: list[tuple[int, str, int]],
-                             command: str, question: str,
-                             extra_key: str = "") -> bool | str | None:
-        """Destruktiven Dialog zeichnen und bestätigen lassen.
-
-        `rows` sind (x, text, attr)-Zeilen ab Bildschirmzeile 2; der auszuführende
-        Befehl folgt direkt darunter, die Rückfrage stellt confirm() auf h-4.
-        Rückgabe None, wenn das Fenster zu klein ist, um Befehl UND Rückfrage
-        gleichzeitig zu zeigen — dann wird nichts ausgeführt. Vorher überschrieb
-        confirm() in kleinen Fenstern genau die Befehlszeile, und man bestätigte
-        eine Aktion, die nicht mehr zu sehen war.
-
-        Mit `extra_key` bietet der Dialog eine dritte Antwort an; sie kommt dann
-        als Buchstabe zurück (siehe confirm()).
-        """
-        self.scr.erase()
-        h, w = self.scr.getmaxyx()
-        command_y = 2 + len(rows)
-        if command_y > h - 5:
-            self.message = t("dialog_too_small")
-            return None
-        safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
-        for offset, (x, text, attr) in enumerate(rows, start=2):
-            safe_addstr(self.scr, offset, x, text, attr)
-        safe_addstr(self.scr, command_y, 1, t("remove_command"), curses.A_BOLD)
-        safe_addstr(self.scr, command_y, 1 + cell_width(t("remove_command")) + 1,
-                    command, curses.color_pair(C_CYAN) | curses.A_BOLD)
-        self.scr.refresh()
-        return self.confirm(question, extra_key)
-
-    def _remove_remote(self, st: RepoStatus, name: str) -> bool:
-        """Remote nach ausführlicher Erklärung und Bestätigung aus der Config nehmen."""
-        try:
-            configs = read_remote_configs(st.path, self.cfg)
-        except Exception as exc:
-            self.message = t("info_remote_error", e=terminal_text(exc))
-            return False
-        remote = configs.get(name)
-        if remote is None:
-            self.message = t("info_no_remotes")
-            return False
-        try:
-            branches = read_branches(st.path, self.cfg, strict=True)
-        except (GitReadError, OSError) as exc:
-            self.message = t("info_remote_error", e=terminal_text(exc))
-            return False
-        undo_commands = remote_restore_commands(remote, branches)
-        command = format_git_command(("remote", "remove", name))
-        dim = curses.color_pair(C_DIM)
-        rows: list[tuple[int, str, int]] = []
-        rows.extend((1, f"{t('info_fetch_url')}: {display_remote_url(url)}", 0)
-                    for url in remote.fetch_urls)
-        rows.append((0, "", 0))
-        rows.append((1, t("remove_what_happens"), curses.A_BOLD))
-        rows.extend((3, t(key, r=name), 0)
-                    for key in ("remove_effect_config", "remove_effect_refs",
-                                "remove_effect_upstream", "remove_effect_safe",
-                                "remove_effect_server"))
-        rows.append((0, "", 0))
-        if st.remote == name:
-            rows.append((1, t("remove_sync_warning", r=name),
-                         curses.color_pair(C_RED) | curses.A_BOLD))
-            rows.append((0, "", 0))
-        rows.append((1, t("remove_undo"), dim))
-        # Alle nötigen Wiederherstellungsbefehle, nicht nur die erste Fetch-URL:
-        # `git remote remove` löscht auch Push-URLs und Branch-Upstreams mit.
-        rows.extend((3, terminal_text(undo), dim) for undo in undo_commands)
-        rows.append((0, "", 0))
-        confirmed = self._confirm_destructive(
-            t("remove_title", r=name), rows, command, t("remove_confirm", r=name))
-        if confirmed is None:
-            return False
-        if not confirmed:
-            log_cancelled(st.path, ("remote", "remove", name))
-            self.message = t("remove_cancelled")
-            return False
-        try:
-            current_remote = read_remote_configs(
-                st.path, self.cfg).get(name)
-            current_undo = (remote_restore_commands(
-                current_remote, read_branches(st.path, self.cfg, strict=True))
-                if current_remote else [])
-        except Exception:
-            current_remote, current_undo = None, []
-        if current_remote != remote or current_undo != undo_commands:
-            log_cancelled(st.path, ("remote", "remove", name))
-            self.message = t("remove_changed")
-            return False
-        r = run_git_logged(st.path, "remote", "remove", name,
-                           timeout=self.cfg["git_timeout"])
-        if r.returncode != 0:
-            self.message = t("remove_failed", r=name, code=r.returncode)
-            return False
-        self.message = t("remove_done", r=name)
-        return True
-
-    def _delete_branch(self, st: RepoStatus, name: str) -> bool:
-        """Lokalen Branch löschen — nur gemergte, und nur nach Erklärung."""
-        try:
-            branches = read_branches(st.path, self.cfg, strict=True)
-        except (GitReadError, OSError) as exc:
-            self.message = t("info_remote_error", e=terminal_text(exc))
-            return False
-        branch = next((b for b in branches if b.name == name), None)
-        if branch is None:
-            self.message = t("info_nothing_selected")
-            return False
-        if branch.is_head:
-            self.message = t("branch_is_current", b=name)
-            return False
-        if not branch.merged:
-            # `git branch -d` würde das ohnehin verweigern. Lieber vorher ehrlich
-            # sagen, warum — und wie es im Terminal bewusst doch geht.
-            self.message = t("branch_not_merged", b=name)
-            return False
-        command = format_git_command(("branch", "-d", name))
-        dim = curses.color_pair(C_DIM)
-        rows: list[tuple[int, str, int]] = []
-        rows.extend((0, line, 0) for line in aligned_rows([
-                (t("info_branch_commit"),
-                 f"{branch.oid} · {branch.date} · {terminal_text(branch.subject)}"),
-                (t("info_upstream"), terminal_text(branch.upstream) or t("none_label")),
-        ], indent=" "))
-        rows.append((0, "", 0))
-        rows.append((1, t("remove_what_happens"), curses.A_BOLD))
-        rows.extend((3, t(key, b=name), 0)
-                    for key in ("branch_effect_pointer", "branch_effect_merged",
-                                "branch_effect_remote", "branch_effect_safe"))
-        rows.append((0, "", 0))
-        rows.append((1, t("remove_undo"), dim))
-        # `git branch -d` löscht auch branch.<name>.remote/merge — bei gesetztem
-        # Upstream gehört der --set-upstream-to-Befehl deshalb mit zum Undo.
-        rows.extend((3, terminal_text(undo), dim)
-                    for undo in branch_restore_commands(branch))
-        rows.append((0, "", 0))
-        confirmed = self._confirm_destructive(
-            t("branch_delete_title", b=name), rows, command,
-            t("branch_delete_confirm", b=name))
-        if confirmed is None:
-            return False
-        if not confirmed:
-            log_cancelled(st.path, ("branch", "-d", name))
-            self.message = t("branch_delete_cancelled")
-            return False
-        try:
-            current = next((item for item in read_branches(
-                st.path, self.cfg, strict=True) if item.name == name), None)
-        except (GitReadError, OSError):
-            current = None
-        if current != branch:
-            log_cancelled(st.path, ("branch", "-d", name))
-            self.message = t("branch_changed")
-            return False
-        r = run_git_logged(st.path, "branch", "-d", name,
-                           timeout=self.cfg["git_timeout"])
-        if r.returncode != 0:
-            self.message = t("branch_delete_failed", b=name,
-                             e=last_error_line(r)[:100])
-            return False
-        self.message = t("branch_deleted", b=name, oid=branch.oid)
-        return True
-
     # -- Commit-Hilfe --------------------------------------------------------
 
     def action_commit_wizard(self):
@@ -4744,13 +5149,14 @@ class TUI:
         if st.conflicts:
             self.message = t("commit_conflicts")
             return
-        # Jede Datei bekommt einen Vorschlag: committen oder gitignoren.
-        items = []
-        for entry in st.files:
-            pattern = suggested_ignore(entry.path)
-            items.append({"code": entry.code, "path": entry.path,
-                          "ignore": pattern is not None, "pattern": pattern,
-                          "include": pattern is None})
+        # Alle Pfade starten ausgewaehlt; Space nimmt einzelne Pfade oder ein
+        # zusammengehoeriges Rename-Paar aus dem Commit. Die Hilfe veraendert
+        # den Arbeitsbaum vor dem Commit nicht (insbesondere keine .gitignore).
+        items = [
+            {"code": entry.code, "path": entry.path, "include": True,
+             "rename_group": entry.rename_group}
+            for entry in st.files
+        ]
         sel = 0
         off = 0
         while True:
@@ -4765,9 +5171,7 @@ class TUI:
                 off = sel - body_h + 1
             for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
                 it = items[i]
-                if it["ignore"]:
-                    label, pair = t("to_gitignore", p=it["pattern"]), C_YELLOW
-                elif it["include"]:
+                if it["include"]:
                     label, pair = t("do_commit"), C_GREEN
                 else:
                     label, pair = t("do_skip"), C_DIM
@@ -4784,15 +5188,13 @@ class TUI:
             elif ch == curses.KEY_DOWN:
                 sel = min(len(items) - 1, sel + 1)
             elif ch == ord(" "):
-                items[sel]["include"] = not items[sel]["include"]
-                if items[sel]["include"]:
-                    items[sel]["ignore"] = False
-            elif ch == ord("i"):
-                it = items[sel]
-                it["ignore"] = not it["ignore"]
-                if it["ignore"]:
-                    it["include"] = False
-                    it["pattern"] = it["pattern"] or it["path"]
+                selected = items[sel]
+                include = not selected["include"]
+                related = [it for it in items
+                           if selected["rename_group"]
+                           and it["rename_group"] == selected["rename_group"]]
+                for it in related or [selected]:
+                    it["include"] = include
             elif ch in (10, 13, curses.KEY_ENTER):
                 if self._commit_step2(st, items):
                     return
@@ -4802,9 +5204,16 @@ class TUI:
 
     def _commit_step2(self, st: RepoStatus, items: list) -> bool:
         """Schritt 2: letzte Commit-Messages zeigen, Message erfragen, ausführen."""
+        # Dieser Snapshot stammt im normalen TUI-Pfad aus dem Listen-Scan VOR
+        # Dateiauswahl und Message. Ein Checkout während des Dialogs darf nicht
+        # still den neuen Branch zur Freigabegrundlage machen.
+        approved_ui_head = (st.head_oid if st.head_oid != ""
+                            else _SIGNATURE_UNSET)
+        approved_ui_ref = (f"refs/heads/{st.branch}"
+                           if st.branch not in ("?", "(detached)")
+                           else _SIGNATURE_UNSET)
         to_commit = [it["path"] for it in items if it["include"]]
-        to_ignore = sorted({it["pattern"] for it in items if it["ignore"] and it["pattern"]})
-        if not to_commit and not to_ignore:
+        if not to_commit:
             self.message = t("nothing_selected")
             return True
         # Stil-Vorlage: die letzten Commit-Messages dieses Repos. Wer sie beim Tippen
@@ -4815,24 +5224,9 @@ class TUI:
         h, w = self.scr.getmaxyx()
         safe_addstr(self.scr, 0, 0, (" " + t("commit_in", rel=st.rel)).ljust(w - 1),
                     curses.A_BOLD)
-        # Layout von unten her planen: die Eingabezeile muss sichtbar bleiben. Sonst
-        # schiebt eine lange .gitignore- oder Message-Liste sie aus dem Bild und man
-        # tippt blind.
+        # Layout von unten her planen: die Eingabezeile muss sichtbar bleiben.
         prompt_y = max(4, h - 2)
         y = 2
-        if to_ignore:
-            shown_ignore = to_ignore[:5]
-            safe_addstr(self.scr, y, 1, t("new_in_gitignore"), curses.color_pair(C_YELLOW))
-            y += 1
-            for pat in shown_ignore:
-                safe_addstr(self.scr, y, 3, pat, curses.color_pair(C_YELLOW))
-                y += 1
-            if len(to_ignore) > len(shown_ignore):
-                safe_addstr(self.scr, y, 3,
-                            t("more_entries", n=len(to_ignore) - len(shown_ignore)),
-                            curses.color_pair(C_YELLOW))
-                y += 1
-            y += 1
         safe_addstr(self.scr, y, 1, t("to_commit_n", n=len(to_commit)),
                     curses.color_pair(C_GREEN))
         y += 2
@@ -4853,43 +5247,75 @@ class TUI:
             self.message = t("empty_msg")
             return True
 
-        # Ausführen: .gitignore atomar ergänzen; exakt freigegebene Pfade über
-        # einen temporären Index committen. Der echte Benutzer-Index bleibt erhalten.
+        # Exakt freigegebene Pfade über einen temporären Index committen. Der
+        # echte Benutzer-Index bleibt erhalten.
         t_ = self.cfg["git_timeout"]
         commit_t = self.cfg["commit_timeout"]
-        head_before = current_head(st.path, t_)
         try:
-            ignore_changed = update_gitignore_atomic(st.path, to_ignore) if to_ignore else False
-            approved = list(dict.fromkeys(to_commit + ([".gitignore"] if ignore_changed else [])))
-            if not approved:
-                self.message = t("nothing_selected")
+            head_before = current_head(st.path, t_)
+            approved_ref = current_symbolic_head_ref(st.path, t_)
+            if approved_ref is None:
+                self.message = t("commit_detached")
+                return True
+            if ((approved_ui_head is not _SIGNATURE_UNSET
+                 and head_before != approved_ui_head)
+                    or (approved_ui_ref is not _SIGNATURE_UNSET
+                        and approved_ref != approved_ui_ref)):
+                self.message = t("commit_failed", e="HEAD changed after UI approval")
+                self.refresh_one(st)
+                return True
+            if repository_operation_in_progress(st.path, t_):
+                self.message = t("commit_operation")
                 return True
             # Ab hier kann es dauern: `git commit` führt den pre-commit-Hook des
             # Repos aus, der oft Linter oder Tests startet.
             self.show_busy(t("commit_running", s=commit_t))
-            r = commit_selected(st.path, approved, msg, t_, commit_t)
+            r = commit_selected(
+                st.path, list(dict.fromkeys(to_commit)), msg, t_, commit_t,
+                expected_head=head_before, expected_ref=approved_ref)
+        except CommitAdoptionError as e:
+            self.message = t(
+                "commit_exists_index_failed", oid=e.committed_head[:12])
+            self.refresh_one(st)
+            return True
+        except CommitOutcomeUnknownError:
+            self.message = t("commit_outcome_unknown")
+            self.refresh_one(st)
+            return True
         except (CommitSafetyError, GitReadError, OSError) as e:
             self.message = t("commit_failed", e=str(e)[:120])
+            self.refresh_one(st)
             return True
         except subprocess.TimeoutExpired as exc:
             # Git und der von ihm gestartete Hook wurden beendet. Ob der Commit
             # vorher noch fertig wurde (z.B. hing nur der post-commit-Hook), weiß
             # nur das Repo selbst — deshalb den HEAD vergleichen, statt zu raten.
-            # Existiert der Commit, prüft finish_interrupted_commit ihn gegen
-            # den freigegebenen Baum (aus der Ausnahme) und zieht den echten
-            # Index nach; sonst zeigten Status und gmf die committeten Pfade
-            # weiter als geändert. Hat ein Hook den Baum verändert, wird der
-            # Commit zurückgerollt und der Fehler wie im Normalweg gemeldet.
+            # Existiert ein neuer Commit, prüft finish_interrupted_commit Eltern
+            # und Baum nur lesend. Nach einem Timeout darf weder HEAD noch Index
+            # automatisch verändert werden, weil die Herkunft nicht beweisbar ist.
+            proof_names = ("approved_head", "approved_ref", "approved_tree",
+                           "approved_paths", "reflog_action")
+            if not all(hasattr(exc, name) for name in proof_names):
+                # Der Timeout lag in einer Vorbereitung/Schutzprüfung; `git
+                # commit` wurde noch nicht gestartet und ein ungebundenes
+                # Dateiabild darf hier keinesfalls als Commit-Nachweis dienen.
+                self.message = t("commit_timeout_none", s=commit_t)
+                self.refresh_one(st)
+                return True
             try:
-                # `approved_head` ist die HEAD-Basis, die commit_selected selbst
-                # gelesen hat; nur sie passt zum Elternteil des Commits. Fehlt
-                # sie (Timeout schon vor dem Commit-Aufruf), bleibt es beim hier
-                # gelesenen Wert.
                 done = finish_interrupted_commit(
-                    st.path, getattr(exc, "approved_head", head_before),
-                    approved, t_, getattr(exc, "approved_tree", None))
-            except (CommitSafetyError, GitReadError) as e:
-                self.message = t("commit_failed", e=str(e)[:120])
+                    st.path, exc.approved_head, list(exc.approved_paths), t_,
+                    exc.approved_tree, exc.approved_ref, exc.reflog_action)
+            except subprocess.TimeoutExpired:
+                self.message = t("commit_outcome_unknown")
+                self.refresh_one(st)
+                return True
+            except (CommitSafetyError, GitReadError, OSError):
+                # Der eigentliche `git commit` war bereits gestartet und ist in
+                # den Timeout gelaufen. Jede danach misslungene Beweisprüfung
+                # lässt den Ausgang offen; sie darf niemals zu "Commit failed"
+                # und damit zu einem riskanten Wiederholungsversuch verleiten.
+                self.message = t("commit_outcome_unknown")
                 self.refresh_one(st)
                 return True
             self.message = t("commit_timeout_done" if done else "commit_timeout_none",
@@ -4902,14 +5328,12 @@ class TUI:
             curses.flushinp()
         if r.returncode != 0:
             self.message = t("commit_failed", e=r.stderr.strip()[:120])
+            self.refresh_one(st)
             return True
-        new = self.refresh_one(st)
-        undo = commit_undo_command(head_before, r.committed_head)
+        self.refresh_one(st)
+        undo = commit_undo_command(
+            r.approved_head, r.committed_head, r.approved_ref)
         self.message = t("committed_in", rel=st.rel, undo=undo)
-        # Nach einem Commit denselben abgesicherten privaten Sync-Push anbieten wie P.
-        # Ein öffentlicher `origin` kann dadurch nie über die alte Kurzstrecke rutschen.
-        if new.remote and new.behind == 0 and new.ahead > 0:
-            self.action_sync_push()
         return True
 
     # -- Hauptschleife -------------------------------------------------------
@@ -4922,14 +5346,10 @@ class TUI:
         """
         if key == "C":
             self.action_commit_wizard()
-        elif key == "U":
-            self.action_stash_pop()
         elif key == "R":
             self.reload(fetch=True)
         elif key == "P":
             self.action_sync_push()
-        elif key == "L":
-            self.action_sync_pull()
         elif key == "G":
             self.action_github_push()
         elif key == "H":
@@ -4944,8 +5364,6 @@ class TUI:
             self.view_mode = "detail" if self.view_mode == "compact" else "compact"
         elif key == "S":
             self.action_stash_show()
-        elif key == "D":
-            self.action_stash_drop()
         elif key in self.cfg["apps"]:
             self.action_open_app(key)
 
@@ -5028,7 +5446,7 @@ class TUI:
         """Nach einem Aktions-Timeout melden UND das Repo defensiv neu einlesen.
 
         Eine Aktion kann vor dem hängenden Schritt schon mutiert haben — etwa
-        ein Fast-forward, dessen post-merge-Hook dann in den Timeout läuft. Der
+        ein Commit, dessen post-commit-Hook dann in den Timeout läuft. Der
         aktionsinterne refresh_one() wird wegen der Ausnahme nie erreicht; ohne
         das Neu-Einlesen hier arbeitete die TUI mit altem Branch-, Datei- oder
         Stash-Zustand weiter und böte darauf falsche Folgeaktionen an.
@@ -5060,8 +5478,8 @@ def init_colors():
 # ---------------------------------------------------------------------------
 
 # Feste Zeitstempel für alle Demo-Commits. Erst dadurch sind die Commit-IDs auf jedem
-# Rechner und in jedem Lauf dieselben — und damit auch die Befehle, die die Sandbox in
-# das Protokoll schreibt (`git merge --ff-only -- <id>`). Ohne das wäre der Bild-Check
+# Rechner und in jedem Lauf dieselben — und damit auch die Commit-IDs in den
+# Demo-Repos und Vorschauen. Ohne das wäre der Bild-Check
 # `docs/make-screens.py --check` nicht zu gewinnen: jede Sekunde eine andere ID.
 DEMO_DATE = "2026-01-02T10:00:00+00:00"
 
@@ -5206,7 +5624,7 @@ def build_demo_sandbox(base: Path) -> Path:
     (repo / "server.py").write_text("print('wip')\n")
     (repo / "notes.txt").write_text("todo\n")
 
-    # 3) mehrere untracked (inkl. typischem gitignore-Kandidat)
+    # 3) mehrere untracked
     repo, _ = _demo_repo(root, "dotfiles")
     (repo / "install.sh").write_text("#!/bin/sh\n")
     (repo / ".DS_Store").write_text("junk\n")
@@ -5371,7 +5789,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="`git fetch` each repo before output (with --list/--json)")
     ap.add_argument("--diff", metavar="HOST[:PATH]",
                     help="compare this machine's repos with HOST over ssh and print "
-                         "only the differences (read-only). Needs `ssh HOST` to work; "
+                         "only the differences. Branches, index, and working trees stay "
+                         "untouched; config.json may be created and --fetch updates safe "
+                         "remote-tracking refs. Needs `ssh HOST` to work; "
                          "gitmaster_flash need NOT be installed there. PATH overrides "
                          "the directory scanned on the other side.")
     ap.add_argument("--lang", choices=["en", "de"],
@@ -5389,9 +5809,22 @@ def main(argv: list[str] | None = None) -> int:
         # Demo ignoriert die persönliche Config bewusst: generische Apps + Sprache,
         # damit Screenshots reproduzierbar und neutral sind.
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        # Der Bildgenerator beendet einen festhängenden Capture nach 90 Sekunden.
+        # Sein Demo-Commit muss vorher selbst timeouten, damit `run_git()` dessen
+        # eigene Git-/Hook-Prozessgruppe zuverlässig tötet, bevor die TUI endet.
+        if os.environ.get("GMF_SCREEN_CAPTURE") == "1":
+            cfg["commit_timeout"] = min(cfg["commit_timeout"], 45)
         cfg["apps"] = {k.upper(): v for k, v in cfg["apps"].items()}
         UI_LANG = resolve_lang(cfg, args.lang)
         sandbox = build_demo_sandbox(Path(tempfile.mkdtemp(prefix="gmf-demo-")))
+        # Auch die anschließend in der TUI ausgelösten Demo-Aktionen müssen die
+        # feste Identität und Zeit verwenden. `_dgit()` bindet nur den Aufbau;
+        # ohne diese Prozessumgebung bekäme der Screenshot-Commit bei jedem Lauf
+        # eine andere OID und `make-screens.py --check` wäre nicht reproduzierbar.
+        for key in [key for key in os.environ if key.startswith("GIT_")]:
+            os.environ.pop(key, None)
+        os.environ.update({key: value for key, value in _demo_env().items()
+                           if key.startswith("GIT_")})
         print(t("demo_built", p=sandbox), file=sys.stderr)
         root = sandbox
     else:

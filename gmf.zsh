@@ -5,7 +5,7 @@
 # Repo-Pfad aus einer Temp-Datei und macht selbst das `cd`.
 #
 # Installation (einmalig):
-#   echo 'source /pfad/zu/gitmaster_flash/gmf.zsh' >> ~/.zshrc
+#   printf '\n%s\n' 'source /pfad/zu/gitmaster_flash/gmf.zsh' >> ~/.zshrc
 #
 # Danach in einer neuen Shell einfach `gmf` (z.B. im Projekt-Sammelordner) aufrufen.
 

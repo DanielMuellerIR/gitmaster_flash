@@ -1,13 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 948 619" width="948" height="619" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
 <title>gitmaster_flash Detailansicht — problematische Repos zuerst</title>
 <rect width="948" height="619" rx="8" fill="#1c1c1c"/>
-<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.18.7 · ~/git · 27 Repos · 20 zu prüfen                                                    </text>
-<text x="12.0" y="42.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
-<text x="37.2" y="42.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">api-gateway</text>
-<text x="146.4" y="42.0" fill="#e06c75" xml:space="preserve">M:1</text>
-<text x="180.0" y="42.0" fill="#e06c75" xml:space="preserve">U:2</text>
-<text x="205.2" y="42.0" fill="#d8d8d8" xml:space="preserve"> [main] </text>
-<text x="272.4" y="42.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.18.8 · ~/git · 27 Repos · 21 zu prüfen                                                    </text>
+<rect x="20.4" y="29.0" width="16.8" height="17.0" fill="#d8d8d8"/>
+<text x="20.4" y="42.0" fill="#1c1c1c" xml:space="preserve">▶ </text>
+<rect x="37.2" y="29.0" width="92.4" height="17.0" fill="#d8d8d8"/>
+<text x="37.2" y="42.0" fill="#1c1c1c" font-weight="bold" xml:space="preserve">api-gateway</text>
+<rect x="146.4" y="29.0" width="50.4" height="17.0" fill="#d8d8d8"/>
+<text x="146.4" y="42.0" fill="#1c1c1c" xml:space="preserve">[main]</text>
+<rect x="205.2" y="29.0" width="75.6" height="17.0" fill="#e5c07b"/>
+<text x="205.2" y="42.0" fill="#1c1c1c" xml:space="preserve">↑1 origin</text>
 <text x="12.0" y="59.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
 <text x="37.2" y="59.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">auth-service</text>
 <text x="154.8" y="59.0" fill="#e06c75" xml:space="preserve">U:1</text>
@@ -16,10 +18,10 @@
 <text x="306.0" y="59.0" fill="#56b6c2" xml:space="preserve">↑2 github</text>
 <text x="12.0" y="76.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
 <text x="37.2" y="76.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">budget-tracker</text>
-<text x="171.6" y="76.0" fill="#e06c75" xml:space="preserve">M:1</text>
-<text x="196.8" y="76.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
-<text x="280.8" y="76.0" fill="#98c379" xml:space="preserve">origin</text>
-<text x="331.2" y="76.0" fill="#d8d8d8" xml:space="preserve"> backup                                                                 </text>
+<text x="171.6" y="76.0" fill="#e5c07b" xml:space="preserve">⚑Stash:1</text>
+<text x="238.8" y="76.0" fill="#d8d8d8" xml:space="preserve"> [master] </text>
+<text x="322.8" y="76.0" fill="#98c379" xml:space="preserve">origin</text>
+<text x="373.2" y="76.0" fill="#d8d8d8" xml:space="preserve"> backup                                                            </text>
 <text x="12.0" y="93.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
 <text x="37.2" y="93.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">cli-toolkit</text>
 <text x="146.4" y="93.0" fill="#e06c75" xml:space="preserve">U:1</text>
@@ -81,16 +83,10 @@
 <text x="37.2" y="280.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">chess-engine</text>
 <text x="138.0" y="280.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
 <text x="213.6" y="280.0" fill="#e5c07b" xml:space="preserve">↑5 origin</text>
-<rect x="20.4" y="284.0" width="16.8" height="17.0" fill="#d8d8d8"/>
-<text x="20.4" y="297.0" fill="#1c1c1c" xml:space="preserve">▶ </text>
-<rect x="37.2" y="284.0" width="117.6" height="17.0" fill="#d8d8d8"/>
-<text x="37.2" y="297.0" fill="#1c1c1c" font-weight="bold" xml:space="preserve">invoice-parser</text>
-<rect x="171.6" y="284.0" width="159.6" height="17.0" fill="#98c379"/>
-<text x="171.6" y="297.0" fill="#1c1c1c" xml:space="preserve">✔ sauber &amp; synchron</text>
-<rect x="339.6" y="284.0" width="50.4" height="17.0" fill="#d8d8d8"/>
-<text x="339.6" y="297.0" fill="#1c1c1c" xml:space="preserve">[main]</text>
-<rect x="398.4" y="284.0" width="50.4" height="17.0" fill="#98c379"/>
-<text x="398.4" y="297.0" fill="#1c1c1c" xml:space="preserve">origin</text>
+<text x="12.0" y="297.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
+<text x="37.2" y="297.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">invoice-parser</text>
+<text x="154.8" y="297.0" fill="#d8d8d8" xml:space="preserve">  [main] </text>
+<text x="230.4" y="297.0" fill="#e06c75" xml:space="preserve">↓1 origin</text>
 <text x="12.0" y="314.0" fill="#d8d8d8" xml:space="preserve"> ▶ </text>
 <text x="37.2" y="314.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve">iot-firmware</text>
 <text x="138.0" y="314.0" fill="#d8d8d8" xml:space="preserve">  [develop] </text>
@@ -146,12 +142,12 @@
 <text x="306.0" y="484.0" fill="#d8d8d8" xml:space="preserve"> [develop] </text>
 <text x="398.4" y="484.0" fill="#98c379" xml:space="preserve">origin</text>
 <text x="12.0" y="501.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> Befehle  (Tab zum Scrollen)</text>
-<text x="12.0" y="518.0" fill="#d8d8d8" xml:space="preserve"> ✔ invoice-parser: git fetch --prune --quiet -- origin                                                        </text>
-<text x="12.0" y="535.0" fill="#d8d8d8" xml:space="preserve"> ✔ invoice-parser: git merge --ff-only -- 01096b0f66fc8262e2c2840538c0970479f2f51a                            </text>
+<text x="12.0" y="518.0" fill="#d8d8d8" xml:space="preserve"> ✔ api-gateway: git commit -m 'docs: demo' -- ':(literal)README.md' ':(literal)notes.txt' ':(literal)server.p </text>
+<text x="12.0" y="535.0" fill="#d8d8d8" xml:space="preserve"> ✔ api-gateway: git -c core.hooksPath=/dev/null reset -q dfd7a41641021f2a835f4deb6bc61467efd078e5 -- ':(liter </text>
 <rect x="12.0" y="556.0" width="915.6" height="17.0" fill="#d8d8d8"/>
 <text x="12.0" y="569.0" fill="#1c1c1c" xml:space="preserve"> ↑/↓/←/→ wählen · ⏎ cd &amp; Exit · M Ansicht · Tab Log · I Info · H Hilfe                                       </text>
 <rect x="12.0" y="573.0" width="915.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="586.0" fill="#1c1c1c" xml:space="preserve"> E Editor · A Änderungen · C Commit · U Stash pop · S Stash-Blick · D Stash weg                              </text>
+<text x="12.0" y="586.0" fill="#1c1c1c" xml:space="preserve"> E Editor · A Änderungen · C Commit · S Stash-Blick                                                          </text>
 <rect x="12.0" y="590.0" width="915.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="603.0" fill="#1c1c1c" xml:space="preserve"> R fetch all · P Sync-Push · L Sync-Pull · G GitHub-Push · Q Beenden                                         </text>
+<text x="12.0" y="603.0" fill="#1c1c1c" xml:space="preserve"> R sichere Remotes fetchen · P Sync-Push · G GitHub-Push · Q Beenden                                         </text>
 </svg>

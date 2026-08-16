@@ -21,7 +21,7 @@ start it in.
 
 ![Compact view: every repository as a mark plus its name, the command log underneath](docs/compact.svg)
 
-<sub>Every screen in this README is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes. The commands in the log below the list were really run on the sandbox: a stash pop and a pull.</sub>
+<sub>Every screen in this README is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes. The command in the log below the list was really run on the sandbox: a selective commit.</sub>
 
 
 Try it without touching your own repositories:
@@ -39,6 +39,11 @@ opens the UI on it. The folder lives in your temp directory; delete it when done
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 cd gitmaster_flash
 ./install.sh          # self-test, then registers the `gmf` shell wrapper
+```
+
+Open a new shell or terminal tab so it reads the new wrapper line, then:
+
+```sh
 gmf ~/projects        # or just `gmf` for the current directory
 ```
 
@@ -101,11 +106,13 @@ keystrokes. Expanding files and stashes stays in the detail view.
   remote first, other remotes next, and GitHub at the far right.
 - **↑n / ↓n next to a remote** — commits ahead of / behind that exact remote for
   the current branch, based on the last fetch. `R` refreshes every remote in every
-  repository with `git fetch --all` without changing a working tree. If several
+  repository by fetching the current branch from each remote separately, without
+  changing a working tree. The network fetch writes no local target ref; gmf then
+  updates only the matching tracking ref without dereferencing symbolic refs. If several
   remotes fail for different reasons, each keeps its own diagnosis and Git error.
 - **M / D / U** — number of modified, deleted and untracked files.
 - **⚑Stash:n** — stashes that exist in the repo (easy to forget, so it is shown).
-- **⚠conflict:n** — unmerged files, e.g. after a `git stash pop` that did not
+- **⚠conflict:n** — unmerged files, e.g. after a `git stash apply` that did not
   apply cleanly. Kept separate from "modified", because it needs different work.
 - Warnings such as "no sync remote" or "branch not on remote".
 
@@ -125,15 +132,15 @@ commands, `Tab` returns to the list — both sides remember where you were.
 ![The focus in the command log: the selection bar sits there, the repository list has none](docs/command-log.svg)
 
 Cancelled dialogs appear as `⊘ … (not run — cancelled)`, so the log never
-suggests something ran that did not. Two identical `fetch` lines are no glitch
-either: gmf fetches once before it asks and once after you confirm, and only acts
-if nothing moved in between (see "Safe push and pull").
+suggests something ran that did not. Two `fetch` lines are no glitch either:
+gmf fetches once before it asks and once after you confirm, and only acts if
+nothing moved in between (their random one-time URL aliases differ; see "Safe push").
 
 `H` shows the same log in full, above the safety rules. Read-only scan commands
 are deliberately left out — they would bury the interesting lines. Arguments are
-quoted the way a shell needs them, so a line can be typed or pasted as-is, and
-destructive dialogs show the command before you confirm it: you see
-`git remote remove github` while deciding, not afterwards.
+quoted the way a shell needs them, so every recorded line can be typed or pasted
+as-is. State-changing actions are recorded with their real, fully pinned Git
+arguments; cancelled confirmations remain explicitly marked as not run.
 
 ## Keys
 
@@ -148,25 +155,23 @@ memorize. Case does not matter — `f` works like `F`.
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
-| A | look at the changes: pick a file, see its diff; there `Z` discards it |
+| A | inspect changes file by file in a read-only diff viewer |
 | C | commit helper (see below) |
 | P | safely push the current branch to the private sync remote |
-| L | safely fast-forward the current branch from the private sync remote |
 | G | guarded GitHub push with outgoing-commit/file preview and typed confirmation |
 | H | show the command log of this session plus the Git safety rules |
-| I | repository details and remotes; there: `T` test a remote, `X` remove one |
-| U | apply the latest stash (`git stash pop`, with confirmation) |
+| I | read-only repository, remote and branch details; there: `T` tests a remote |
 | S | view the latest stash as a diff (read-only, scrollable) |
-| D | drop the latest stash (`git stash drop`, with confirmation) |
-| R | reload everything including `git fetch --all` |
+| R | reload everything and fetch each safe remote separately |
 | Q | quit |
 
-A stash is never popped onto a tree that already has conflicts — resolve those
-first. Its preview includes untracked and binary files; a failed or unexpectedly
-empty Git preview is labelled explicitly before the destructive drop action
-remains available.
+The stash preview includes untracked and binary files; a failed or unexpectedly
+empty Git preview is labelled explicitly. Applying or deleting a stash remains a
+terminal task after that review: Git cannot atomically bind the target branch,
+index and working tree against concurrent changes, nor bind deletion to one
+specific reflog entry.
 
-## Changes: look and discard (`A`, there `Z`)
+## Changes: read-only inspection (`A`)
 
 `→` shows *that* a file changed; `A` shows *what* changed in it. Pick a file with
 `↑`/`↓` (or `Tab`), press `⏎`, and its diff opens in the scrollable viewer —
@@ -179,43 +184,14 @@ including new files, which `git diff` normally ignores, and deleted ones.
  U  notes.txt
  D  old-config.yml
 
- ↑/↓ or Tab select file · ⏎ show diff · Z discard · Q/Esc back
+ ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back
 ```
 
-Looking is purely read-only: neither the index nor the working tree is touched.
-`Z` discards the selected file, and it is the one place in gmf that really
-throws away an uncommitted change. It sits here on purpose — where the file list
-is in front of you and `⏎` shows the diff first.
-
-What `Z` does depends on the state of the file:
-
-- **Modified, deleted or staged:** back to the state of the last commit
-  (`git restore --source=HEAD --staged --worktree`). History stays untouched;
-  only the uncommitted change is lost. There is no undo command for that, and
-  the dialog says so — it also names the extent in changed lines, so a file with
-  real work in it looks different from one that a program merely touched.
-- **Newly added:** the file is in no commit, so there is no earlier state to go
-  back to. It only loses its staging and stays on disk as an untracked file —
-  gmf does not delete it.
-- **Untracked, merge conflict, rename or submodule:** refused, with the reason
-  shown above the footer. Untracked files were never in Git, so removing one
-  would be deleting, not discarding. A rename consists of two entries — taking
-  back one half would leave the other behind. And for a submodule `git restore`
-  checks out nothing: the command would run into thin air and the submodule
-  would stay on its commit — resetting means working inside the submodule
-  itself (e.g. `git submodule update`).
-
-Immediately before the confirmed `git restore`, gmf reads the Porcelain status,
-index entry, HEAD entry and raw file content again. If any of them changed since
-the preview, nothing is discarded and the file must be reviewed again.
-
-From two changed tracked files on, the same dialog offers a second route with
-`A`: **all** changes in the repository go into a stash instead of into nothing,
-after a confirmation of their own. That is the widening for the case where you
-did not judge every file individually. Afterwards the content stays visible and
-within reach: `S` shows it, `U` brings it back, `D` drops it. Untracked files
-are left alone here as well, and submodules keep their checked-out state —
-`git stash` skips both.
+This view is deliberately read-only: neither index nor working tree is touched.
+Discarding or unstaging a file would require an atomic comparison with every
+editor and Git process that may change it between preview and mutation. Git does
+not provide that guarantee for a working-tree path, so gmf leaves these actions
+to an explicitly reviewed terminal command instead of risking unseen data loss.
 
 ## Repository info and remotes (`I`)
 
@@ -251,36 +227,14 @@ The answer distinguishes the cases that otherwise look identical:
 The info view also keeps Git's own error message as evidence, underneath the
 plain-language classification.
 
-**`X` removes the selected remote** after a confirmation that spells out exactly
-what happens. This is a local Git configuration change only: the
-`[remote "<name>"]` section disappears from `.git/config`, its remote-tracking
-branches `refs/remotes/<name>/*` are deleted, and a local branch that tracked it
-loses its upstream setting. Commits, files, branches and stashes stay untouched,
-and nothing is sent to or changed on the server. The dialog shows both the exact
-command it will run and the commands that restore the local configuration —
-including extra fetch/push URLs and the upstream link of every branch that
-tracked the remote, plus custom remote settings such as refspecs, `tagOpt` and
-`mirror`, because `git remote remove` deletes those too. The configuration is
-checked again after confirmation; a changed preview is never removed. (The
-remote-tracking branches themselves come back with the next fetch.)
-
-Useful together: repositories deleted on GitHub keep their now-dead remote
-locally. `R` marks such a remote red (`✘`) in the repository line, `T` confirms
-that the address is reachable but the repository is gone, and `X` cleans it up.
-
-**Local branches are listed too** — the other state Git never transfers. Nobody
-sees them because you only ever look at the current branch, so finished features
-and old experiments pile up. Each branch shows its last commit, its upstream with
-ahead/behind, and whether it is already merged. `X` on a branch deletes it, but
-only when it is fully merged into HEAD (`git branch -d`): its commits are then
-reachable from HEAD anyway, so nothing can be lost. Unmerged branches are refused
-with the reason and the terminal command that would force it. The confirmation
-shows both the exact delete command and the commands that restore the branch —
-`git branch <name> <oid>` plus, if an upstream was set, the
-`git branch --set-upstream-to …` line, because `git branch -d` deletes that
-link as well. The branch OID and metadata are checked again after confirmation;
-if the branch moved, it stays in place. The same state binding protects the
-latest stash before `U` applies it or `D` permanently drops it.
+The info view is deliberately read-only. `T` tests the selected remote and keeps
+Git's redacted response as evidence. Local branches are listed with their last
+commit, upstream, ahead/behind and merge state, but gmf does not remove remotes or
+branches: Git would also delete their reflogs, which can contain the last local
+reference to commits and cannot be reconstructed by an honest undo command.
+Removal remains an explicit terminal task after reviewing those details. Stashes
+are previewed read-only; applying or deleting them remains an explicit terminal
+task as well.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ
@@ -326,29 +280,28 @@ Local branches:
  M  README.md                                                    ✔ commit
  U  notes.txt                                                    ✔ commit
  U  server.py                                                    ✔ commit
- U  build/out.o                                        ✎ .gitignore: build/
+ U  build/out.o                                                  ✔ commit
 
- ␣ commit on/off · i gitignore on/off · ⏎ next · Esc cancel
+ ␣ commit on/off · ⏎ next · Esc cancel
 ```
 
-1. Every changed and new file is listed with a suggestion: typical junk
-   (`node_modules/`, `.DS_Store`, `__pycache__/`, `*.log`, `.env`, …) is proposed
-   for **.gitignore**, everything else for **committing**. Both are togglable per
-   file (`␣` commit on/off, `i` gitignore on/off).
+1. Every changed and new file is listed. `␣` selects or excludes it; the helper
+   never edits `.gitignore` or any other working-tree file before the commit.
 2. Before you type the commit message, the repository's recent messages are shown
    as a style reference — as many as fit above the input line, which always stays
    visible.
-3. Merge conflicts block the helper completely. `.gitignore` is extended atomically
-   without following symlinks. The commit is built in a temporary index containing
+3. Merge conflicts block the helper completely. The commit is built in a temporary index containing
    only the approved paths; an existing user index, including deliberately staged
    but excluded work, stays intact. For the committed paths the real index adopts
    the new commit, exactly as `git commit -- <path>` does — otherwise `git status`
-   would keep reporting them as modified. Optionally the commit is pushed through the same
-   guarded private sync path as `P` afterwards. After an ordinary local commit,
-   the result line includes `git reset --soft HEAD~1` as the undo command. After
-   the very first commit it instead shows `git update-ref -d HEAD <new-oid>`:
-   the expected OID prevents it from deleting a branch that has moved, while the
-   committed files stay staged and on disk.
+   would keep reporting them as modified. Push remains a separate, deliberate `P`
+   action. After an ordinary local commit, the result line includes
+   `git update-ref --no-deref refs/heads/<branch> <old-oid> <new-oid>`
+   as the undo command. After the very first commit it uses
+   `git update-ref --no-deref -d refs/heads/<branch> <new-oid>`. The full ref keeps the undo
+   bound to the approved branch even after a checkout; the expected new OID also
+   prevents changing that branch after it has moved. The committed files stay
+   staged and on disk. The helper is blocked on a detached HEAD.
 
 ## Installation
 
@@ -400,10 +353,10 @@ simply doesn't have it, so a pending push is invisible there. Same for branches 
 don't currently have checked out.
 
 ```sh
-gitmaster_flash.py --diff mymac            # compare ~/git here with ~/git on mymac
-gitmaster_flash.py --diff mymac --json     # machine-readable
-gitmaster_flash.py --diff mymac:~/code     # different directory on the other side
-gitmaster_flash.py --diff mymac --fetch    # refresh ahead/behind counts first
+gmf --diff mymac            # compare ~/git here with ~/git on mymac
+gmf --diff mymac --json     # machine-readable
+gmf --diff mymac:~/code     # different directory on the other side
+gmf --diff mymac --fetch    # refresh ahead/behind counts first
 ```
 
 It prints **only the differences**, split into classes — that split is the point,
@@ -419,7 +372,8 @@ only on mymac: experiment
 ```
 
 `DRIFT` also covers errors, conflicts, stashes, branch availability, remote safety
-classification and credential-free endpoint fingerprints; raw remote URLs and
+classification (including whether fetch/push URLs are executable without exposing
+credentials) and credential-free endpoint fingerprints; raw remote URLs and
 credentials never enter JSON. `DRIFT` = should be identical but isn't (worth
 acting on). `SYNC` = both machines agree, but together they sit ahead/behind the
 sync remote — invisible in a pure two-machine comparison, yet usually the number
@@ -434,11 +388,15 @@ to be installed on the other machine: the script is piped over stdin, so the rem
 only needs `python3` and `git`, and both sides always run the exact same version (no
 version drift to reason about). Works against Linux too.
 
-**It never changes your repositories** — no remotes added, nothing committed or pushed,
-branch, index and working tree untouched. It tells you what differs; fixing is yours.
-Two things it does write, both outside your repository contents: `--fetch` runs a real
-`git fetch --all --prune` on both machines — that is what the flag is for, and it only
-updates remote-tracking refs — and the very first run creates
+**Branch, index, and working tree stay untouched** — no remotes are added and
+nothing is committed or pushed. It tells you what differs; fixing is yours.
+Two things it does write: `--fetch` runs a real fetch on both machines — that is
+what the flag is for — with tag fetching, tag pruning, and submodule recursion
+disabled. For each remote it fetches only the advertised object ID of the current
+branch, without a local target ref, then updates only the matching
+`refs/remotes/<remote>/<branch>` ref with `--no-deref`. The checked URL is passed
+through a one-time alias; unsafe remotes are reported instead of run. The
+very first run also creates
 `~/.config/gitmaster_flash/config.json`, on the queried machine as well, because the
 same script runs there.
 
@@ -451,9 +409,9 @@ some of them at random — which looks like a broken repo but isn't.
 ## Non-interactive use (scripts, CI, agents)
 
 ```sh
-gitmaster_flash.py --list          # colored text list
-gitmaster_flash.py --json          # machine-readable
-gitmaster_flash.py --json --fetch  # fetch each repo first
+python3 gitmaster_flash.py --list          # colored text list
+python3 gitmaster_flash.py --json          # machine-readable
+python3 gitmaster_flash.py --json --fetch  # fetch each repo first
 
 # Every output carries the version — so a diff of two machines' output shows
 # whether the same build produced them:
@@ -487,25 +445,35 @@ starting the UI, so a pipe does the sensible thing.
   the compact view (default 20: up to 20 use the detail view; `M` switches at any
   time).
 - `git_timeout` / `fetch_timeout` — seconds per git call.
+- `diff_timeout` — hard wall-clock limit for the complete SSH comparison
+  (default 3600 seconds). Individual Git calls still use `git_timeout` or
+  `fetch_timeout`; SSH connection setup has a separate ten-second limit.
 - `commit_timeout` — seconds for `git commit` alone (default 120). It runs the
   repository's pre-commit hook, which often starts linters or tests and needs far
   longer than `git_timeout`. When the limit is hit, git *and* everything the hook
   started are terminated, and gmf reports it instead of aborting.
 
-## Safe push and pull
+## Safe push
 
-`P` and `L` are intentionally limited to a non-public sync remote. Both fetch
-first, require a clean working tree and reject divergent history. Fetch and push
+`P` is intentionally limited to a non-public sync remote. It fetches first,
+requires a clean working tree and rejects behind or divergent history. Fetch and push
 URLs must identify one identical credential-free host/repository target; multiple
 or differing push URLs are blocked. The mix that is common at hosting services —
 fetch over HTTPS, push over SSH through the virtual `git` user — counts as the
 same target: `git@host:org/repo` and `https://host/org/repo` mean the same
 repository. Immediately before a confirmed mutation the
 branch, HEAD, index, worktree, remote identity and target OID are checked again.
-Pull merges only the approved immutable OID by fast-forward; push sends the approved
-commit OID through an explicit refspec. An exact target-OID lease prevents a
+Push sends the approved commit OID through an explicit refspec. An exact target-OID lease prevents a
 remote deletion or concurrent move from turning it into an unreviewed update;
-tags are never sent.
+tags and submodule commits are never sent. The one push also disables repository
+hooks, so a pre-push hook cannot publish unreviewed tags or additional refs. The transfer uses the exact URL that was
+checked, not a remote name that concurrent configuration could redirect. Its fetch
+refspec must map `refs/heads/<branch>` to that remote's matching tracking ref.
+
+Pull remains a terminal operation. Moving a branch, index and working tree cannot
+be atomically tied to the state approved by this TUI across concurrent Git
+processes; gmf therefore does not risk fast-forwarding a branch checked out in
+the race window.
 
 GitHub uses the separate `G` path. It works only when the same branch already
 exists on exactly one GitHub remote and the histories are related. Before

@@ -22,7 +22,7 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   und unabhängig von der Maschine gleich aussehen (deshalb `core.excludesFile`
   und `core.hooksPath` in den Demo-Repos abschalten). Alle Demo-Commits tragen den
   festen Zeitstempel `DEMO_DATE`; nur dadurch sind die Commit-IDs überall gleich —
-  und damit auch Protokollzeilen wie `git merge --ff-only -- <id>` im Bild.
+  und damit auch die Commit-IDs in den Demo-Repos und Vorschauen.
 - Die Bilder in `docs/` sind **generiert, keine Screenshots** (seit 2026-07-17):
   `python3 docs/make-screens.py` fährt das echte Programm in einem **Pseudo-Terminal**
   auf der `--demo`-Sandbox und baut daraus SVG. Damit entfällt das frühere Gefummel
@@ -74,11 +74,21 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   (`_verify_hooks_kept_approved_tree`). Und ins Befehlsprotokoll kommt nicht das
   Temp-Index-Interna, sondern der terminal-äquivalente Befehl
   `git commit -m … -- <pfade>` — nur der wäre im Terminal gefahrlos wiederholbar.
-  Dieselbe Baumprüfung gilt seit 0.18.2 auch im Timeout-Zweig: `commit_selected`
-  hängt den freigegebenen Baum an die `TimeoutExpired`-Ausnahme
-  (`exc.approved_tree`), und `finish_interrupted_commit()` prüft damit — nicht
-  mehr nur über Pfadnamen — ob der doch noch entstandene Commit exakt dem
-  freigegebenen Stand entspricht; sonst Rollback wie im Normalweg.
+  Commit und Undo sind zusätzlich an den vollständigen symbolischen Branch-Ref
+  gebunden; detached HEAD ist gesperrt. Ein Checkout auf einen zweiten Branch mit
+  derselben OID darf weder Commit-Ziel noch Undo-Ziel unbemerkt austauschen.
+  Im Timeout-Zweig hängt `commit_selected` den freigegebenen Baum an die
+  `TimeoutExpired`-Ausnahme (`exc.approved_tree`). `finish_interrupted_commit()`
+  prüft Eltern-OID und Baum nur lesend. Es rollt dort nie zurück und zieht auch
+  den echten Index nicht nach: Nach dem beendeten Prozess ist nicht beweisbar,
+  ob ein neuer HEAD von gmf oder einem parallelen Programm stammt. Der synchrone
+  Normalweg darf nur die über einen eindeutigen `GIT_REFLOG_ACTION`-Eintrag
+  belegte Commit-OID per CAS zurückrollen; ein fremder Folgecommit bleibt stehen.
+  Eltern und Baum werden stets mit `GIT_NO_REPLACE_OBJECTS=1` gelesen, damit ein
+  Hook die Prüfung nicht über `refs/replace/*` täuschen kann. Scheitert nach dem
+  belegten Commit nur die Übernahme in den echten Index, meldet die TUI
+  ausdrücklich „Commit vorhanden, Index nicht übernommen“ statt „Commit
+  fehlgeschlagen“ (Entscheidung 2026-08-16).
 - Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
   Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
   vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen
@@ -92,7 +102,7 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 
-- Remote-Identität (`canonical_remote_target()`): Übertragungen (P/L/G) laufen
+- Remote-Identität (`canonical_remote_target()`): Übertragungen (P/G) laufen
   nur, wenn Fetch- und Push-Ziel identisch sind (`transfer_safe`). SCP-Pfade
   ohne führenden `/` hängen am Home des SSH-Benutzers (`alice@host:repo` ≠
   `bob@host:repo` ≠ `host:/repo`) — mit einer Ausnahme seit 0.18.2: Der
@@ -117,9 +127,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
     der Login in Ordnung ist. `keychain_session()` erkennt das über
     `launchctl managername` (nur „Aqua“ ist die GUI-Sitzung) und macht daraus
     einen eigenen Fall, damit die Zeile nicht zum Neu-Anmelden auffordert.
-    Anlass war ein konkreter Fehlalarm am 2026-08-05. Seit 0.18.3 gilt das nur
-    noch für die Meldungen des Credential-Helpers
-    (`CREDENTIAL_HELPER_MARKERS`); ein abgelehnter SSH-Schlüssel
+    Anlass war ein konkreter Fehlalarm am 2026-08-05. Seit 0.18.8 verlangt der
+    Fall zusätzlich den positiven Nachweis eines für die konkrete Remote-URL
+    wirksamen schlüsselbundabhängigen Helpers; eine bloße Auth-Meldung in einer
+    Nicht-Aqua-Sitzung reicht nicht. Ein abgelehnter SSH-Schlüssel
     („permission denied (publickey)“) bleibt `auth`, denn dort ist gar kein
     Schlüsselbund im Spiel.
 - Ein gescheiterter Fetch ist **kein** Unterschied zwischen zwei Rechnern. Er
@@ -134,12 +145,24 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   einer Seite `fetch_failed` steht — sein Tracking-Ref ist dort veraltet. Und
   `error` wird nur auf DER Seite geleert, deren Fetch scheiterte; sonst versteckt
   ein Fetch-Problem hier einen echten lokalen Schaden drüben.
-- Seit 0.18.4 wird ein fehlgeschlagenes `fetch --all` nicht mehr aus dem
-  kombinierten stderr pauschal klassifiziert. `diagnose_failed_fetches()` prüft
-  nur die von Git genannten Kandidaten einzeln nach und speichert Ursache,
-  Erklärung und redigierten Git-Beleg am jeweiligen `RemoteStatus`. Ein beim
-  Nachprüfen erfolgreicher transienter Fehler gilt als geheilt; ein anderes,
-  erfolgreiches Remote bekommt weder rotes Badge noch fremde Diagnose.
+- Seit 0.18.8 wird jedes Remote einzeln gefetcht und erhält dadurch direkt seine
+  eigene Ursache, Erklärung und den redigierten Git-Beleg am jeweiligen
+  `RemoteStatus`; Fehler verschiedener Remotes können sich nicht mehr in einem
+  kombinierten stderr vermischen. Fetches laufen nur mit `--no-tags`,
+  `--no-prune-tags`, `--no-recurse-submodules`, leerer `--refmap` und ohne
+  lokalen Ziel-Ref. Je Remote wird nur die angekündigte Objekt-ID des aktuellen
+  Branches geholt; anschließend setzt `update-ref --no-deref` ausschließlich den
+  gleichnamigen Tracking-Ref. Damit kann auch ein dort eingeschleuster Symref
+  keinen lokalen Branch verändern. Die Config muss die eindeutige Abbildung
+  `refs/heads/<branch>` → `refs/remotes/<remote>/<branch>` belegen. Auch die
+  geprüfte konkrete URL wird statt des veränderlichen Remote-Namens übergeben.
+  Eine parallele Config-Änderung kann dadurch weder das Ziel umleiten noch lokale
+  Branches, Tags oder fremde Refs einschleusen. Pushes sind ebenfalls an die
+  geprüfte URL gebunden, setzen `--recurse-submodules=no` und schalten für genau
+  diesen Aufruf `core.hooksPath` ab; ein pre-push-Hook darf keine ungeprüften
+  Tags oder weiteren Refs veröffentlichen. Unsichere Remotes werden als Fehler ausgewiesen;
+  sichere Remotes desselben Repos werden einzeln
+  weiter aktualisiert.
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
   acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
   `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
@@ -148,58 +171,31 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Benutzerkonfiguration innerhalb jedes Aufrufs weitere Verbindungen öffnen. Eine
   Erhöhung braucht deshalb einen echten Kaltstart-Netztest, nicht nur Unit-Tests
   mit gemocktem Git (bestätigter Praxisbefund 2026-08-05).
-- Destruktive lokale Aktionen (`X` Remote/Branch) verlangen einen Dialog, der die
-  Folgen benennt und sowohl den auszuführenden als auch den Rückgängig-Befehl
-  zeigt. Branches löscht gmf nur gemergt (`git branch -d`), nie erzwungen.
-  Ausdrückliche Ausnahme ist `Z` auf einer einzelnen Datei: Einen
-  Rückgängig-Befehl gibt es dort nicht, weil eine verworfene Änderung danach
-  nirgends mehr steht. An seiner Stelle sagt der Dialog ausdrücklich, dass es
-  kein Zurück gibt, und nennt den Umfang der Änderung in Zeilen — daran
-  unterscheidet sich eine Datei mit echter Arbeit von einer, die nur ein
-  Programm beim Start angefasst hat (Entscheidung 2026-08-03). Seit 0.18.4
-  werden Remote-Konfiguration, Branch und neuester Stash nach der Bestätigung
-  erneut gegen die Vorschau geprüft; eine Abweichung bricht die Aktion ab.
-  `remote_restore_commands()` erhält außerdem alle gelesenen
-  `remote.<name>.*`-Werte (auch eigene Refspecs, `tagOpt`, `mirror`) und nicht
-  nur URLs und Upstreams.
-- `Z` in der Änderungsansicht ist der einzige Weg in gmf, der eine nicht
-  committete Änderung wirklich wegwirft. Der Zuschnitt ist eine Entscheidung und
-  keine Zwischenstufe: einzelne Datei hart (`plan_discard()`), alle Dateien
-  zusammen als Stash (`plan_discard_all()`), unverfolgte Dateien gar nicht. Bei
-  „alle“ fehlt die Beurteilung der einzelnen Datei, die den harten Weg trägt;
-  unverfolgte Dateien waren nie in Git, sie zu entfernen wäre Löschen statt
-  Verwerfen. Eine Erweiterung darauf braucht einen eigenen Dialog mit eigenem
-  Namen, nicht dieselbe Taste. Was eine Datei überhaupt braucht, hängt am rohen
-  Status in `ChangedFile.xy`; die Anzeige-Buchstaben M/D/U/C reichen dafür nicht.
-  Submodule (Gitlinks) lehnt das Verwerfen seit 0.18.2 komplett ab:
-  `git restore` und `git stash` fassen den ausgecheckten Stand eines Submoduls
-  nicht an, melden aber Exit 0 — gmf hätte also „Verworfen" gemeldet, ohne dass
-  sich etwas ändert. Bei `git stash push` kommt hinzu: Bleiben nur
-  Submoduländerungen übrig, legt es gar keinen Stash an („No local changes to
-  save“) und endet trotzdem mit Exit 0 — deshalb lehnt `plan_discard_all()`
-  diesen Fall vorher ab (`only_submodules`), und blieben Submodule neben echten
-  Änderungen liegen, sagt das auch die Erfolgsmeldung
-  (`discard_all_done_submodules`, seit 0.18.3). Weder aus dem Exit-Code von
-  `git restore` noch aus dem von `git stash push` darf gmf also schließen, dass
-  eine Submoduländerung verworfen oder gesichert wurde. Der Porcelain-v1-Status
-  kennzeichnet Gitlinks nicht;
-  erst `mark_gitlinks()` (Mode 160000 in Index bzw. HEAD-Baum) setzt die
-  Kennung `ChangedFile.submodule`, an der `plan_discard()`/`plan_discard_all()`
-  entscheiden. `mark_gitlinks()` ist damit eine Schutzprüfung: Scheitert eine
-  ihrer beiden Git-Abfragen unerwartet, bricht sie geschlossen ab
-  (`GitReadError`), statt „keine Submodule“ zu behaupten. Geduldet wird nur der
-  belegte Fall ohne ersten Commit, in dem `git ls-tree HEAD` scheitern MUSS.
-  Seit 0.18.4 bindet `discard_snapshot()` die Vorschau zusätzlich an
-  Porcelain-Status, Indexeintrag, HEAD-Eintrag und rohen Arbeitsbaum-Inhalt.
-  Unmittelbar vor `git restore` wird derselbe Snapshot erneut gelesen; stimmt er
-  nicht mehr, wird nichts verworfen.
-  Fürs Verwerfen gibt es bewusst keinen CLI-Schalter — die nicht-interaktive
-  Schnittstelle bleibt lesend.
+- Die Info-Ansicht entfernt weder Remotes noch Branches. Git würde dabei auch
+  ihre Reflogs löschen; darin können die letzten lokalen Verweise auf Commits
+  liegen, und diese Historie lässt sich nicht durch einen ehrlichen Undo-Befehl
+  rekonstruieren. Die Ansicht bleibt deshalb rein lesend. Auch Stashes zeigt gmf
+  nur als Diff an. Anwenden kann das Ziel nicht atomar gegen einen parallelen
+  Checkout sowie Index- oder Arbeitsbaumänderungen binden; Löschen kann keinen
+  einzelnen Reflog-Eintrag atomar festhalten. Beides bleibt dem Terminal
+  vorbehalten.
+- Pull bleibt vollständig dem Terminal vorbehalten. Ein Fast-forward müsste
+  Branch-Ref, Index und Arbeitsbaum gemeinsam gegen den freigegebenen Stand
+  binden; Git bietet dafür gegenüber einem parallelen Checkout keine portable
+  atomare Operation. Die frühere `L`-Aktion wurde deshalb entfernt.
+- Die Änderungsansicht (`A`) ist vollständig rein lesend. gmf verwirft keine
+  Arbeitsbaumdatei, entfernt nichts aus der Vormerkung und bietet auch kein
+  „alle stashen“ an: Zwischen letzter Inhaltsprüfung und `git restore`, `git rm`
+  oder `git stash` bleibt gegenüber beliebigen Editoren eine nicht atomar
+  schließbare Lücke. Solche Mutationen bleiben nach eigener Diff-Prüfung dem
+  Terminal vorbehalten. Die nicht-interaktive Schnittstelle ist ebenfalls
+  lesend.
 - „Nur lesend" ist eine Zusage über die **Repo-Inhalte**, nicht über den Rechner.
   Zwei Ausnahmen gehören überall dorthin, wo die Zusage steht: `load_config()`
   legt beim ersten Lauf `~/.config/gitmaster_flash/config.json` an — bei `--diff`
   auch auf dem befragten Rechner, weil dort per stdin dasselbe Skript läuft —,
-  und `--fetch` führt ein echtes `git fetch --all --prune` aus. Beides lässt
+  und `--fetch` führt einen echten, auf sichere Remote-Tracking-Refspecs
+  begrenzten Fetch ohne Tags aus. Beides lässt
   Branch, Index und Arbeitsbaum unberührt; „ändert nie etwas" wäre trotzdem
   falsch und stand so bis 2026-07-28 in beiden READMEs. Dass die Datei angelegt
   wird, ist dabei bewusst so: gmf zielt ausschließlich auf eigene Rechner, und
@@ -213,11 +209,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
 ## Offene Punkte / Ideen
 
-- [ ] Unverfolgte Dateien bleiben vom Verwerfen ausgenommen (siehe Regel oben).
-      Falls sich zeigt, dass sie den Abgleich zwischen den Rechnern in der Praxis
-      ebenso blockieren wie geänderte, gehört das in eine eigene, anders benannte
-      Aktion mit eigenem Dialog — Löschen ist kein Verwerfen (offen seit
-      2026-08-03).
 - [ ] Verlauf umschreiben (`reset`, Squash) bleibt bewusst draußen. Nichts davon ist
       an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
       im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
