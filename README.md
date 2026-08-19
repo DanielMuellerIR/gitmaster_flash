@@ -296,9 +296,12 @@ Local branches:
    the new commit, exactly as `git commit -- <path>` does — otherwise `git status`
    would keep reporting them as modified. Push remains a separate, deliberate `P`
    action. After an ordinary local commit, the result line includes
-   `git update-ref --no-deref refs/heads/<branch> <old-oid> <new-oid>`
+   `git -c core.hooksPath=/dev/null update-ref --no-deref refs/heads/<branch> <old-oid> <new-oid>`
    as the undo command. After the very first commit it uses
-   `git update-ref --no-deref -d refs/heads/<branch> <new-oid>`. The full ref keeps the undo
+   `git -c core.hooksPath=/dev/null update-ref --no-deref -d refs/heads/<branch> <new-oid>`.
+   The `core.hooksPath` part is shown because gmf runs it that way: undoing a
+   commit must not start the repository's own `reference-transaction` hook. The
+   full ref keeps the undo
    bound to the approved branch even after a checkout; the expected new OID also
    prevents changing that branch after it has moved. The committed files stay
    staged and on disk. The helper is blocked on a detached HEAD.
@@ -412,6 +415,8 @@ some of them at random — which looks like a broken repo but isn't.
 python3 gitmaster_flash.py --list          # colored text list
 python3 gitmaster_flash.py --json          # machine-readable
 python3 gitmaster_flash.py --json --fetch  # fetch each repo first
+python3 gitmaster_flash.py --lang de       # force the output language
+python3 gitmaster_flash.py --version       # bare version number, nothing else
 
 # Every output carries the version — so a diff of two machines' output shows
 # whether the same build produced them:
@@ -423,6 +428,10 @@ python3 gitmaster_flash.py --json --fetch  # fetch each repo first
 Exit code 0 means everything is clean and in sync, 1 means at least one
 repository needs attention. Without a TTY the tool prints the list instead of
 starting the UI, so a pipe does the sensible thing.
+
+One further flag exists but is not meant to be typed: `--cd-file` names the file
+the `gmf` shell wrapper reads the selected repository path from. The wrapper
+passes it; calling it by hand has no use.
 
 ## Configuration
 

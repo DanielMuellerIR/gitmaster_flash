@@ -315,9 +315,12 @@ Lokale Branches:
    `git commit -- <pfad>`; sonst meldete `git status` sie weiterhin als geändert.
    Push bleibt eine getrennte, bewusste Aktion mit `P`. Nach einem gewöhnlichen
    lokalen Commit nennt die Ergebniszeile
-   `git update-ref --no-deref refs/heads/<Branch> <alte-OID> <neue-OID>` als
-   Rückgängig-Befehl. Nach dem allerersten Commit verwendet sie
-   `git update-ref --no-deref -d refs/heads/<Branch> <neue-OID>`. Der vollständige Ref bindet
+   `git -c core.hooksPath=/dev/null update-ref --no-deref refs/heads/<Branch> <alte-OID> <neue-OID>`
+   als Rückgängig-Befehl. Nach dem allerersten Commit verwendet sie
+   `git -c core.hooksPath=/dev/null update-ref --no-deref -d refs/heads/<Branch> <neue-OID>`.
+   Der `core.hooksPath`-Teil steht dort, weil gmf den Befehl genau so ausführt:
+   Ein Rückgängig-Machen darf den `reference-transaction`-Hook des Repos nicht
+   starten. Der vollständige Ref bindet
    das Undo auch nach einem Checkout an den freigegebenen Branch; die erwartete
    neue OID verhindert zusätzlich jede Änderung, wenn dieser Branch weitergezogen
    ist. Die committeten Dateien bleiben vorgemerkt und auf der Festplatte. Bei
@@ -433,6 +436,8 @@ aber keins.
 python3 gitmaster_flash.py --list          # farbige Textliste
 python3 gitmaster_flash.py --json          # maschinenlesbar
 python3 gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
+python3 gitmaster_flash.py --lang de       # Ausgabesprache festlegen
+python3 gitmaster_flash.py --version       # nur die Versionsnummer, sonst nichts
 
 # Jede Ausgabe nennt die Version — so zeigt ein Diff zweier Rechner-Ausgaben,
 # ob dieselbe Fassung dahintersteckt:
@@ -444,6 +449,10 @@ python3 gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
 Exit-Code 0 heißt: alles sauber und synchron. 1 heißt: mindestens ein Repo
 braucht Aufmerksamkeit. Ohne TTY gibt das Tool die Liste aus, statt die
 Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
+
+Einen weiteren Schalter gibt es, er ist aber nicht zum Tippen gedacht:
+`--cd-file` nennt die Datei, aus der der `gmf`-Shell-Wrapper den ausgewählten
+Repo-Pfad liest. Der Wrapper übergibt sie; von Hand aufgerufen bringt sie nichts.
 
 ## Konfiguration
 
