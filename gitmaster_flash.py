@@ -1004,13 +1004,8 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
                 output=exc.output, stderr=exc.stderr) from None
 
     def config_matches() -> bool:
-        try:
-            current = read_remote_configs(
-                repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(
-                    remote.name)
-        except (subprocess.TimeoutExpired, GitReadError, OSError,
-                ValueError, RuntimeError):
-            return False
+        current = read_remote_config_or_none(
+            repo, timeout_config(timeout), remote.name)
         if current is None:
             return False
         return (tuple(current.fetch_urls), tuple(current.push_urls),
@@ -2080,12 +2075,7 @@ def remote_uses_keychain_helper(repo: Path, name: str, timeout: int, *,
     fuer die konkrete URL wirksame `credential.helper` macht aus einem sonstigen
     Auth-Fehler den Sonderfall `nokeychain`.
     """
-    try:
-        remote = read_remote_configs(
-            repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(name)
-    except (subprocess.TimeoutExpired, GitReadError, OSError,
-            ValueError, RuntimeError):
-        return False
+    remote = read_remote_config_or_none(repo, timeout_config(timeout), name)
     if remote is None:
         return False
     urls = remote.push_urls if for_push else remote.fetch_urls
@@ -2203,8 +2193,7 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     "empty", "timeout" oder eine Ursache aus classify_remote_check().
     """
     try:
-        remote = read_remote_configs(
-            repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(name)
+        remote = read_remote_configs(repo, timeout_config(timeout)).get(name)
         if (remote is None or remote.fetch_invalid_reason
                 or len(remote.fetch_urls) != 1 or not remote.fetch_targets):
             return "unsafe_url", 0, ""
@@ -2712,6 +2701,33 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
     return result
 
 
+def timeout_config(timeout: int) -> dict:
+    """Die Standardkonfiguration, aber mit dem Timeout dieses Aufrufs.
+
+    Die Remote-Prüfungen lesen die Git-Config nur nebenbei; sie sollen dabei
+    dieselbe Zeitgrenze einhalten wie der Aufruf, zu dem sie gehören.
+    """
+    return {**DEFAULT_CONFIG, "git_timeout": timeout}
+
+
+def read_remote_config_or_none(repo: Path, cfg: dict,
+                               name: str) -> RemoteConfig | None:
+    """Ein einzelnes Remote lesen; jeder Lesefehler gilt als nicht belegbar.
+
+    Die Aufrufer treffen damit Sicherheitsentscheidungen: Ist die Config noch
+    dieselbe wie bei der Freigabe? Hängt der Login wirklich am Schlüsselbund?
+    Eine Config, die gerade nicht lesbar ist, darf keine dieser Aussagen
+    stützen. Deshalb wird jeder Lesefehler wie ein fehlendes Remote behandelt —
+    an einer Stelle statt an fünf, damit die Liste der abgefangenen Fehler nicht
+    auseinanderläuft.
+    """
+    try:
+        return read_remote_configs(repo, cfg).get(name)
+    except (subprocess.TimeoutExpired, GitReadError, OSError,
+            ValueError, RuntimeError):
+        return None
+
+
 def detect_sync_remote(repo: Path, cfg: dict,
                        configs: dict[str, RemoteConfig] | None = None) -> str | None:
     """Sync remote by configured name, then by exact normalized hostname."""
@@ -3193,7 +3209,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     """
     if branch in ("?", "(detached)"):
         return TransferCheck("detached")
-    cfg = {**DEFAULT_CONFIG, "git_timeout": timeout}
+    cfg = timeout_config(timeout)
     raw_env = RAW_OBJECT_ENV
     try:
         configs = read_remote_configs(repo, cfg)
@@ -3336,13 +3352,8 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
     per CAS zurückgenommen; ein paralleler Fetch wird dabei nie überschrieben.
     """
     def config_matches() -> bool:
-        try:
-            remote = read_remote_configs(
-                repo, {**DEFAULT_CONFIG, "git_timeout": timeout}).get(
-                    check.remote_name)
-        except (subprocess.TimeoutExpired, GitReadError, OSError,
-                ValueError, RuntimeError):
-            return False
+        remote = read_remote_config_or_none(
+            repo, timeout_config(timeout), check.remote_name)
         if remote is None:
             return False
         signature = (tuple(remote.fetch_urls), tuple(remote.push_urls),
@@ -4767,11 +4778,7 @@ class TUI:
         )
 
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
-        try:
-            config = read_remote_configs(st.path, self.cfg).get(remote)
-        except (subprocess.TimeoutExpired, GitReadError, OSError,
-                ValueError, RuntimeError):
-            config = None
+        config = read_remote_config_or_none(st.path, self.cfg, remote)
         block_reason = ("unsafe_refspec" if config is None
                         else fetch_remote_block_reason(config, st.branch))
         if block_reason is not None:
@@ -4800,11 +4807,7 @@ class TUI:
                             else t("transfer_fetch_failed", r=remote,
                                    code=r.returncode))
             return None
-        try:
-            after = read_remote_configs(st.path, self.cfg).get(remote)
-        except (subprocess.TimeoutExpired, GitReadError, OSError,
-                ValueError, RuntimeError):
-            after = None
+        after = read_remote_config_or_none(st.path, self.cfg, remote)
         if after != config:
             self.refresh_one(st)
             self.message = t("transfer_changed")

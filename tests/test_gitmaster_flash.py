@@ -4250,6 +4250,37 @@ class RemoteCheckTests(unittest.TestCase):
     def _result(stderr, code=128):
         return subprocess.CompletedProcess(["git"], code, "", stderr)
 
+    def test_unreadable_remote_config_counts_as_a_missing_remote(self):
+        """Fünf Sicherheitsentscheidungen hängen an dieser einen Antwort.
+
+        Ist die Config noch dieselbe wie bei der Freigabe? Hängt der Login am
+        Schlüsselbund? Darf gefetcht werden? Eine Config, die gerade nicht
+        lesbar ist, darf keine davon stützen — egal, woran das Lesen scheitert.
+        """
+        errors = (
+            subprocess.TimeoutExpired(["git"], 1),
+            gmf_module.GitReadError("git config kaputt"),
+            OSError("kein Dateideskriptor"),
+            ValueError("krumme Ausgabe"),
+            RuntimeError("unklarer Zustand"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(gmf_module, "read_remote_configs",
+                                       side_effect=error):
+                    self.assertIsNone(gmf_module.read_remote_config_or_none(
+                        Path("/tmp"), DEFAULT_CONFIG, "origin"))
+
+    def test_timeout_config_changes_only_the_git_timeout(self):
+        cfg = gmf_module.timeout_config(7)
+        self.assertEqual(cfg["git_timeout"], 7)
+        self.assertEqual(
+            {key: value for key, value in cfg.items() if key != "git_timeout"},
+            {key: value for key, value in DEFAULT_CONFIG.items()
+             if key != "git_timeout"})
+        # Die Vorlage darf dabei nicht verändert werden: sie ist prozessweit.
+        self.assertEqual(DEFAULT_CONFIG["git_timeout"], 10)
+
     def test_causes_are_told_apart(self):
         cases = {
             "gone": "remote: Repository not found.\nfatal: repository 'https://x/y.git' not found",
