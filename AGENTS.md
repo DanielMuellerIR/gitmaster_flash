@@ -201,6 +201,19 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   wird, ist dabei bewusst so: gmf zielt ausschließlich auf eigene Rechner, und
   dort darf eine Datei entstehen, wenn sie einen Nutzen hat (Entscheidung
   2026-07-28). Die Zusage muss den Vorgang nur benennen, nicht vermeiden.
+- Dazu gehört eine dritte, kleinere Ausnahme: `GIT_OPTIONAL_LOCKS=0` hält
+  `git status`, `git stash show` und `git ls-files` davon ab, nebenbei den
+  Index zu schreiben — `git diff` aber nicht. Ist der im Index gespeicherte
+  Zeitstempel einer Datei veraltet, liest `git diff` sie neu und schreibt die
+  aufgefrischte Stat-Zwischenspeicherung zurück, auch mit gesetzter Variable.
+  Die Einträge des Index — Modus, Objekt-ID, Stufe, Pfad — bleiben dabei
+  unverändert, es ändert sich also nichts an Vormerkung oder Inhalt. Git
+  vergleicht diese Zeitstempel **sekundengenau**: Ein Test, der eine veraltete
+  Zwischenspeicherung nachstellen will, muss den Zeitstempel deshalb auf eine
+  andere Sekunde setzen, sonst entscheidet der Zufall über sein Ergebnis
+  (belegt am 2026-08-19; vorher schlug
+  `test_readers_disable_optional_index_writes_and_fsmonitor_hooks` in rund
+  30 % der Läufe fehl).
 - Ändert sich der Remote-Vertrag — JSON-Felder, Exit-Codes, der `ssh`-Aufruf —,
   gehört der Fall nach `tests/test_cli_blackbox.py`. Dort führt ein temporäres
   `ssh` im PATH den echten, über stdin übertragenen Code lokal aus und prüft
@@ -222,3 +235,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).
+- [ ] Aufräumen: Fünf Stellen lesen ein einzelnes Remote nach demselben Muster
+      (`read_remote_configs(...).get(name)` plus `except (TimeoutExpired,
+      GitReadError, OSError, ValueError, RuntimeError)` → `None`) —
+      `remote_uses_keychain_helper`, `check_remote`, die beiden
+      `config_matches()`-Hilfen in `fetch_remote_safely` und
+      `update_tracking_after_push` sowie `TUI._fetch_remote` (zweimal). Eine
+      gemeinsame Hilfsfunktion wäre sinnvoll; die Stellen übergeben aber
+      verschiedene Konfigurationen (`DEFAULT_CONFIG` mit gesetztem
+      `git_timeout` gegenüber der vollen UI-Config), deshalb gehört das in
+      einen eigenen, bewusst geprüften Schritt (CodeQA 2026-08-19).

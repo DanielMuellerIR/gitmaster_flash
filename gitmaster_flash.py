@@ -231,7 +231,6 @@ TR = {
                       "dann landet man automatisch dort.)"},
     # Stash
     "no_stash": {"en": "No stash in this repo.", "de": "Kein Stash in diesem Repo."},
-    "empty_diff": {"en": "(empty diff)", "de": "(leerer Diff)"},
     "stash_preview_failed": {"en": "Stash preview failed: {e}",
                               "de": "Stash-Vorschau fehlgeschlagen: {e}"},
     "stash_preview_empty": {
@@ -257,7 +256,6 @@ TR = {
                     "de": "Letzte Commit-Messages (Stil-Vorlage):"},
     "commit_msg_prompt": {"en": "Commit message: ", "de": "Commit-Message: "},
     "empty_msg": {"en": "Empty message — cancelled.", "de": "Leere Message — abgebrochen."},
-    "git_add_failed": {"en": "git add failed: {e}", "de": "git add fehlgeschlagen: {e}"},
     "commit_failed": {"en": "Commit failed: {e}", "de": "Commit fehlgeschlagen: {e}"},
     "commit_exists_index_failed": {
         "en": "Commit {oid} exists, but the real index was not updated — inspect git status before continuing.",
@@ -318,9 +316,6 @@ TR = {
     "transfer_auth_missing": {
         "en": "{r} needs a login (no credential helper or SSH key).",
         "de": "{r} braucht einen Login (kein Credential-Helper/SSH-Key)."},
-    "fetch_remote_failed": {
-        "en": "Fetch from {r} failed; press I to check the cause.",
-        "de": "Fetch von {r} fehlgeschlagen; mit I die Ursache prüfen."},
     "transfer_inspect_failed": {
         "en": "Git could not inspect the branch safely; no transfer was attempted.",
         "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen."},
@@ -447,7 +442,6 @@ TR = {
         "de": " Branch-Details sind rein lesend"},
     "info_no_remotes": {"en": "This repository has no remote.",
                         "de": "Dieses Repo hat kein Remote."},
-    "info_nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "info_check_remote_only": {"en": "T tests remotes; a branch is local anyway.",
                                "de": "T prüft Remotes; ein Branch ist ohnehin lokal."},
     # Remote prüfen (T)
@@ -1997,10 +1991,6 @@ CREDENTIAL_HELPER_MARKERS = (
     "invalid username or password",
 )
 
-KEYCHAIN_HELPER_MARKERS = (
-    "osxkeychain", "gh auth git-credential",
-)
-
 
 _KEYCHAIN_SESSION: bool | None = None
 
@@ -2350,6 +2340,52 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
+def _pinned_remote_url(args: tuple | list) -> tuple[str, str] | None:
+    """Die einzige URL-Bindung dieses Aufrufs als (URL, Alias) — sonst None."""
+    pins = {(arg.remote_url, str(arg)) for arg in args
+            if isinstance(arg, _PinnedRemoteURL)}
+    if not pins:
+        return None
+    if len(pins) != 1:
+        raise ValueError("conflicting pinned remote URLs")
+    return pins.pop()
+
+
+def _git_config_entries(args: tuple | list) -> list[tuple[str, str]]:
+    """Die Ersatzkonfiguration, mit der `run_git()` jeden Git-Aufruf startet.
+
+    Ausgeführter und protokollierter Befehl müssen dieselbe Liste verwenden.
+    Stünde sie zweimal im Code, zeigte das Befehlsprotokoll (H) nach der
+    nächsten Ergänzung einen Befehl, der im Terminal anders liefe — und genau
+    diese Wiederholbarkeit ist die Zusage des Protokolls.
+    """
+    entries = [
+        ("core.fsmonitor", "false"),
+        ("log.showSignature", "false"),
+    ]
+    pin = _pinned_remote_url(args)
+    if pin is not None:
+        remote_url, alias = pin
+        entries.extend((
+            (f"url.{remote_url}.insteadOf", alias),
+            (f"url.{remote_url}.pushInsteadOf", alias),
+        ))
+    return entries
+
+
+def _git_config_env(entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Konfigurationsliste als GIT_CONFIG_*-Variablen.
+
+    Schlüssel und Werte bleiben getrennt, damit ein `=` in einer URL nicht
+    versehentlich Schlüssel und Wert trennt.
+    """
+    env = {"GIT_CONFIG_COUNT": str(len(entries))}
+    for number, (key, value) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{number}"] = key
+        env[f"GIT_CONFIG_VALUE_{number}"] = value
+    return env
+
+
 def run_git(repo: Path, *args: str, timeout: int = 10,
             env: dict | None = None) -> subprocess.CompletedProcess:
     cmd = ["git", "-C", str(repo), *args]
@@ -2369,24 +2405,7 @@ def run_git(repo: Path, *args: str, timeout: int = 10,
             child_env["GIT_GRAFT_FILE"] = os.devnull
         if env.get("GIT_SHALLOW_FILE") == os.devnull:
             child_env["GIT_SHALLOW_FILE"] = os.devnull
-    config_entries = [
-        ("core.fsmonitor", "false"),
-        ("log.showSignature", "false"),
-    ]
-    pins = {(arg.remote_url, str(arg)) for arg in args
-            if isinstance(arg, _PinnedRemoteURL)}
-    if pins:
-        if len(pins) != 1:
-            raise ValueError("conflicting pinned remote URLs")
-        remote_url, alias = pins.pop()
-        config_entries.extend((
-            (f"url.{remote_url}.insteadOf", alias),
-            (f"url.{remote_url}.pushInsteadOf", alias),
-        ))
-    child_env["GIT_CONFIG_COUNT"] = str(len(config_entries))
-    for number, (key, value) in enumerate(config_entries):
-        child_env[f"GIT_CONFIG_KEY_{number}"] = key
-        child_env[f"GIT_CONFIG_VALUE_{number}"] = value
+    child_env.update(_git_config_env(_git_config_entries(args)))
     child_env.update(NONINTERACTIVE_GIT_ENV)
     with subprocess.Popen(
         cmd,
@@ -2426,26 +2445,13 @@ def format_git_command(args: tuple[str, ...] | list[str]) -> str:
         return (shlex.quote(value) if terminal_text(value) == value
                 else zsh_quote(value))
 
-    pins = {(arg.remote_url, str(arg)) for arg in args
-            if isinstance(arg, _PinnedRemoteURL)}
     prefix = ""
-    if pins:
-        if len(pins) != 1:
-            raise ValueError("conflicting pinned remote URLs")
-        url, alias = pins.pop()
-        assignments = (
-            ("GIT_CONFIG_COUNT", "4"),
-            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
-            ("GIT_CONFIG_VALUE_0", "false"),
-            ("GIT_CONFIG_KEY_1", "log.showSignature"),
-            ("GIT_CONFIG_VALUE_1", "false"),
-            ("GIT_CONFIG_KEY_2", f"url.{url}.insteadOf"),
-            ("GIT_CONFIG_VALUE_2", alias),
-            ("GIT_CONFIG_KEY_3", f"url.{url}.pushInsteadOf"),
-            ("GIT_CONFIG_VALUE_3", alias),
-        )
-        prefix = " ".join(f"{key}={visible_quote(value)}"
-                          for key, value in assignments) + " "
+    if _pinned_remote_url(args) is not None:
+        # Nur der Einmal-Alias braucht die Umgebung im Protokoll: Ohne ihn liefe
+        # der kopierte Befehl gegen eine Adresse, die es im Terminal nicht gibt.
+        prefix = " ".join(
+            f"{key}={visible_quote(value)}" for key, value
+            in _git_config_env(_git_config_entries(args)).items()) + " "
     return prefix + "git " + " ".join(visible_quote(a) for a in args)
 
 
@@ -3313,7 +3319,7 @@ def safe_push_args(destination: str, branch: str, source_oid: str,
     """Push an die geprüfte URL, OID-/Lease-gebunden, ohne Hooks/Submodule/Tags."""
     lease = f"--force-with-lease=refs/heads/{branch}:{target_oid}"
     pin_config, pinned_url = _pinned_url_config(destination)
-    return (*pin_config, "-c", "core.hooksPath=/dev/null",
+    return (*pin_config, *NO_GIT_HOOKS_ARGS,
             "-c", "push.pushOption=",
             "push", "--porcelain", "--no-follow-tags",
             "--no-signed", "--recurse-submodules=no", lease, "--", pinned_url,

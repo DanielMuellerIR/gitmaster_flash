@@ -3054,7 +3054,20 @@ class SlowPreCommitHookTests(unittest.TestCase):
     `git commit` führt den Hook des Repos aus; startet der Linter oder Tests, ist der
     kurze `git_timeout` von zehn Sekunden längst um. Früher flog der `TimeoutExpired`
     dann bis in `main()` durch und beendete die TUI mit einem Traceback.
+
+    Die Tests unten erzwingen diesen Timeout über `HOOK_TIMEOUT` statt über den
+    Produktionswert `commit_timeout` von 120 Sekunden. Der Wert muss zwei Dinge
+    zugleich leisten: kurz genug, um die Suite nicht zu bremsen, und lang genug,
+    dass der Hook seine ersten Schritte (Marker schreiben, Fremd-Commit anlegen)
+    davor sicher schafft. Gemessen braucht er dafür rund 0,4 Sekunden; mit den
+    früheren fest verdrahteten 1 Sekunde blieb unter der Last der vollen Suite
+    zu wenig Rand, und drei Tests dieser Klasse schlugen sporadisch fehl
+    (2026-08-19: `hook-pids` fehlte, der Fremd-Commit des Hooks entstand nie).
     """
+
+    # Rand gegenüber den gemessenen ~0,4 s Hook-Vorlauf; kostet je Test genau
+    # diese Wartezeit, weil der Hook danach absichtlich weiterhängt.
+    HOOK_TIMEOUT = 3
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3100,7 +3113,8 @@ class SlowPreCommitHookTests(unittest.TestCase):
         self._install_hook(30)
         head_before = gmf_module.current_head(self.repo, 10)
         with self.assertRaises(subprocess.TimeoutExpired):
-            commit_selected(self.repo, ["file.txt"], "hängt", 10, commit_timeout=1)
+            commit_selected(self.repo, ["file.txt"], "hängt", 10,
+                            commit_timeout=self.HOOK_TIMEOUT)
         hook_pid, child_pid = (int(p) for p in self.marker.read_text().split())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and (self._alive(hook_pid) or self._alive(child_pid)):
@@ -3122,7 +3136,8 @@ class SlowPreCommitHookTests(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             commit_selected(
-                self.repo, ["file.txt"], "hintergrund", 10, commit_timeout=1)
+                self.repo, ["file.txt"], "hintergrund", 10,
+                commit_timeout=self.HOOK_TIMEOUT)
 
         child_pid = int(self.marker.read_text())
         deadline = time.monotonic() + 5
@@ -3167,7 +3182,7 @@ class SlowPreCommitHookTests(unittest.TestCase):
         head_before = gmf_module.current_head(self.repo, 10)
         with self.assertRaises(subprocess.TimeoutExpired) as cm:
             commit_selected(self.repo, ["file.txt"], "haengt danach", 10,
-                            commit_timeout=1)
+                            commit_timeout=self.HOOK_TIMEOUT)
         # Die Ausnahme trägt den freigegebenen Baum — derselbe Weg, den auch
         # der Timeout-Zweig der Commit-Hilfe nimmt.
         done = gmf_module.finish_interrupted_commit(
@@ -3193,9 +3208,19 @@ class SlowPreCommitHookTests(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired) as raised:
             commit_selected(
-                self.repo, ["file.txt"], "outer", 10, commit_timeout=1)
+                self.repo, ["file.txt"], "outer", 10,
+                commit_timeout=self.HOOK_TIMEOUT)
 
         self.assertEqual(gmf_module.current_head(self.repo, 10), head_before)
+        # Erst dieser Nachweis trennt "die Erkennung greift nicht" von "der Hook
+        # kam vor dem Timeout gar nicht bis zu seinem Commit". Ohne ihn las sich
+        # ein zu knapper HOOK_TIMEOUT wie ein Fehler in der Erkennung.
+        foreign = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "-q", "--verify",
+             "refs/heads/other"], capture_output=True, text=True).stdout.strip()
+        self.assertTrue(
+            foreign and foreign != head_before,
+            "der pre-commit-Hook schrieb seinen Fremd-Commit nicht vor dem Timeout")
         with self.assertRaisesRegex(CommitSafetyError, "another branch"):
             gmf_module.finish_interrupted_commit(
                 self.repo, raised.exception.approved_head,
@@ -3664,18 +3689,43 @@ class NonInteractiveGitTests(unittest.TestCase):
             index = repo / ".git" / "index"
             before_bytes = index.read_bytes()
             before_mtime = index.stat().st_mtime_ns
-            os.utime(tracked, None)
+            # Der neue Zeitstempel muss in einer ANDEREN Sekunde liegen als der
+            # im Index zwischengespeicherte: Git vergleicht ihn sekundengenau,
+            # erst ein Unterschied macht den Stat-Cache überhaupt veraltet. Mit
+            # `os.utime(tracked, None)` entschied allein der Zufall, ob die
+            # Sekunde während des Aufbaus umsprang — der Test schlug dadurch in
+            # rund 30 % der Läufe fehl.
+            stale = index.stat().st_mtime + 5
+            os.utime(tracked, (stale, stale))
+
+            # Scan, Stash-Vorschau und Info-Seite lassen den Index trotz des
+            # veralteten Stat-Caches unangetastet; genau das leistet
+            # GIT_OPTIONAL_LOCKS=0 für `git status`, `git stash show` und
+            # `git ls-files`.
             status = collect_status(repo, root, DEFAULT_CONFIG)
-            ok_file, _ = file_diff(repo, "M", "tracked.txt", 10)
             oid, _ = gmf_module.latest_stash(repo, 10)
             ok_stash, _ = stash_preview(repo, 10, oid)
             repo_info_lines(status, DEFAULT_CONFIG)
 
-            self.assertTrue(ok_file)
             self.assertTrue(ok_stash)
             self.assertFalse(marker.exists())
             self.assertEqual(index.read_bytes(), before_bytes)
             self.assertEqual(index.stat().st_mtime_ns, before_mtime)
+
+            # `git diff` ist die eine Ausnahme: Es schreibt den aufgefrischten
+            # Stat-Cache zurück, auch mit GIT_OPTIONAL_LOCKS=0. Verändert wird
+            # dabei ausschließlich diese Zwischenspeicherung — Einträge, Modi
+            # und Objekt-IDs des Index bleiben gleich, und der fsmonitor-Hook
+            # läuft auch dabei nicht.
+            #
+            # Auch die Kontrollablesung muss `core.fsmonitor` abschalten, sonst
+            # startet SIE den Hook und der Nachweis unten prüfte sich selbst.
+            staged = ("-c", "core.fsmonitor=false", "ls-files", "--stage")
+            staged_before = git_output(repo, *staged)
+            ok_file, _ = file_diff(repo, "M", "tracked.txt", 10)
+            self.assertTrue(ok_file)
+            self.assertFalse(marker.exists())
+            self.assertEqual(git_output(repo, *staged), staged_before)
 
     def test_readers_never_run_signature_verifier_from_log_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -5659,6 +5709,48 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(executed.returncode, 0, executed.stderr)
             self.assertEqual(Path(executed.stdout.strip()), path.resolve())
+
+    def test_logged_command_shows_exactly_the_configuration_run_git_sets(self):
+        """Protokoll (H) und tatsächlicher Aufruf müssen dieselbe Config nennen.
+
+        Das Protokoll verspricht, dass jede Zeile im Terminal genauso läuft.
+        Solange beide Seiten ihre GIT_CONFIG_*-Liste getrennt aufbauten, konnte
+        eine weitere Ersatzeinstellung in `run_git()` still danebenlaufen — der
+        kopierte Befehl liefe dann mit einer anderen Konfiguration.
+        """
+        args = safe_push_args("/tmp/approved.git", "main", "a" * 40, "b" * 40)
+        seen = {}
+
+        class FakePopen:
+            def __init__(self, cmd, **kw):
+                seen.update(kw["env"])
+                self.returncode = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+        with mock.patch("gitmaster_flash.subprocess.Popen", FakePopen):
+            gmf_module.run_git(Path("."), *args, timeout=1)
+
+        logged = gmf_module.format_git_command(args)
+        prefix = logged.split(" git ", 1)[0]
+        # `shlex.split` nimmt die Quotierung wieder heraus; verglichen werden
+        # die Werte selbst, nicht ihre Schreibweise im Protokoll.
+        assignments = dict(item.split("=", 1) for item in shlex.split(prefix))
+        actual = {key: value for key, value in seen.items()
+                  if key.startswith("GIT_CONFIG")}
+        self.assertEqual(len(assignments), len(actual))
+        for key, value in actual.items():
+            self.assertEqual(assignments[key], value, key)
+        # Die Anzahl muss zu den tatsächlich gesetzten Paaren passen; sonst
+        # ignoriert Git den Rest der Liste stillschweigend.
+        self.assertEqual(int(actual["GIT_CONFIG_COUNT"]), (len(actual) - 1) // 2)
 
     def test_long_pinned_command_wraps_without_losing_text(self):
         command = gmf_module.format_git_command(safe_push_args(
