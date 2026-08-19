@@ -167,20 +167,26 @@ def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
     return got
 
 
+# Wie lange ein SIGTERM Zeit bekommt, bevor SIGKILL folgt. Eine Sekunde reicht
+# der TUI zum Aufräumen und hält den Generator trotzdem nicht auf.
+TERMINATE_GRACE = 1.0
+TERMINATE_POLL = 0.05
+
+
 def _terminate_pty_child(pid: int) -> None:
     """Das genaue PTY-Kind mit begrenztem TERM->KILL-Warten einsammeln."""
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    for _ in range(20):
+    for _ in range(int(TERMINATE_GRACE / TERMINATE_POLL)):
         try:
             waited, _ = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             return
         if waited == pid:
             return
-        time.sleep(0.05)
+        time.sleep(TERMINATE_POLL)
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -477,12 +483,16 @@ def to_svg(grid: list, title: str) -> str:
 # work instead of "(none yet)": commit the default suggestions in the first demo
 # repo. The final Enter returns from the commit helper to the reproducible list
 # screen before capture.
-ACTIONS = b"C\r" + b"docs: demo" + b"\r"
+DEMO_COMMIT_MESSAGE = b"docs: demo"
+ACTIONS = b"C\r" + DEMO_COMMIT_MESSAGE + b"\r"
 
 # A quiet pty does not prove that the confirmed Git action is done. Wait for its
 # stable command-log line before terminating the child.
 # The indexes refer to the individual keypresses returned by _split_keys(ACTIONS).
-ACTION_MARKERS = {12: b"git commit -m"}
+# Der Index wird aus ACTIONS abgeleitet und nicht ausgeschrieben: Eine geänderte
+# Demo-Message verschöbe die letzte Taste sonst still, der Generator wartete auf
+# den falschen Zeitpunkt und nähme wieder einen halbfertigen Bildschirm auf.
+ACTION_MARKERS = {len(_split_keys(ACTIONS)) - 1: b"git commit -m"}
 
 # Die Demo-Sandbox hat mehr Repos als `compact_from`, startet also kompakt. Für das
 # Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein. Die

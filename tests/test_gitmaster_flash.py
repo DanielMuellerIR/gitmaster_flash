@@ -6024,7 +6024,10 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
 
     def test_pty_cleanup_kills_a_child_that_ignores_sigterm(self):
         module, _ = self._make_screens_module()
-        waits = [(0, 0)] * 20 + [(123, 0)]
+        # Die Anzahl aus dem Modul ableiten: Ein anderes Wartefenster dort darf
+        # den Test nicht still an der falschen Stelle prüfen lassen.
+        attempts = int(module.TERMINATE_GRACE / module.TERMINATE_POLL)
+        waits = [(0, 0)] * attempts + [(123, 0)]
         with mock.patch.object(module.os, "kill") as kill, \
                 mock.patch.object(module.os, "waitpid", side_effect=waits) as waitpid, \
                 mock.patch.object(module.time, "sleep"):
