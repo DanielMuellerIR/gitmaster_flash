@@ -2,15 +2,25 @@
   "schema_version": 1,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260815T134622757620+0200",
-    "token_budget": 1500000,
+    "id": "20260819T202644509241+0200",
+    "token_budget": 2000000,
     "status": "complete",
-    "started_at": "2026-08-15T13:46:22+02:00",
-    "tokens_spent": 674861,
-    "finished_at": "2026-08-15T15:26:49+02:00",
+    "started_at": "2026-08-19T20:26:44+02:00",
+    "tokens_spent": 348914,
+    "finished_at": "2026-08-19T21:57:14+02:00",
     "finish_reason": "all-current"
   },
-  "campaign_history": [],
+  "campaign_history": [
+    {
+      "id": "20260815T134622757620+0200",
+      "token_budget": 1500000,
+      "status": "complete",
+      "started_at": "2026-08-15T13:46:22+02:00",
+      "tokens_spent": 674861,
+      "finished_at": "2026-08-15T15:26:49+02:00",
+      "finish_reason": "all-current"
+    }
+  ],
   "scope": {
     "paths": [
       "gitmaster_flash.py",
@@ -36,16 +46,16 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T15:26:23+02:00",
-        "observed_head": "ae4496d4f13a5268b1e9c9649fae33cb2ea75a9c",
-        "content_sha256": "070d52f42def925e25c003ebd6ed065bc636b3ce849fad26b4062b4508605740",
+        "campaign_id": "20260819T202644509241+0200",
+        "completed_at": "2026-08-19T21:50:24+02:00",
+        "observed_head": "53850df678654c172749e5074b29573fcc8fe510",
+        "content_sha256": "fb803227779774ee3f7e38274698a88bbe01b7a1ebbf5f606d8a37f7d353bcb8",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Dokumentationsabgleich deckte einen ungueltigen Rueckgaengig-Befehl nach dem allerersten Commit auf. commit_selected gibt nun die verifizierte volle neue OID zurueck; die TUI zeigt fuer den Erst-Commit einen OID-gebundenen git update-ref -d HEAD-Befehl, normale Commits behalten git reset --soft HEAD~1. Delta und Aufrufgrenzen vollstaendig geprueft.",
+        "summary": "Zweiter Durchgang im selben Bereich: Fuenf Stellen lasen ein einzelnes Remote nach demselben Muster und fingen dabei dieselben fuenf Fehlerarten ab (config_matches in fetch_remote_safely und update_tracking_after_push, remote_uses_keychain_helper, TUI._fetch_remote zweimal). An dieser Antwort haengen Sicherheitsentscheidungen; eine auseinanderlaufende Fehlerliste liesse dort eine ungelesene Config als Beleg durchgehen. Jetzt einmal als read_remote_config_or_none(); ebenso timeout_config() fuer die fuenfmal wiederholte Zusammensetzung {**DEFAULT_CONFIG, git_timeout}. check_remote behaelt seine eigene Fehlerunterscheidung. Zwei neue Tests halten den Vertrag fest.",
         "tests": [
-          "python3 -m unittest discover -s tests (243 Tests, OK); zwei direkte Commit-Undo-Tests und Uebersetzungs-Platzhaltertest (3 Tests, OK); python3 docs/make-screens.py --check (Exit 0); git diff --check"
+          "python3 -m unittest discover -s tests: 369 Tests OK; python3 docs/make-screens.py --check Exit 0; python3 -m compileall -q; git diff --check; keine Demo-/Generatorprozesse uebrig"
         ]
       }
     },
@@ -61,16 +71,16 @@
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T14:47:39+02:00",
-        "observed_head": "410e75d389a51c6afb8718289480cc0e9e750520",
-        "content_sha256": "a1aa0d982cf609cad46186d0cf11700fe46db70c245c10a3b2c87794ab5d34b3",
+        "campaign_id": "20260819T202644509241+0200",
+        "completed_at": "2026-08-19T21:24:30+02:00",
+        "observed_head": "90b55ecc0c7b17274312ddc9ecf8ce6d71d677b9",
+        "content_sha256": "8ba4e0af903847604658047944562d3aed4a6c73c2951e1c9a27cfdd35b3f511",
         "file_count": 3,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Installer repariert eine fehlende abschliessende Zeilenschaltung der bestehenden .zshrc, bevor er die source-Anweisung anhaengt; Regressionstest belegt den vorher zusammengeklebten Shell-Befehl. Wrapper und Remote-CLI-Grenze vollstaendig geprueft, ohne weitere Korrektheitsfunde.",
+        "summary": "Delta seit 0.18.5 geprueft: install.sh erhielt zwei zeilenweise zsh-Scanner (wirksame Registrierung erkennen, Blockkontext verfolgen), gmf.zsh und beide READMEs dokumentieren dieselbe printf-Installationszeile — konsistent. Die beiden Scanner pruefen dieselben Grammatikregeln; Zuweisungsmuster fuenfmal, Trennerliste und Praefixliste je zweimal dupliziert. Weichen sie auseinander, traegt der Installer doppelt ein oder lehnt eine gueltige .zshrc ab. Regeln jetzt einmalig als is_assignment_word, opens_assignment_array, is_command_separator, is_command_modifier. Zusaetzlich ein veralteter Kommentar korrigiert: Bei unklarer Syntax haengt der Installer keine Top-Level-Zeile an, sondern bricht mit Exit 1 ab und schreibt nichts.",
         "tests": [
-          "python3 -m unittest tests.test_cli_blackbox (12 Tests, OK); zsh -n install.sh gmf.zsh; python3 -m compileall -q gitmaster_flash.py tests/test_cli_blackbox.py; python3 docs/make-screens.py --check; gitmaster_flash.py --version = 0.18.5; kein verbleibender Demo-Prozess"
+          "python3 -m unittest tests.test_cli_blackbox: 4x 42 Tests OK; volle Suite 367 Tests OK; zsh -n install.sh gmf.zsh; Aequivalenzpruefung beider Scanner ueber 81 .zshrc-Zeilen vor/nach der Umstellung zeichengleich; git diff --check"
         ]
       }
     },
@@ -84,16 +94,16 @@
       "reason": "PTY-Steuerung und reproduzierbare Dokumentbilder koennen Prozesse hinterlassen oder UI-Drift verdecken",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T15:07:30+02:00",
-        "observed_head": "68464ded775faa5757bf0a384a7f0d93e47cf0ea",
-        "content_sha256": "c77c6ddfdd127d8378dc1a05c5bf52adeceb780b584cda0b6ef67a1881025ca1",
+        "campaign_id": "20260819T202644509241+0200",
+        "completed_at": "2026-08-19T21:38:30+02:00",
+        "observed_head": "75e6ba55452d955a695d16a7c455f7bd9508462c",
+        "content_sha256": "10846da2df48dd86e072c7782da7eeccd523cbb768c5ccbd881958ff11f67ee6",
         "file_count": 1,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "PTY-Aufnahme wartet nach bestaetigten Demo-Aktionen auf stabile Kopf- und Befehlsprotokollmarker statt nur auf Ausgaberuhe; unerwartete Lesefehler bleiben sichtbar, waehrend Linux-PTY-EIO als regulaeres Ende gilt. Dokumentierter Timing-Fund erledigt.",
+        "summary": "Delta geprueft: begrenztes TERM->KILL-Einsammeln des PTY-Kindes, ioctl in die Cleanup-Klammer gezogen, GMF_SCREEN_CAPTURE=1 fuer den gekuerzten Demo-Commit-Timeout, Normalisierung des zufaelligen Transfer-Alias im Bildnachbau, neue Demo-Aktion (Commit statt Stash-Pop und Pull). ACTION_MARKERS band die Wartemarke an den ausgeschriebenen Tastenindex 12; ein Zeichen mehr in der Demo-Message haette den Generator still auf den falschen Zeitpunkt warten lassen. Der Index kommt jetzt aus _split_keys(ACTIONS), das TERM-Fenster aus benannten Konstanten, und der zugehoerige Test leitet seine Anzahl daraus ab.",
         "tests": [
-          "6 direkte Generator-/Replay-Tests OK; python3 docs/make-screens.py --check mehrfach mit allen sechs Sprach-/Ansichtenpaaren Exit 0; python3 -m compileall -q docs/make-screens.py tests/test_gitmaster_flash.py gitmaster_flash.py; git diff --check; keine verbleibenden Demo-/Generatorprozesse"
+          "python3 docs/make-screens.py --check dreimal Exit 0 (Bilder unveraendert und reproduzierbar); volle Suite 367 Tests OK; abgeleiteter Marker-Index weiterhin 12, Wartefenster weiterhin 20 Schritte; python3 -m compileall -q; git diff --check; keine Demo-/Generatorprozesse uebrig"
         ]
       }
     },
@@ -108,16 +118,16 @@
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134622757620+0200",
-        "completed_at": "2026-08-15T15:25:51+02:00",
-        "observed_head": "7a7de836330387fd0de5070e967f86ea23c3d81d",
-        "content_sha256": "37864f280de28f7da9f2e059557a6fd5ef129714cc3dc78a0b3d0b505da0e97d",
+        "campaign_id": "20260819T202644509241+0200",
+        "completed_at": "2026-08-19T21:41:14+02:00",
+        "observed_head": "1d1c335d84d1f38ec992c0ea20599b4ec772c844",
+        "content_sha256": "ab91a0d97d5a990698faa1d6923275121a2cd0bfaf49246aa3577ae374f8507d",
         "file_count": 2,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Beide READMEs vollstaendig auf Struktur, CLI-Vertrag, Nebenwirkungen und Sicherheitszusagen abgeglichen. Befehlsprotokoll auf zustandsaendernde Git-Aufrufe praezisiert, Installer-Anhaengen und --fetch-Parallelitaet korrekt beschrieben, GitHub-Eindeutigkeit und macOS-GUI-Schluesselbundgrenze synchronisiert. Der Abgleich deckte den ungueltigen Undo-Befehl nach einem Erst-Commit auf; Implementierung und beide Sprachfassungen verwenden nun einen OID-gebundenen update-ref-Befehl.",
+        "summary": "Delta und heutiger Vertrag beider READMEs geprueft: entfernte Wege (Pull, Verwerfen, Stash anwenden/loeschen, Remote-/Branch-Loeschen, .gitignore-Aenderung) sind korrekt als Terminal-Aufgaben beschrieben, keine Doku zu entfernten Tasten uebrig. Zwei Funde: Der abgedruckte Rueckgaengig-Befehl liess das von gmf wirklich gezeigte -c core.hooksPath=/dev/null weg — damit widersprach die Zusage, jede protokollierte Zeile sei so ausfuehrbar, dem eigenen Text. Und drei argparse-Schalter (--lang, --version, --cd-file) fehlten in beiden Sprachfassungen. Beides in beiden Dateien ergaenzt.",
         "tests": [
-          "python3 -m unittest discover -s tests (243 Tests in 249.759s, OK); python3 docs/make-screens.py --check (sechs Aufnahmen, Exit 0); README-Link- und Codeblockpruefung OK; python3 -m compileall -q gitmaster_flash.py tests docs/make-screens.py; git diff --check; keine verbleibenden Demo-/Generatorprozesse"
+          "Alle argparse-Schalter und alle DEFAULT_CONFIG-Schluessel kommen in beiden READMEs vor; Rueckgaengig-Befehl gegen commit_undo_command() abgeglichen; dokumentierte Vorgaben (compact_from 20, git_timeout 10, fetch_timeout 30, diff_timeout 3600, commit_timeout 120) gegen den Code geprueft; Exit-Code 1 und Listenausgabe ohne TTY in einem Wegwerf-Repo nachgestellt; --json liefert version/root/repos; --lang de/en und --version wie beschrieben; je 21 Ueberschriften, 16 Abschnitte, geschlossene Codebloecke, alle lokalen Links vorhanden; docs/make-screens.py --check Exit 0"
         ]
       }
     }
