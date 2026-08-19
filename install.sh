@@ -34,6 +34,36 @@ wrapper_path="$repo_dir/gmf.zsh"
 quoted_wrapper="${(qqq)wrapper_path}"
 source_line="source -- $quoted_wrapper"
 
+# Beide Scanner unten müssen dieselbe zsh-Grammatik zugrunde legen. Erkennt der
+# eine ein Wort als Zuweisung oder Trenner, das der andere für den Kommandonamen
+# hält, geraten ihre Vorstellungen vom Kommandoanfang auseinander — und der
+# Installer registrierte doppelt oder lehnte eine gültige Datei ab. Deshalb
+# stehen diese drei Regeln genau einmal.
+
+# Ein Wort der Form NAME=…, NAME[i]=… oder NAME+=… vor dem eigentlichen Kommando.
+is_assignment_word() {
+  [[ "$1" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=' ]]
+}
+
+# Dieselbe Zuweisung, die eine über mehrere Zeilen laufende Array-Klammer öffnet.
+opens_assignment_array() {
+  [[ "$1" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=\($' ]]
+}
+
+# Wortweise Kommandotrenner; danach beginnt ein neues Kommando.
+is_command_separator() {
+  case "$1" in
+    ';'|';;'|';&'|';|'|'|'|'|&'|'&&'|'||'|'&'|'&!'|'&|') return 0 ;;
+  esac
+  return 1
+}
+
+# Präfixe, die zsh vor dem eigentlichen Kommandonamen erlaubt.
+is_command_modifier() {
+  [[ "$1" == noglob || "$1" == nocorrect || "$1" == time \
+     || "$1" == command || "$1" == builtin ]]
+}
+
 # Denselben Pfad kann man verschieden schreiben: `~/git/...`, `$HOME/git/...`,
 # mit oder ohne Quotes. Ein reiner Textvergleich hielte das für ein anderes Repo
 # und verlangte grundlos Handarbeit — deshalb wird der Pfad aus der bestehenden
@@ -51,24 +81,21 @@ resolve_sourced_path() {
   words=("${(z)line}")
   for word in "${words[@]}"; do
     [[ "$word" == \#* ]] && break
+    if is_command_separator "$word"; then
+      scan_command_start=1
+      continue
+    fi
     case "$word" in
-      ';'|';;'|';&'|';|'|'|'|'|&'|'&&'|'||'|'&'|'&!'|'&|')
-        scan_command_start=1
-        continue
-        ;;
       '()'|'{'|'}')
         # Funktions-/Brace-Syntax kann hinter einem Namen stehen und ist auch
         # dort ein Kontrollkontext, kein gewöhnliches Argument.
         return 1
         ;;
     esac
-    if (( scan_command_start )) \
-        && [[ "$word" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=' ]]; then
+    if (( scan_command_start )) && is_assignment_word "$word"; then
       continue
     fi
-    if (( scan_command_start )) \
-        && [[ "$word" == noglob || "$word" == nocorrect || "$word" == time \
-             || "$word" == command || "$word" == builtin ]]; then
+    if (( scan_command_start )) && is_command_modifier "$word"; then
       continue
     fi
     if (( ! scan_command_start )); then
@@ -94,13 +121,11 @@ resolve_sourced_path() {
       [[ "$word" == ')' ]] && assignment_depth=$((assignment_depth - 1))
       continue
     fi
-    if (( command_start )) \
-        && [[ "$word" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=\($' ]]; then
+    if (( command_start )) && opens_assignment_array "$word"; then
       assignment_depth=1
       continue
     fi
-    if (( command_start )) \
-        && [[ "$word" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=' ]]; then
+    if (( command_start )) && is_assignment_word "$word"; then
       # Zuweisungen dürfen einem Shell-Kommando vorangestellt sein. Sie ändern
       # nicht, dass ein folgendes return/exit/exec den Rest unerreichbar macht.
       continue
@@ -386,8 +411,11 @@ line_leaves_quote_open() {
 # `source` in einem mehrzeiligen if-/Funktionsblock kann syntaktisch echt und
 # trotzdem beim Shellstart wirkungslos sein. Dieser bewusst konservative Stapel
 # erkennt die zsh-Blockgrenzen, ohne den Dateiinhalt auszuführen. Bei unklarer
-# oder unvollständiger Syntax bleibt er lieber in einem Block; dann ergänzt der
-# Installer eine sicher wirksame Top-Level-Zeile.
+# oder unvollständiger Syntax bleibt er lieber in einem Block. Am Dateiende
+# bricht der Installer dann mit Exit 1 ab und schreibt nichts — eine Zeile
+# anzuhängen, deren Wirksamkeit er nicht belegen kann, wäre schlechter als die
+# Handarbeit einzufordern. Belegt in test_cli_blackbox.py durch
+# test_unclosed_shell_context_fails_without_appending_a_registration.
 zshrc_context_state() {
   local line="$1" state="$2" word previous="" opener="" context
   local -i command_start=1 function_pending=0 nested_safe=0
@@ -416,20 +444,18 @@ zshrc_context_state() {
       # eigenen Prozess; darin definierte Funktionen erreichen die .zshrc nicht.
       stack+=(paren)
     fi
-    if [[ "$word" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=\($' ]]; then
+    if opens_assignment_array "$word"; then
       # In einer mehrzeiligen Array-Zuweisung sind folgende Wörter Daten,
       # selbst wenn eines davon `source` heißt.
       stack+=(assignment)
       previous="$word"
       continue
     fi
-    case "$word" in
-      ';'|';;'|';&'|';|'|'|'|'|&'|'&&'|'||'|'&'|'&!'|'&|')
-        command_start=1
-        previous=""
-        continue
-        ;;
-    esac
+    if is_command_separator "$word"; then
+      command_start=1
+      previous=""
+      continue
+    fi
     if [[ "${stack[-1]:-}" == assignment ]]; then
       [[ "$word" == '(' ]] && stack+=(assignment)
       if [[ "$word" == ')' ]]; then
@@ -441,16 +467,13 @@ zshrc_context_state() {
       previous="$word"
       continue
     fi
-    if (( command_start )) \
-        && [[ "$word" =~ '^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=' ]]; then
+    if (( command_start )) && is_assignment_word "$word"; then
       # Wie im Kandidatenresolver: Präfix-Zuweisungen gehören noch zum
       # folgenden Kommando und dürfen return/exit/exec nicht verdecken.
       previous="$word"
       continue
     fi
-    if (( command_start )) \
-        && [[ "$word" == noglob || "$word" == nocorrect || "$word" == time \
-             || "$word" == command || "$word" == builtin ]]; then
+    if (( command_start )) && is_command_modifier "$word"; then
       previous="$word"
       continue
     fi
