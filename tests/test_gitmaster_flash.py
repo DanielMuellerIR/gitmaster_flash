@@ -2643,7 +2643,6 @@ class CommitWizardSafetyTests(unittest.TestCase):
         commit_timeout.approved_head = gmf_module.current_head(self.repo, 10)
         commit_timeout.approved_ref = "refs/heads/main"
         commit_timeout.approved_tree = "a" * 40
-        commit_timeout.approved_paths = ("one.txt",)
         commit_timeout.reflog_action = "gmf test interrupted commit"
         verify_timeout = subprocess.TimeoutExpired(["git", "rev-parse"], 10)
         with mock.patch.object(ui, "prompt_line", return_value="selected"), \
@@ -2669,7 +2668,6 @@ class CommitWizardSafetyTests(unittest.TestCase):
         commit_timeout.approved_head = gmf_module.current_head(self.repo, 10)
         commit_timeout.approved_ref = "refs/heads/main"
         commit_timeout.approved_tree = "a" * 40
-        commit_timeout.approved_paths = ("one.txt",)
         commit_timeout.reflog_action = "gmf test interrupted commit"
         with mock.patch.object(ui, "prompt_line", return_value="selected"), \
                 mock.patch.object(gmf_module, "commit_selected",
@@ -2693,7 +2691,6 @@ class CommitWizardSafetyTests(unittest.TestCase):
         commit_timeout.approved_head = gmf_module.current_head(self.repo, 10)
         commit_timeout.approved_ref = "refs/heads/main"
         commit_timeout.approved_tree = "a" * 40
-        commit_timeout.approved_paths = ("one.txt",)
         commit_timeout.reflog_action = "gmf test interrupted commit"
         with mock.patch.object(ui, "prompt_line", return_value="selected"), \
                 mock.patch.object(gmf_module, "commit_selected",
@@ -3186,7 +3183,7 @@ class SlowPreCommitHookTests(unittest.TestCase):
         # Die Ausnahme trägt den freigegebenen Baum — derselbe Weg, den auch
         # der Timeout-Zweig der Commit-Hilfe nimmt.
         done = gmf_module.finish_interrupted_commit(
-            self.repo, head_before, ["file.txt"], 10, cm.exception.approved_tree)
+            self.repo, head_before, 10, cm.exception.approved_tree)
         self.assertTrue(done)
         self.assertNotEqual(gmf_module.current_head(self.repo, 10), head_before)
         status = subprocess.run(
@@ -3223,15 +3220,14 @@ class SlowPreCommitHookTests(unittest.TestCase):
             "der pre-commit-Hook schrieb seinen Fremd-Commit nicht vor dem Timeout")
         with self.assertRaisesRegex(CommitSafetyError, "another branch"):
             gmf_module.finish_interrupted_commit(
-                self.repo, raised.exception.approved_head,
-                list(raised.exception.approved_paths), 10,
+                self.repo, raised.exception.approved_head, 10,
                 raised.exception.approved_tree, raised.exception.approved_ref,
                 raised.exception.reflog_action)
 
     def test_interrupted_commit_without_result_reports_false(self):
         head_before = gmf_module.current_head(self.repo, 10)
         self.assertFalse(gmf_module.finish_interrupted_commit(
-            self.repo, head_before, ["file.txt"], 10))
+            self.repo, head_before, 10))
 
     def test_timeout_never_rolls_back_a_foreign_commit(self):
         head_before = gmf_module.current_head(self.repo, 10)
@@ -3245,7 +3241,7 @@ class SlowPreCommitHookTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CommitSafetyError, "approved tree"):
             gmf_module.finish_interrupted_commit(
-                self.repo, head_before, ["file.txt"], 10, approved_tree)
+                self.repo, head_before, 10, approved_tree)
 
         self.assertEqual(gmf_module.current_head(self.repo, 10), foreign_head)
 
@@ -3273,7 +3269,7 @@ class SlowPreCommitHookTests(unittest.TestCase):
                             commit_timeout=3)
         with self.assertRaises(gmf_module.CommitSafetyError):
             gmf_module.finish_interrupted_commit(
-                self.repo, head_before, ["file.txt"], 10,
+                self.repo, head_before, 10,
                 cm.exception.approved_tree)
         # Ohne Eigentumsnachweis bleibt der Commit erreichbar; gmf mutiert HEAD
         # nach einem Timeout niemals auf Verdacht.
@@ -3312,7 +3308,7 @@ class SlowPreCommitHookTests(unittest.TestCase):
         self.assertEqual(basis, fremder_stand)
         with self.assertRaises(gmf_module.CommitSafetyError):
             gmf_module.finish_interrupted_commit(
-                self.repo, basis, ["file.txt"], 10, cm.exception.approved_tree)
+                self.repo, basis, 10, cm.exception.approved_tree)
         # Der neue Commit bleibt stehen; insbesondere verschwindet der fremde
         # Eltern-Commit nicht durch einen spekulativen Rollback.
         head_after = gmf_module.current_head(self.repo, 10)
@@ -4165,6 +4161,52 @@ class NonInteractiveGitTests(unittest.TestCase):
                                             ["launchctl"], 1, "", "nope")):
             self.assertIs(gmf_module.keychain_session(), True)
         gmf_module._KEYCHAIN_SESSION = None
+
+    def test_a_pinned_transfer_ignores_repo_and_inherited_ssh_wrappers(self):
+        """Die gepinnte URL bindet die Adresse — der Transportweg gehört dazu.
+
+        Ein `core.sshCommand` aus der Repo-Konfiguration und ein geerbtes
+        GIT_SSH_COMMAND bekommen Host und Pfad zwar als Argumente, müssen sich
+        aber nicht daran halten: Ein solcher Wrapper kann eine ganz andere
+        Gegenstelle ansprechen, und der als zielgebunden bestätigte Transfer
+        landete woanders. Für einen gebundenen Aufruf darf deshalb nur das
+        gewöhnliche `ssh` laufen.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            marker = root / "wrapper-ran"
+            wrapper = root / "fake-ssh"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"printf ran >> {shlex.quote(str(marker))}\n"
+                "exit 1\n")
+            wrapper.chmod(0o755)
+            git(repo, "config", "core.sshCommand", str(wrapper))
+            # Port 1 nimmt niemand an: Das echte ssh scheitert sofort, ohne Netz.
+            url = "ssh://127.0.0.1:1/x.git"
+            environment = {"GIT_SSH_COMMAND": str(wrapper),
+                           "GIT_SSH": str(wrapper)}
+
+            pin_config, pinned = gmf_module._pinned_url_config(url)
+            with mock.patch.dict(os.environ, environment):
+                bound = gmf_module.run_git(
+                    repo, *pin_config, "ls-remote", "--heads", "--", pinned,
+                    timeout=30)
+            self.assertNotEqual(bound.returncode, 0)
+            self.assertFalse(
+                marker.exists(),
+                "ein Wrapper entschied über das Ziel eines gebundenen Transfers")
+
+            # Gegenprobe: Ohne Bindung greift der Wrapper weiterhin. Nur so ist
+            # belegt, dass oben wirklich die Bindung gewirkt hat.
+            with mock.patch.dict(os.environ, environment):
+                gmf_module.run_git(
+                    repo, "ls-remote", "--heads", "--", url, timeout=30)
+            self.assertTrue(marker.exists())
+
 
 class ErrorRedactionTests(unittest.TestCase):
     """Git zitiert in Fehlermeldungen die komplette URL — inklusive Login/Query.
@@ -5766,14 +5808,29 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
             def communicate(self, timeout=None):
                 return ("", "")
 
-        with mock.patch("gitmaster_flash.subprocess.Popen", FakePopen):
+        with mock.patch("gitmaster_flash.subprocess.Popen", FakePopen), \
+                mock.patch.dict(os.environ,
+                                {key: "/tmp/wrapper"
+                                 for key in gmf_module.TRANSPORT_GIT_ENV}):
             gmf_module.run_git(Path("."), *args, timeout=1)
 
         logged = gmf_module.format_git_command(args)
         prefix = logged.split(" git ", 1)[0]
         # `shlex.split` nimmt die Quotierung wieder heraus; verglichen werden
         # die Werte selbst, nicht ihre Schreibweise im Protokoll.
-        assignments = dict(item.split("=", 1) for item in shlex.split(prefix))
+        words = shlex.split(prefix)
+        # Ab `env -u …` stehen die Variablen, die der gebundene Transfer aus der
+        # Umgebung entfernt; davor die Ersatzkonfiguration als Zuweisungen.
+        env_at = words.index("env")
+        assignments = dict(item.split("=", 1) for item in words[:env_at])
+        unset = {words[index + 1]
+                 for index, word in enumerate(words[env_at:], env_at)
+                 if word == "-u"}
+        self.assertEqual(unset, gmf_module.TRANSPORT_GIT_ENV)
+        # Der tatsächliche Aufruf muss sie ebenfalls losgeworden sein, sonst
+        # entschiede ein geerbter SSH-Wrapper über das wahre Transferziel.
+        for key in gmf_module.TRANSPORT_GIT_ENV:
+            self.assertNotIn(key, seen)
         actual = {key: value for key, value in seen.items()
                   if key.startswith("GIT_CONFIG")}
         self.assertEqual(len(assignments), len(actual))
@@ -6046,6 +6103,7 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
                 mock.patch.object(module.os, "close") as close, \
                 mock.patch.object(module.os, "kill") as kill, \
                 mock.patch.object(module.os, "waitpid", return_value=(123, 0)) as waitpid, \
+                mock.patch.object(module, "_descendant_pids", return_value=[]), \
                 mock.patch.object(module.time, "sleep"):
             with self.assertRaisesRegex(OSError, "ioctl"):
                 module._render_in_pty([], b"", 0.01, "/tmp")
@@ -6069,6 +6127,45 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
             mock.call(123, module.signal.SIGKILL),
         ])
         self.assertEqual(waitpid.call_args_list[-1], mock.call(123, 0))
+
+    def test_pty_cleanup_also_ends_the_git_descendants(self):
+        """Nachfahren der TUI laufen in einer EIGENEN Prozessgruppe.
+
+        Jeder Git-Aufruf von gmf startet eine eigene Session. Ein Signal an das
+        PTY-Kind erreicht diese Enkel deshalb nicht — bricht die Aufnahme
+        mitten in Scan, Commit oder Hook ab, blieben sie laufen. Der Generator
+        muss sie über die Eltern-Kind-Kette selbst einsammeln.
+        """
+        module, _ = self._make_screens_module()
+        parent = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess, sys, time;"
+             "child = subprocess.Popen(['/bin/sleep', '30'],"
+             " start_new_session=True);"
+             "print(child.pid, flush=True);"
+             "time.sleep(30)"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            grandchild = int(parent.stdout.readline().strip())
+            descendants = module._descendant_pids(parent.pid)
+            self.assertIn(grandchild, descendants)
+
+            module._terminate_pty_child(parent.pid)
+            module._terminate_descendants(descendants)
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild, 0)
+                except OSError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("git descendant survived the capture cleanup")
+        finally:
+            parent.stdout.close()
+            parent.kill()
+            parent.wait()
 
     def test_readme_screens_exist_in_both_languages(self):
         module, _ = self._make_screens_module()

@@ -163,6 +163,14 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Tags oder weiteren Refs veröffentlichen. Unsichere Remotes werden als Fehler ausgewiesen;
   sichere Remotes desselben Repos werden einzeln
   weiter aktualisiert.
+  Seit 0.18.9 gehört der Transportweg zur Bindung: Für jeden Aufruf mit gepinnter
+  URL setzt `run_git()` `core.sshCommand` auf das gewöhnliche `ssh` und entfernt
+  `GIT_SSH` und `GIT_SSH_COMMAND` aus der geerbten Umgebung (`TRANSPORT_GIT_ENV`).
+  Ein solcher Wrapper bekommt Host und Pfad zwar als Argumente, muss sich aber
+  nicht daran halten — sonst entschiede er über das wahre Ziel, und die geprüfte
+  Adresse wäre Dekoration. Ein eigener Schlüssel oder Port gehört deshalb in
+  `~/.ssh/config`, nicht in einen Wrapper; das Befehlsprotokoll zeigt das
+  `env -u …` mit an. Reine Lesebefehle des Scans behalten die Benutzerumgebung.
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
   acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
   `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
@@ -219,6 +227,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `ssh` im PATH den echten, über stdin übertragenen Code lokal aus und prüft
   Remote-JSON, Remote-Exit-Code und lokale Auswertung gemeinsam, ohne Netz.
   Unit-Tests mit gemocktem `subprocess` sehen genau diese Grenze nicht.
+- Jeder von Git stammende Text muss vor `json.dumps` durch `json_text()` (also
+  `terminal_text()`). Git erlaubt Bytes ohne UTF-8-Bedeutung in Ref- und
+  Remote-Namen; die Leser dekodieren sie mit `surrogateescape`, und roh
+  serialisiert ergäbe das ungültiges UTF-8 oder einen `UnicodeEncodeError`.
+  Neue JSON-Felder deshalb gleich dort anschließen.
+- Eine nicht zerlegbare Remote-URL bekommt über `endpoint_fingerprints()` einen
+  Ersatzfingerprint aus dem Hash der Rohadresse. Eine leere Liste sähe auf zwei
+  Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
+  die Konfiguration ohnehin nicht belegbar ist.
 
 ## Offene Punkte / Ideen
 

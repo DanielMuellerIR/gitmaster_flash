@@ -201,8 +201,12 @@ sonst ignoriert, und für gelöschte.
  ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück
 ```
 
-Diese Ansicht bleibt bewusst rein lesend: Weder Index noch Arbeitsbaum werden
-angefasst. Für ein sicheres Verwerfen oder Entfernen aus der Vormerkung müsste
+Diese Ansicht bleibt bewusst rein lesend: Sie ändert keinen Index-Eintrag —
+Modus, Objekt-ID, Stufe und Pfad bleiben, wie sie sind — und keine Datei im
+Arbeitsbaum. Eine bytegenaue Ausnahme: `git diff` frischt die im Index
+gespeicherten Zeitstempel (den Stat-Cache) auch mit `GIT_OPTIONAL_LOCKS=0` auf,
+`.git/index` kann dabei also mit unveränderten Einträgen neu geschrieben werden.
+Für ein sicheres Verwerfen oder Entfernen aus der Vormerkung müsste
 gmf den geprüften Dateistand atomar gegen jeden Editor und jeden parallelen
 Git-Prozess binden. Git bietet diese Garantie für einen Arbeitsbaum-Pfad nicht.
 Deshalb bleiben solche Aktionen nach ausdrücklicher Prüfung dem Terminal
@@ -397,8 +401,12 @@ nur auf meinmac: experiment
 
 `DRIFT` umfasst außerdem Fehler, Konflikte, Stashes, Branch-Verfügbarkeit,
 Remote-Sicherheitsklassen (einschließlich der Frage, ob Fetch-/Push-URLs ohne
-offengelegte Zugangsdaten ausführbar sind) und zugangsdatenfreie Ziel-Fingerprints; rohe Remote-URLs
-und Zugangsdaten gelangen nie ins JSON. `DRIFT` = sollte gleich sein, ist es nicht
+offengelegte Zugangsdaten ausführbar sind) und zugangsdatenfreie Ziel-Fingerprints.
+Die eingetragene URL eines Remotes wird nie als solche serialisiert, nur ihr
+Fingerprint. Zugangsdaten gelangen überhaupt nicht ins JSON: Eine zitierte
+Git-Fehlerzeile behält als Beleg die Zieladresse (Host und Repo-Pfad), ihr
+Benutzerteil sowie Query und Fragment werden vorher entfernt.
+`DRIFT` = sollte gleich sein, ist es nicht
 (Handlungsbedarf). `SYNC` = beide
 Rechner sind sich einig, stehen aber gemeinsam vor/hinter dem Sync-Remote — im
 reinen Zwei-Rechner-Vergleich unsichtbar, und doch meist die eigentlich

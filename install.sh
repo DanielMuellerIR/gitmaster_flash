@@ -71,16 +71,28 @@ is_command_modifier() {
 # hier Datei-Inhalt, kein Code, den dieses Skript ausführen darf.
 resolve_sourced_path() {
   local line="$1" word path raw_path last_path="" modifier_mode=""
-  local -a words
+  local -a words top_level
   local -i command_start=1 i paren_depth=0 assignment_depth=0 \
-    in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1
+    in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1 \
+    block_depth=0
   # zshs `(z)`-Lexer trennt wie die Shell, fuehrt den Inhalt aber nicht aus.
   # Quotes bleiben am Token und ein `#` innerhalb von Quotes wird deshalb nie
   # mit einem Kommentar verwechselt. Ebenso bleibt `source` in einem
   # gequoteten echo-Text Daten statt eines vermeintlichen Kommandos.
   words=("${(z)line}")
-  for word in "${words[@]}"; do
+  # Erster Durchgang: Ein kompletter Kontrollblock kann auf derselben physischen
+  # Zeile stehen, und ein `source` DARIN laeuft beim Shellstart womoeglich nie.
+  # Frueher verwarf schon ein einziges Kontrollwort die ganze Zeile — damit galt
+  # auch ein `source` VOR dem Block oder hinter einem laengst geschlossenen
+  # Block nicht als Registrierung, obwohl zsh es nachweislich im Top-Level
+  # ausfuehrt; der Installer trug dann ein zweites Mal ein. Deshalb wird jetzt
+  # die Blocktiefe mitgezaehlt und je Wort vermerkt, ob es ausserhalb jedes
+  # Blocks steht. Nur solche Woerter darf der zweite Durchgang als Kandidat
+  # nehmen.
+  for ((i = 1; i <= ${#words}; i++)); do
+    word="${words[i]}"
     [[ "$word" == \#* ]] && break
+    top_level[i]=$(( block_depth == 0 ))
     if is_command_separator "$word"; then
       scan_command_start=1
       continue
@@ -102,13 +114,25 @@ resolve_sourced_path() {
       continue
     fi
     case "$word" in
-      if|then|elif|else|fi|for|foreach|while|until|select|repeat|do|done|\
-      case|esac|function)
-        # Ein kompletter Kontrollblock kann auf derselben physischen Zeile
-        # stehen. Die einfache Kandidatensuche dürfte darin sonst ein niemals
-        # ausgeführtes source als Top-Level ansehen. Solche Zeilen werden
-        # konservativ nicht als bestehende Registrierung anerkannt.
-        return 1
+      if|for|foreach|while|until|select|repeat|case|function)
+        # Blockanfang: alles bis zum passenden Schluesselwort steht darin.
+        block_depth=$((block_depth + 1))
+        top_level[i]=0
+        ;;
+      fi|done|esac)
+        if (( block_depth == 0 )); then
+          # Ein Blockende ohne Anfang auf dieser Zeile: Der Kontext kommt von
+          # weiter oben, hier laesst sich nichts belegen.
+          return 1
+        fi
+        block_depth=$((block_depth - 1))
+        top_level[i]=0
+        ;;
+      then|elif|else|do)
+        # Diese Woerter gehoeren in einen bereits gezaehlten Block. Ohne
+        # Blockanfang auf derselben Zeile bleibt der Kontext unklar.
+        (( block_depth == 0 )) && return 1
+        top_level[i]=0
         ;;
     esac
     scan_command_start=0
@@ -180,7 +204,8 @@ resolve_sourced_path() {
       # source-Anweisung darf deshalb keine wirksame Registrierung belegen.
       return 1
     fi
-    if (( paren_depth == 0 && command_start && ! in_pipeline && ! in_conditional )) \
+    if (( paren_depth == 0 && command_start && ! in_pipeline && ! in_conditional \
+          && top_level[i] )) \
         && [[ "$word" == "source" || "$word" == "." ]]; then
       if (( command_wrapper )); then
         # Nur dieses von `command` verdeckte Builtin ist unwirksam. Nach einem
@@ -407,6 +432,72 @@ line_leaves_quote_open() {
   [[ -n "$state" || $escaped -ne 0 || $parameter_depth -ne 0 ]]
 }
 
+# Wie viele Kommando- oder Prozessersetzungen ein Lexer-Wort offen lässt.
+# Die frühere Prüfung fragte nur, ob im Wort ein `$(` steht und irgendwo KEIN
+# `)`. In `value=$(print ')'` stammt das vorhandene `)` aber aus einem
+# gequoteten Argument und schließt gar nichts; die Ersetzung blieb offen, der
+# Scanner meldete trotzdem Top-Level, und eine folgende `source`-Zeile galt als
+# wirksame Registrierung — obwohl zsh sie im Unterprozess der Kommandoersetzung
+# ausführt und die `gmf`-Funktion in der aufrufenden Shell nie entsteht.
+# Deshalb wird hier zeichenweise gezählt: Quotes sind undurchsichtig, und jede
+# Ersetzungsebene bringt ihren eigenen Quote-Zustand mit.
+unclosed_substitutions() {
+  local word="$1" char next
+  local -i i depth=0
+  local -a quote
+  quote=("")                      # quote[depth+1] = Quote-Zustand dieser Ebene
+  for ((i = 1; i <= ${#word}; i++)); do
+    char="${word[i]}"
+    next="${word[i + 1]:-}"
+    case "${quote[depth+1]}" in
+      single)
+        # Zwischen einfachen Quotes ist jedes Zeichen wörtlich.
+        [[ "$char" == "'" ]] && quote[depth+1]=""
+        continue
+        ;;
+      ansi)
+        # $'…' kennt zusätzlich Backslash-Escapes.
+        [[ "$char" == '\' ]] && { (( i++ )); continue; }
+        [[ "$char" == "'" ]] && quote[depth+1]=""
+        continue
+        ;;
+      double)
+        [[ "$char" == '\' ]] && { (( i++ )); continue; }
+        if [[ "$char" == '$' && "$next" == '(' ]]; then
+          # Doppelte Quotes halten eine Kommandoersetzung nicht auf.
+          depth=$((depth + 1)); quote[depth+1]=""; (( i++ ))
+          continue
+        fi
+        [[ "$char" == '"' ]] && quote[depth+1]=""
+        continue
+        ;;
+    esac
+    [[ "$char" == '\' ]] && { (( i++ )); continue; }
+    if [[ "$char" == '$' && "$next" == "'" ]]; then
+      quote[depth+1]=ansi; (( i++ ))
+      continue
+    fi
+    if [[ "$char" == '$' && "$next" == '(' ]] \
+        || [[ ( "$char" == '<' || "$char" == '>' ) && "$next" == '(' ]]; then
+      # Kommando- und Prozessersetzung öffnen beide eine neue Ebene.
+      depth=$((depth + 1)); quote[depth+1]=""; (( i++ ))
+      continue
+    fi
+    case "$char" in
+      "'") quote[depth+1]=single ;;
+      '"') quote[depth+1]=double ;;
+      '(')
+        # Eine gewöhnliche Klammer zählt nur INNERHALB einer Ersetzung mit
+        # (z.B. `$( (a) )` oder `$(( 1 + 2 ))`). Am Zeilen-Top-Level führt der
+        # Blockstapel von zshrc_context_state die Subshell-Klammern selbst.
+        (( depth )) && { depth=$((depth + 1)); quote[depth+1]=""; }
+        ;;
+      ')') (( depth )) && depth=$((depth - 1)) ;;
+    esac
+  done
+  print -r -- "$depth"
+}
+
 # Eine einzelne Zeile reicht nicht, um ihren Ausführungskontext zu kennen:
 # `source` in einem mehrzeiligen if-/Funktionsblock kann syntaktisch echt und
 # trotzdem beim Shellstart wirkungslos sein. Dieser bewusst konservative Stapel
@@ -418,7 +509,8 @@ line_leaves_quote_open() {
 # test_unclosed_shell_context_fails_without_appending_a_registration.
 zshrc_context_state() {
   local line="$1" state="$2" word previous="" opener="" context
-  local -i command_start=1 function_pending=0 nested_safe=0
+  local -i command_start=1 function_pending=0 nested_safe=0 \
+    open_subs=0 open_index=0
   local -a words stack
   [[ -n "$state" ]] && stack=("${(@s:,:)state}")
   if line_leaves_quote_open "$line"; then
@@ -435,15 +527,13 @@ zshrc_context_state() {
       print -r -- opaque
       return 0
     fi
-    if [[ "$word" == *'$('* && "$word" != *')'* ]]; then
+    # zsh-Prozesssubstitutionen laufen wie Kommandoersetzungen in einem eigenen
+    # Prozess; darin definierte Funktionen erreichen die .zshrc nicht. Für den
+    # Blockstapel sind beide deshalb derselbe Kontext.
+    open_subs=$(unclosed_substitutions "$word")
+    for ((open_index = 1; open_index <= open_subs; open_index++)); do
       stack+=(command)
-    fi
-    if [[ ( "$word" == *'<('* || "$word" == *'>('* ) \
-          && "$word" != *')'* ]]; then
-      # zsh-Prozesssubstitutionen laufen wie Kommandoersetzungen in einem
-      # eigenen Prozess; darin definierte Funktionen erreichen die .zshrc nicht.
-      stack+=(paren)
-    fi
+    done
     if opens_assignment_array "$word"; then
       # In einer mehrzeiligen Array-Zuweisung sind folgende Wörter Daten,
       # selbst wenn eines davon `source` heißt.

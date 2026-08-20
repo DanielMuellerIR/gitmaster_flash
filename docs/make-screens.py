@@ -31,6 +31,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import tempfile
 import termios
@@ -173,6 +174,71 @@ TERMINATE_GRACE = 1.0
 TERMINATE_POLL = 0.05
 
 
+def _descendant_pids(pid: int) -> list[int]:
+    """Alle noch laufenden Nachfahren eines Prozesses — Kinder, Enkel, Urenkel.
+
+    Warum das nötig ist: Jeder Git-Aufruf der aufgenommenen TUI startet in
+    `gitmaster_flash.py` eine eigene Session (`start_new_session=True`), also
+    eine eigene Prozessgruppe. Ein Signal an das PTY-Kind erreicht diese
+    Nachfahren deshalb nicht — ein Abbruch mitten in einem Scan, Commit oder
+    Hook ließe genau die Prozesse zurück, deren Abwesenheit der Repo-Vertrag
+    verlangt. Die Eltern-Kind-Kette in `ps` verbindet sie dagegen weiterhin.
+    """
+    try:
+        listing = subprocess.run(["ps", "-Ao", "pid=,ppid="],
+                                 capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            child, parent = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        children.setdefault(parent, []).append(child)
+    found: list[int] = []
+    queue = [pid]
+    while queue:
+        for child in children.get(queue.pop(), ()):
+            if child != pid and child not in found:
+                found.append(child)
+                queue.append(child)
+    return found
+
+
+def _terminate_descendants(pids: list[int]) -> None:
+    """Die vor dem Abbruch notierten Git-/Hook-Nachfahren begrenzt beenden.
+
+    Sie sind keine eigenen Kinder, also lassen sie sich nicht einsammeln
+    (`waitpid`); nach dem Signal übernimmt init sie. `os.kill(pid, 0)` fragt nur
+    ab, ob es den Prozess noch gibt.
+    """
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    for signal_number in (signal.SIGTERM, signal.SIGKILL):
+        remaining = [pid for pid in pids if alive(pid)]
+        if not remaining:
+            return
+        for pid in remaining:
+            try:
+                os.kill(pid, signal_number)
+            except OSError:
+                pass
+        if signal_number is signal.SIGTERM:
+            for _ in range(int(TERMINATE_GRACE / TERMINATE_POLL)):
+                if not any(alive(pid) for pid in remaining):
+                    return
+                time.sleep(TERMINATE_POLL)
+
+
 def _terminate_pty_child(pid: int) -> None:
     """Das genaue PTY-Kind mit begrenztem TERM->KILL-Warten einsammeln."""
     try:
@@ -231,9 +297,16 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
             os.close(fd)
         except OSError:
             pass
+        # Die Nachfahren NOCH VOR dem Töten des PTY-Kindes notieren: Danach hängen
+        # sie an init, und die Eltern-Kind-Kette, die sie eindeutig als unsere
+        # ausweist, ist weg.
+        descendants = _descendant_pids(pid)
         # Immer genau das Kind begrenzt einsammeln. Ein ignoriertes SIGTERM darf
         # weder den Generator noch den nächsten Screenshot blockieren.
         _terminate_pty_child(pid)
+        # Und danach die eigenen Git-/Hook-Nachfahren, die in ihrer eigenen
+        # Prozessgruppe sonst weiterliefen.
+        _terminate_descendants(descendants)
     return replay(buf.decode("utf-8", "replace"), cols, rows)
 
 

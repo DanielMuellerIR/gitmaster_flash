@@ -187,11 +187,15 @@ including new files, which `git diff` normally ignores, and deleted ones.
  ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back
 ```
 
-This view is deliberately read-only: neither index nor working tree is touched.
-Discarding or unstaging a file would require an atomic comparison with every
-editor and Git process that may change it between preview and mutation. Git does
-not provide that guarantee for a working-tree path, so gmf leaves these actions
-to an explicitly reviewed terminal command instead of risking unseen data loss.
+This view is deliberately read-only: it changes no index entry — mode, object ID,
+stage and path all stay as they are — and no working-tree file. One byte-level
+exception: `git diff` refreshes the index stat cache (the recorded timestamps)
+even with `GIT_OPTIONAL_LOCKS=0`, so `.git/index` may be rewritten with unchanged
+entries. Discarding or unstaging a file would require an atomic comparison with
+every editor and Git process that may change it between preview and mutation.
+Git does not provide that guarantee for a working-tree path, so gmf leaves these
+actions to an explicitly reviewed terminal command instead of risking unseen data
+loss.
 
 ## Repository info and remotes (`I`)
 
@@ -376,8 +380,11 @@ only on mymac: experiment
 
 `DRIFT` also covers errors, conflicts, stashes, branch availability, remote safety
 classification (including whether fetch/push URLs are executable without exposing
-credentials) and credential-free endpoint fingerprints; raw remote URLs and
-credentials never enter JSON. `DRIFT` = should be identical but isn't (worth
+credentials) and credential-free endpoint fingerprints. A remote's configured URL
+is never serialized as such — only its fingerprint. Credentials never enter JSON
+at all: a quoted Git error line keeps the target address (host and repository
+path) as evidence, but its user info, query and fragment are removed before it
+gets there. `DRIFT` = should be identical but isn't (worth
 acting on). `SYNC` = both machines agree, but together they sit ahead/behind the
 sync remote — invisible in a pure two-machine comparison, yet usually the number
 you actually care about. `local` = explainable (different branch checked out,

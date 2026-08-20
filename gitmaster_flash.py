@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.8"
+__version__ = "0.18.9"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -1390,7 +1390,6 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
                 exc.approved_tree = tree_after
                 exc.approved_head = head_before
                 exc.approved_ref = head_ref_before
-                exc.approved_paths = tuple(paths)
                 exc.reflog_action = reflog_action
                 raise
             except OSError as exc:
@@ -1624,7 +1623,7 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
 
 
 def finish_interrupted_commit(repo: Path, head_before: str | None,
-                              paths: list[str], timeout: int,
+                              timeout: int,
                               approved_tree: str | None = None,
                               approved_ref: str | None = None,
                               reflog_action: str | None = None) -> bool:
@@ -1913,7 +1912,11 @@ NONINTERACTIVE_GIT_ENV = {
     "GIT_ASKPASS": "",              # kein Askpass-Programm/-Dialog
     "SSH_ASKPASS": "",
     "SSH_ASKPASS_REQUIRE": "never",  # OpenSSH: auch keinen GUI-Dialog aufmachen
-    "GIT_OPTIONAL_LOCKS": "0",       # Leser aktualisieren Index-Caches nie nebenbei
+    # Hält `git status`, `git stash show` und `git ls-files` davon ab, nebenbei
+    # den Index zu schreiben. `git diff` hält sich NICHT daran: Es frischt den
+    # Stat-Cache (die gespeicherten Zeitstempel) trotzdem auf. Die Einträge
+    # selbst — Modus, Objekt-ID, Stufe, Pfad — bleiben in allen Fällen gleich.
+    "GIT_OPTIONAL_LOCKS": "0",
     "LC_ALL": "C",                  # Meldungen bleiben stabil englisch (s.u.)
 }
 
@@ -1930,6 +1933,17 @@ REPOSITORY_GIT_ENV = {
     # Divergenz niemals als Fast-forward erscheinen lassen.
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
 }
+
+# Diese Variablen bestimmen, WELCHES Programm die SSH-Verbindung aufbaut. Ein
+# solcher Wrapper bekommt Host und Pfad zwar als Argumente, muss sich aber nicht
+# daran halten: Er kann eine ganz andere Gegenstelle ansprechen. Damit wäre die
+# geprüfte und gepinnte Zieladresse nur noch Dekoration — ein als zielgebunden
+# bestätigter Push landete woanders. Für einen gebundenen Transfer entfernt
+# `run_git()` sie deshalb aus der geerbten Umgebung und setzt zusätzlich
+# `core.sshCommand` auf das gewöhnliche `ssh`, damit auch die Repo-Konfiguration
+# den Transportweg nicht mehr austauschen kann. Ein eigener Schlüssel oder Port
+# gehört in ~/.ssh/config; von dort liest `ssh` ihn unverändert.
+TRANSPORT_GIT_ENV = {"GIT_SSH", "GIT_SSH_COMMAND"}
 
 # Objekt- und Historienprüfungen müssen den echten Commit-Graph sehen. Das leere
 # Graft-/Shallow-Dateien unterdrücken sowohl geerbte Umleitungen als auch die
@@ -2309,12 +2323,25 @@ def _stop_and_collect_process_group(
         return "", ""
 
 
-def _run_process_group(cmd: list[str], *, stdin, timeout: int | None
+def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
+                       env: dict[str, str] | None = None
                        ) -> subprocess.CompletedProcess:
-    """Einen Prozess mit eigener, bei Timeout vollständig beendeter Gruppe starten."""
+    """Einen Prozess mit eigener, bei Timeout vollständig beendeter Gruppe starten.
+
+    Der einzige Lebenslauf für Kindprozesse dieses Programms: `run_git()` baut
+    nur noch Befehl und gehärtete Umgebung und übergibt dann hierher. Stünde
+    derselbe Ablauf zweimal im Code, erreichte die nächste Sicherheitskorrektur
+    an Prozessgruppen wieder nur einen der beiden Wege.
+
+    `start_new_session=True` legt das Kind in eine eigene Prozessgruppe. Damit
+    hat es auch kein kontrollierendes Terminal mehr: Ein von Git gestartetes
+    ssh kommt nicht an unser /dev/tty, um dort nach einer Passphrase zu fragen;
+    der ssh-agent funktioniert davon unberührt weiter.
+    """
     with subprocess.Popen(
         cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="surrogateescape",
+        env=env,
         start_new_session=True,
     ) as proc:
         try:
@@ -2323,7 +2350,14 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None
             out, err = _stop_and_collect_process_group(proc)
             raise subprocess.TimeoutExpired(
                 cmd, timeout, output=out, stderr=err) from None
-        except Exception:
+        except BaseException:
+            # Absichtlich BaseException statt Exception: Strg-C
+            # (`KeyboardInterrupt`) und `SystemExit` erben nicht von Exception.
+            # Die eigene Prozessgruppe erreicht das Signal des Terminals nicht,
+            # also blieben Git, ssh und vom Hook gestartete Linter/Tests nach
+            # einem Abbruch verwaist zurück — und das `with` wartete danach auf
+            # genau sie. Hier wird nur aufgeräumt; die Ausnahme selbst geht
+            # unverändert weiter an den Aufrufer.
             _stop_and_collect_process_group(proc)
             raise
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
@@ -2358,6 +2392,12 @@ def _git_config_entries(args: tuple | list) -> list[tuple[str, str]]:
         entries.extend((
             (f"url.{remote_url}.insteadOf", alias),
             (f"url.{remote_url}.pushInsteadOf", alias),
+            # Die gepinnte URL bindet die Adresse, nicht den Weg dorthin. Ein
+            # `core.sshCommand` aus der Repo-Konfiguration könnte Host und Pfad
+            # ignorieren und die Verbindung woanders aufbauen; siehe
+            # TRANSPORT_GIT_ENV. Deshalb gilt für gebundene Transfers das
+            # gewöhnliche `ssh`.
+            ("core.sshCommand", "ssh"),
         ))
     return entries
 
@@ -2394,29 +2434,17 @@ def run_git(repo: Path, *args: str, timeout: int = 10,
             child_env["GIT_GRAFT_FILE"] = os.devnull
         if env.get("GIT_SHALLOW_FILE") == os.devnull:
             child_env["GIT_SHALLOW_FILE"] = os.devnull
-    child_env.update(_git_config_env(_git_config_entries(args)))
+    config_entries = _git_config_entries(args)
+    if _pinned_remote_url(args) is not None:
+        # Nur der gebundene Transfer verliert einen geerbten SSH-Wrapper. Für
+        # die reinen Lesebefehle des Scans bleibt die Umgebung des Benutzers
+        # unangetastet; sie sprechen ohnehin kein Netz an.
+        for key in TRANSPORT_GIT_ENV:
+            child_env.pop(key, None)
+    child_env.update(_git_config_env(config_entries))
     child_env.update(NONINTERACTIVE_GIT_ENV)
-    with subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="surrogateescape",
-        env=child_env,
-        stdin=subprocess.DEVNULL,
-        # Eigene Session = kein kontrollierendes Terminal. Damit kommt auch ein
-        # von Git gestartetes ssh nicht mehr an unser /dev/tty, um dort nach einer
-        # Passphrase zu fragen; der ssh-agent funktioniert davon unberührt weiter.
-        start_new_session=True,
-    ) as proc:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            out, err = _stop_and_collect_process_group(proc)
-            raise subprocess.TimeoutExpired(cmd, timeout, output=out,
-                                            stderr=err) from None
-        except Exception:
-            _stop_and_collect_process_group(proc)
-            raise
-        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    return _run_process_group(cmd, stdin=subprocess.DEVNULL, timeout=timeout,
+                              env=child_env)
 
 
 # Protokoll der Befehle, die diese Sitzung bewusst abgesetzt hat (Reihenfolge = Verlauf).
@@ -2438,9 +2466,14 @@ def format_git_command(args: tuple[str, ...] | list[str]) -> str:
     if _pinned_remote_url(args) is not None:
         # Nur der Einmal-Alias braucht die Umgebung im Protokoll: Ohne ihn liefe
         # der kopierte Befehl gegen eine Adresse, die es im Terminal nicht gibt.
+        # `env -u` gehört mit dazu: gmf entfernt für den gebundenen Transfer die
+        # geerbten SSH-Wrapper-Variablen (TRANSPORT_GIT_ENV), und ohne dieselbe
+        # Angabe liefe der kopierte Befehl über einen anderen Transportweg.
         prefix = " ".join(
             f"{key}={visible_quote(value)}" for key, value
-            in _git_config_env(_git_config_entries(args)).items()) + " "
+            in _git_config_env(_git_config_entries(args)).items())
+        prefix += " env " + " ".join(
+            f"-u {key}" for key in sorted(TRANSPORT_GIT_ENV)) + " "
     return prefix + "git " + " ".join(visible_quote(a) for a in args)
 
 
@@ -2747,6 +2780,25 @@ def is_github_url(url: str) -> bool:
     return canonical_remote_target(url).is_github
 
 
+def endpoint_fingerprints(urls: list[str],
+                          targets: list[RemoteTarget]) -> list[str]:
+    """Vergleichbare Ziel-Fingerabdrücke — auch für nicht auswertbare URLs.
+
+    Scheitert `canonical_remote_target()`, gibt es kein kanonisches Ziel und
+    `read_remote_configs()` hinterlässt eine leere Zielliste. Genau dann trug der
+    Rechnervergleich nichts mehr aus: Zwei Macs mit VERSCHIEDENEN kaputten URLs
+    für dasselbe Remote lieferten beide eine leere Fingerprintliste und sahen
+    deshalb identisch aus — `--diff` verschwieg den Ziel-Drift ausgerechnet dort,
+    wo die Konfiguration ohnehin nicht belegbar ist. Ersatzweise steht hier ein
+    Hash der Rohadresse: Er unterscheidet die Fälle, verrät die Adresse aber
+    nicht und trägt daher auch keine Zugangsdaten nach draußen.
+    """
+    if len(targets) == len(urls):
+        return [target.fingerprint for target in targets]
+    return ["invalid:" + hashlib.sha256(
+        url.encode("utf-8", "surrogateescape")).hexdigest()[:20] for url in urls]
+
+
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
                             configs: dict[str, RemoteConfig] | None = None,
@@ -2765,15 +2817,18 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
         targets = remote.fetch_targets + remote.push_targets
         public_classes = {target.is_github for target in targets}
         failure = failures.get(name, ("", "", ""))
+        fetch_fingerprints = endpoint_fingerprints(
+            remote.fetch_urls, remote.fetch_targets)
         state = RemoteStatus(
             name=name,
             public=True in public_classes,
             mixed_public=len(public_classes) > 1,
             is_sync=name == sync_remote,
-            fetch_fingerprint=(remote.fetch_targets[0].fingerprint
-                               if len(remote.fetch_targets) == 1 else ""),
-            fetch_fingerprints=[target.fingerprint for target in remote.fetch_targets],
-            push_fingerprints=[target.fingerprint for target in remote.push_targets],
+            fetch_fingerprint=(fetch_fingerprints[0]
+                               if len(fetch_fingerprints) == 1 else ""),
+            fetch_fingerprints=fetch_fingerprints,
+            push_fingerprints=endpoint_fingerprints(
+                remote.push_urls, remote.push_targets),
             target_mismatch=not remote.transfer_safe,
             multiple_pushurls=len(remote.push_targets) != 1,
             fetch_refspecs_safe=fetch_refspecs_safe(remote),
@@ -2869,10 +2924,15 @@ def repo_has_head(repo: Path, timeout: int) -> bool:
 
 
 def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
-    """Diff einer einzelnen Datei, ohne Index oder Arbeitsbaum anzufassen.
+    """Diff einer einzelnen Datei, ohne Index-Eintrag oder Arbeitsbaum zu ändern.
 
     Unversionierte Dateien kennt `git diff` nicht — sie werden über `--no-index`
     gegen /dev/null gezeigt, damit auch neue Dateien sichtbar sind.
+
+    Eine bytegenaue Einschränkung: `git diff` frischt den Stat-Cache im Index
+    (die gespeicherten Zeitstempel) auch mit `GIT_OPTIONAL_LOCKS=0` auf und
+    schreibt `.git/index` dann neu. Modus, Objekt-ID, Stufe und Pfad der
+    Einträge bleiben dabei gleich; an Vormerkung und Inhalt ändert sich nichts.
     """
     safe_diff = ("diff", "--no-ext-diff", "--no-textconv",
                  "--ignore-submodules=none")
@@ -3635,16 +3695,32 @@ def collect_all(root: Path, cfg: dict, fetch: bool = False,
 # Nicht-interaktive Ausgabe (--list / --json / kein TTY)
 # ---------------------------------------------------------------------------
 
+def json_text(value):
+    """Git-Text an der JSON-Grenze gültig und sichtbar machen; None bleibt None.
+
+    Git erlaubt in Ref- und Remote-Namen Bytes, die kein UTF-8 sind (`git
+    check-ref-format` nimmt zum Beispiel ein Byte 0xff an). Die Git-Leser
+    dekodieren mit `surrogateescape`, ein solches Byte kommt also als
+    Surrogat-Codepunkt bei uns an. Ginge der roh in `json.dumps`, stünde je nach
+    Einstellung von stdout ein ungültiges Byte im Ergebnis oder der Lauf bräche
+    mit einem UnicodeEncodeError ab — `--json` wäre für ein vollkommen gültiges
+    Repo unbrauchbar, und der Rechnervergleich über ssh könnte es nicht lesen.
+    `terminal_text()` schreibt solche Zeichen umkehrbar als `\\uXXXX`.
+    """
+    return None if value is None else terminal_text(value)
+
+
 def status_dict(st: RepoStatus) -> dict:
     return {
         "path": terminal_text(st.path), "rel": terminal_text(st.rel),
-        "branch": st.branch,
-        "remote": st.remote, "remote_state": st.remote_state,
+        "branch": json_text(st.branch),
+        "remote": json_text(st.remote), "remote_state": st.remote_state,
         "ahead": st.ahead, "behind": st.behind,
-        "upstream": st.upstream,
+        "upstream": json_text(st.upstream),
         "upstream_ahead": st.upstream_ahead, "upstream_behind": st.upstream_behind,
         "remotes": [
-            {"name": r.name, "public": r.public, "mixed_public": r.mixed_public,
+            {"name": json_text(r.name), "public": r.public,
+             "mixed_public": r.mixed_public,
              "sync": r.is_sync,
              "branch_exists": r.branch_exists, "ahead": r.ahead, "behind": r.behind,
              "fetch_fingerprint": r.fetch_fingerprint,
@@ -3661,15 +3737,15 @@ def status_dict(st: RepoStatus) -> dict:
              # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
              "fetch_failed": r.fetch_failed,
              "fetch_outcome": r.fetch_outcome,
-             "fetch_error_long": r.fetch_error_long,
-             "fetch_error_detail": r.fetch_error_detail}
+             "fetch_error_long": json_text(r.fetch_error_long),
+             "fetch_error_detail": json_text(r.fetch_error_detail)}
             for r in st.remotes
         ],
         "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
         "conflicts": st.conflicts,
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
-        "error": st.error,
-        "error_long": st.error_long,
+        "error": json_text(st.error),
+        "error_long": json_text(st.error_long),
         # Aus demselben Grund wie `fetch_failed` oben nicht als Wert verglichen,
         # sondern als Schalter benutzt: Ein gescheiterter Fetch beschreibt die
         # Sitzung, die gemessen hat (kein Netz, gesperrter Schlüsselbund), nicht
@@ -5303,7 +5379,7 @@ class TUI:
             # und Baum nur lesend. Nach einem Timeout darf weder HEAD noch Index
             # automatisch verändert werden, weil die Herkunft nicht beweisbar ist.
             proof_names = ("approved_head", "approved_ref", "approved_tree",
-                           "approved_paths", "reflog_action")
+                           "reflog_action")
             if not all(hasattr(exc, name) for name in proof_names):
                 # Der Timeout lag in einer Vorbereitung/Schutzprüfung; `git
                 # commit` wurde noch nicht gestartet und ein ungebundenes
@@ -5313,7 +5389,7 @@ class TUI:
                 return True
             try:
                 done = finish_interrupted_commit(
-                    st.path, exc.approved_head, list(exc.approved_paths), t_,
+                    st.path, exc.approved_head, t_,
                     exc.approved_tree, exc.approved_ref, exc.reflog_action)
             except subprocess.TimeoutExpired:
                 self.message = t("commit_outcome_unknown")

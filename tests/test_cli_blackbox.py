@@ -171,6 +171,57 @@ exit "$rc"
         self.assertIsInstance(remote["fetch_refspec_fingerprint"], str)
         self.assertTrue(remote["fetch_refspec_fingerprint"])
 
+    def test_a_non_utf8_branch_name_still_yields_valid_json(self):
+        """Git erlaubt Bytes ohne UTF-8-Bedeutung im Refnamen.
+
+        Die Git-Leser dekodieren mit ``surrogateescape``; roh in ``json.dumps``
+        gegeben, stand im Ergebnis ein ungueltiges Byte oder der Lauf brach mit
+        einem UnicodeEncodeError ab. ``--json`` war damit fuer ein voellig
+        gueltiges Repo unbrauchbar — und der Rechnervergleich las es nicht.
+        """
+        repo = self.local_root / "odd"
+        self._init_repo(repo)
+        oid = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        # Als Datei kann APFS diesen Namen nicht anlegen; in packed-refs steht
+        # er trotzdem, und Git nimmt ihn an.
+        (repo / ".git" / "packed-refs").write_bytes(
+            b"# pack-refs with: peeled fully-peeled sorted \n"
+            + oid.encode("ascii") + b" refs/heads/we\xffird\n")
+        (repo / ".git" / "HEAD").write_bytes(b"ref: refs/heads/we\xffird\n")
+
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--lang", "en", "--json",
+             str(self.local_root)],
+            env=self.env, capture_output=True)
+
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        # Genau hier scheiterte es vorher: rohes 0xff ist kein gueltiges UTF-8.
+        payload = json.loads(result.stdout.decode("utf-8"))
+        odd = next(item for item in payload["repos"] if item["rel"] == "odd")
+        self.assertEqual(odd["branch"], "we\\udcffird")
+
+    def test_two_different_unparsable_remote_urls_count_as_drift(self):
+        """Eine nicht zerlegbare Remote-URL hat kein kanonisches Ziel.
+
+        Frueher stand dafuer auf beiden Rechnern dieselbe leere Fingerprintliste
+        — zwei Macs mit VERSCHIEDENEN kaputten URLs sahen deshalb identisch aus,
+        und ``--diff`` verschwieg den Ziel-Drift ausgerechnet dort, wo die
+        Konfiguration ohnehin nicht belegbar ist.
+        """
+        local, remote = self._clone_pair()
+        # Beide URLs scheitern beim Zerlegen (ungueltige IPv6-Klammer bzw. Port
+        # ausserhalb 0-65535) und meinen doch verschiedene Ziele.
+        git(local, "remote", "set-url", "origin", "https://[broken-here/x.git")
+        git(remote, "remote", "set-url", "origin", "ssh://host:99999/other.git")
+
+        result = self._run_gmf()
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("security/endpoint identity for origin differs",
+                      result.stdout)
+
     def test_diff_rejects_an_ssh_option_instead_of_running_it(self):
         marker = self.base / "proxy-command-ran"
         option = "-oProxyCommand=touch " + str(marker)
@@ -517,6 +568,69 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Already installed", result.stdout)
         self.assertEqual(zshrc.read_text(), line)
+
+    def _loads_the_wrapper(self) -> bool:
+        """Definiert ein `zsh`, das diese .zshrc sourct, wirklich `gmf`?"""
+        loaded = subprocess.run(
+            ["zsh", "-c", 'source "$ZDOTDIR/.zshrc"; whence -w gmf'],
+            capture_output=True, text=True,
+            env=dict(os.environ, HOME=str(self.home), ZDOTDIR=str(self.home)))
+        return "gmf: function" in loaded.stdout
+
+    def test_a_source_inside_a_command_substitution_is_no_installation(self):
+        """Ein gequotetes `)` schliesst keine Kommandoersetzung.
+
+        Der Mehrzeilen-Scanner merkte sich eine offene Ersetzung nur, wenn im
+        Wort ueberhaupt kein `)` vorkam. In `value=$(print ')'` stammt das
+        vorhandene `)` aber aus einem Argument in Quotes; die naechste Zeile
+        laeuft in zsh im Unterprozess der Ersetzung. Der Installer meldete
+        trotzdem "Already installed", waehrend `gmf` in der aufrufenden Shell
+        gar nicht entsteht.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        content = "value=$(print ')'\n" + f"source -- {wrapper}\n" + ")\n"
+        zshrc.write_text(content)
+        self.assertFalse(self._loads_the_wrapper())
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Registered wrapper", result.stdout)
+        self.assertIn(content, zshrc.read_text())
+        self.assertTrue(self._loads_the_wrapper())
+
+    def test_a_closed_control_block_on_the_same_line_stays_idempotent(self):
+        """Ein Kontrollblock verwarf frueher die GANZE Zeile.
+
+        Damit galt weder ein `source` vor dem Block noch eines hinter einem
+        laengst geschlossenen Block als Registrierung — der Installer trug ein
+        zweites Mal ein, und der Wrapper wurde beim Shellstart doppelt geladen.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        for content in (f"source -- {wrapper}; if true; then :; fi\n",
+                        f"if true; then :; fi; source -- {wrapper}\n"):
+            with self.subTest(content=content):
+                zshrc.write_text(content)
+                self.assertTrue(self._loads_the_wrapper())
+
+                result = self._install()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Already installed", result.stdout)
+                self.assertEqual(zshrc.read_text(), content)
+
+        # Im Block selbst bleibt es dagegen kein Beleg: `false` laesst das
+        # `source` nie laufen, und `gmf` fehlt.
+        content = f"if false; then source -- {wrapper}; fi\n"
+        zshrc.write_text(content)
+        self.assertFalse(self._loads_the_wrapper())
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Registered wrapper", result.stdout)
 
     def _is_active_line(self, line: str) -> bool:
         """Den quote-aware Lexer aus install.sh anwenden — ohne Selbsttest."""
