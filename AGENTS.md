@@ -102,6 +102,17 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Version: `__version__` in [gitmaster_flash.py](gitmaster_flash.py) bei
   Funktionsänderungen bumpen.
 
+- Die Rückfrage des G-Pfads steht seit 0.18.10 in der Vorschau selbst
+  (`confirm_in_pager()`), direkt unter Commits und Dateinamen, und verlangt
+  J/Y (oder „ja“/„yes“) plus ⏎; jede andere Eingabe, ein leeres ⏎ und Esc
+  brechen ab. Vorher kam nach dem Schließen des Pagers unten auf der Liste die
+  Aufforderung, `PUSH <remote>` zu tippen — sie wurde übersehen, und ein
+  gewohnheitsmäßiges `q` landete im Eingabefeld. Bewusst keine Einzeltaste: Wer
+  aus Gewohnheit „J ⏎“ tippt, dessen ⏎ träfe sonst schon die Liste, und dort
+  bedeutet ⏎ „beenden und ins Repo wechseln“ (Entscheidung 2026-08-22). Seit
+  derselben Version zeigt `_fetch_remote()` während des Fetches eine Busy-Zeile
+  (`fetch_busy`), weil ein Fetch zu GitHub bei großen Repos lange dauern kann
+  und die TUI sonst eingefroren wirkt.
 - Remote-Identität (`canonical_remote_target()`): Übertragungen (P/G) laufen
   nur, wenn Fetch- und Push-Ziel identisch sind (`transfer_safe`). SCP-Pfade
   ohne führenden `/` hängen am Home des SSH-Benutzers (`alice@host:repo` ≠

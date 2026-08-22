@@ -17,7 +17,7 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
   A     inspect the changes file by file (read-only)
   C     commit helper: select exactly which changed files to commit
   P     safely push the current branch to the private sync remote
-  G     guarded GitHub push (preview + typed confirmation; branch only, no tags)
+  G     guarded GitHub push (preview, then Y ⏎ to confirm; branch only, no tags)
   H     explain the Git safety rules
   I     show repository details, remote addresses, and clickable GitHub URLs
   S     view the latest stash as a diff (read-only, scrollable)
@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.9"
+__version__ = "0.18.10"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -124,6 +124,7 @@ TR = {
     # Fortschritt / Kopf
     "reading": {"en": "Reading repos", "de": "Lese Repos"},
     "fetching": {"en": "Fetching from remote", "de": "Hole Stand vom Remote (fetch)"},
+    "fetch_busy": {"en": "Fetching {r} …", "de": "Hole Stand von {r} (fetch) …"},
     "hdr_repos": {"en": "repos", "de": "Repos"},
     # --diff (two machines)
     "diff_here": {"en": "here", "de": "hier"},
@@ -241,6 +242,8 @@ TR = {
     # Pager
     "pager_footer": {"en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
                      "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}"},
+    "pager_footer_confirm": {"en": " ↑/↓ scroll · Esc cancel · line {a}-{b} / {n}",
+                             "de": " ↑/↓ scrollen · Esc abbrechen · Zeile {a}-{b} / {n}"},
     # Commit-Hilfe
     "commit_title": {"en": "Commit helper · {rel} — review, then ⏎",
                      "de": "Commit-Hilfe · {rel} — Vorschlag prüfen, dann ⏎"},
@@ -346,8 +349,9 @@ TR = {
                     "de": "Mehrere GitHub-Remotes ({names}); bitte im Terminal bewusst auswählen."},
     "github_preview": {"en": "GitHub push preview · {rel} → {r}/{b}",
                        "de": "GitHub-Push-Vorschau · {rel} → {r}/{b}"},
-    "github_type": {"en": "Type '{phrase}' to publish this branch only: ",
-                    "de": "Zum Veröffentlichen nur dieses Branches '{phrase}' eingeben: "},
+    "github_confirm": {
+        "en": "Publish this branch to {r}? Y ⏎ = yes, anything else cancels: ",
+        "de": "Diesen Branch zu {r} veröffentlichen? J ⏎ = ja, sonst Abbruch: "},
     "github_cancelled": {"en": "GitHub push cancelled — nothing was published.",
                          "de": "GitHub-Push abgebrochen — nichts wurde veröffentlicht."},
     "github_pushed": {"en": "Published current branch to {r}; no tags were sent.",
@@ -369,7 +373,7 @@ TR = {
         "en": "P  Push only the current branch to the private sync remote.\n"
               "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
               "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
-              "   Requires typing PUSH <remote>; pins source and target OIDs and sends no tags.\n"
+              "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
               "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
               "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
               "A  Shows every changed file and its diff without modifying the repository.\n"
@@ -377,7 +381,7 @@ TR = {
         "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
               "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
               "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
-              "   Verlangt PUSH <Remote>; pinnt Quell-/Ziel-OID und sendet keine Tags.\n"
+              "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
               "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
               "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
@@ -4791,48 +4795,112 @@ class TUI:
         title = t("stash_preview_title", rel=st.rel, s=label)
         self.show_pager(title, text.splitlines())
 
+    def _draw_pager_page(self, title: str, lines: list[str], top: int,
+                         reserved: int, footer_key: str) -> tuple[int, int, int]:
+        """Eine Pager-Seite zeichnen: Titelzeile, Textkörper, Fußzeile.
+
+        ``reserved`` Zeilen direkt über der Fußzeile bleiben frei — dort stellt
+        `confirm_in_pager()` seine Rückfrage. Liefert den an die Textlänge
+        angepassten ``top``, die Höhe des Textkörpers und die Zahl der
+        umgebrochenen Zeilen; die Tastenschleifen brauchen alle drei zum Scrollen.
+        Der Aufrufer ruft `refresh()` selbst, damit er vorher noch seine eigene
+        Zeile setzen kann.
+        """
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
+        body_h = max(1, h - 2 - reserved)
+        # Erst neutralisieren, dann nach sichtbaren Terminalzellen umbrechen.
+        # Sonst wird etwa U+202E nach dem Umbruch zu sechs sichtbaren Zeichen
+        # und die verlustfreie H-Ansicht schneidet sie wieder ab.
+        wrapped = [part for line in lines
+                   for part in wrap_cells(
+                       terminal_text(line), max(1, w - 1))]
+        top = min(top, max(0, len(wrapped) - body_h))
+        for y, line in enumerate(wrapped[top:top + body_h], start=1):
+            # Diff-Zeilen leicht einfärben: + grün, - rot, @@ gelb.
+            pair = 0
+            if line.startswith("+") and not line.startswith("+++"):
+                pair = curses.color_pair(C_GREEN)
+            elif line.startswith("-") and not line.startswith("---"):
+                pair = curses.color_pair(C_RED)
+            elif line.startswith("@@"):
+                pair = curses.color_pair(C_YELLOW)
+            safe_addstr(self.scr, y, 0, line, pair)
+        a = top + 1
+        b = min(len(wrapped), top + body_h)
+        safe_addstr(self.scr, h - 1, 0,
+                    t(footer_key, a=a, b=b, n=len(wrapped)).ljust(w - 1),
+                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        return top, body_h, len(wrapped)
+
+    @staticmethod
+    def _scroll_pager(ch, top: int, body_h: int, total: int) -> int | None:
+        """Scrolltaste auf den neuen ``top`` abbilden; ``None`` für andere Tasten."""
+        last = max(0, total - body_h)
+        if ch == curses.KEY_UP:
+            return max(0, top - 1)
+        if ch == curses.KEY_DOWN:
+            return min(last, top + 1)
+        if ch == curses.KEY_NPAGE:
+            return min(last, top + body_h)
+        if ch == curses.KEY_PPAGE:
+            return max(0, top - body_h)
+        return None
+
     def show_pager(self, title: str, lines: list[str]):
         """Einfacher scrollbarer Textbetrachter (↑/↓/PgUp/PgDn, q/Esc schließt)."""
         top = 0
         while True:
-            self.scr.erase()
-            h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
-            body_h = h - 2
-            # Erst neutralisieren, dann nach sichtbaren Terminalzellen umbrechen.
-            # Sonst wird etwa U+202E nach dem Umbruch zu sechs sichtbaren Zeichen
-            # und die verlustfreie H-Ansicht schneidet sie wieder ab.
-            wrapped = [part for line in lines
-                       for part in wrap_cells(
-                           terminal_text(line), max(1, w - 1))]
-            top = min(top, max(0, len(wrapped) - body_h))
-            for y, line in enumerate(wrapped[top:top + body_h], start=1):
-                # Diff-Zeilen leicht einfärben: + grün, - rot, @@ gelb.
-                pair = 0
-                if line.startswith("+") and not line.startswith("+++"):
-                    pair = curses.color_pair(C_GREEN)
-                elif line.startswith("-") and not line.startswith("---"):
-                    pair = curses.color_pair(C_RED)
-                elif line.startswith("@@"):
-                    pair = curses.color_pair(C_YELLOW)
-                safe_addstr(self.scr, y, 0, line, pair)
-            a = top + 1
-            b = min(len(wrapped), top + body_h)
-            safe_addstr(self.scr, h - 1, 0,
-                        t("pager_footer", a=a, b=b, n=len(wrapped)).ljust(w - 1),
-                        curses.color_pair(C_DIM) | curses.A_REVERSE)
+            top, body_h, total = self._draw_pager_page(
+                title, lines, top, 0, "pager_footer")
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
                 return
-            elif ch == curses.KEY_UP:
-                top = max(0, top - 1)
-            elif ch == curses.KEY_DOWN:
-                top = min(max(0, len(wrapped) - body_h), top + 1)
-            elif ch == curses.KEY_NPAGE:
-                top = min(max(0, len(wrapped) - body_h), top + body_h)
-            elif ch == curses.KEY_PPAGE:
-                top = max(0, top - body_h)
+            scrolled = self._scroll_pager(ch, top, body_h, total)
+            if scrolled is not None:
+                top = scrolled
+
+    def confirm_in_pager(self, title: str, lines: list[str],
+                         question: str) -> bool:
+        """Scrollbare Vorschau mit Rückfrage in der vorletzten Zeile.
+
+        Die Antwort wird wie in `prompt_line()` getippt und mit ⏎ abgeschickt:
+        Nur J oder Y (Groß/Klein, beide Sprachen; auch ausgeschrieben „ja"
+        oder „yes") bestätigen; jede andere Eingabe, ein leeres ⏎ und Esc
+        brechen ab. ↑/↓/PgUp/PgDn scrollen weiter durch den Text, damit
+        Commit- und Dateiliste beim Antworten sichtbar bleiben. Eine
+        Einzeltaste ohne ⏎ genügt absichtlich nicht:
+        Wer aus Gewohnheit „J ⏎" tippt, dessen ⏎ träfe sonst schon die Liste
+        darunter — und dort bedeutet ⏎ „beenden und ins Repo wechseln".
+        """
+        top = 0
+        buf: list[str] = []
+        while True:
+            top, body_h, total = self._draw_pager_page(
+                title, lines, top, 1, "pager_footer_confirm")
+            h, w = self.scr.getmaxyx()
+            answer = "".join(buf)
+            safe_addstr(self.scr, h - 2, 1, (question + answer).ljust(w - 2),
+                        curses.color_pair(C_YELLOW) | curses.A_BOLD)
+            cursor_x = 1 + cell_width(terminal_text(question + answer))
+            self.scr.move(max(0, h - 2), min(cursor_x, max(0, w - 2)))
+            self.scr.refresh()
+            ch = self.scr.get_wch()
+            if ch in ("\n", "\r"):
+                return answer.strip().lower() in ("j", "y", "ja", "yes")
+            if ch == "\x1b":  # Esc
+                return False
+            if ch in ("\x7f", "\b") or ch == curses.KEY_BACKSPACE:
+                if buf:
+                    buf.pop()
+                continue
+            scrolled = self._scroll_pager(ch, top, body_h, total)
+            if scrolled is not None:
+                top = scrolled
+            elif isinstance(ch, str) and ch.isprintable():
+                buf.append(ch)
 
     # -- Sichere Push-Aktionen ---------------------------------------------
 
@@ -4861,6 +4929,9 @@ class TUI:
             self.message = remote_check_message(
                 remote, block_reason, 0, "", self.cfg["fetch_timeout"])
             return None
+        # Der Fetch kann bei großen Repos oder langsamem Netz spürbar dauern;
+        # ohne Zwischenmeldung stünde das alte Bild starr da (Befund 2026-08-22).
+        self.show_busy(t("fetch_busy", r=remote))
         try:
             r = fetch_remote_safely(
                 st.path, config, st.branch, self.cfg["fetch_timeout"])
@@ -5032,13 +5103,13 @@ class TUI:
             t("changed_files"),
             *(check.files or [t("none_label")]),
         ]
-        self.show_pager(t("github_preview", rel=fresh.rel, r=remote.name,
-                          b=fresh.branch), lines)
-        self.draw()
-        phrase = f"PUSH {remote.name}"
-        h, _ = self.scr.getmaxyx()
-        typed = self.prompt_line(h - 4, t("github_type", phrase=phrase))
-        if typed != phrase:
+        # Die Rückfrage steht in der Vorschau selbst, unter Commits und
+        # Dateien. Früher kam sie erst nach dem Schließen des Pagers unten auf
+        # der Liste und verlangte den getippten Satz „PUSH <remote>" — dort
+        # wurde sie leicht übersehen (Entscheidung 2026-08-22).
+        if not self.confirm_in_pager(
+                t("github_preview", rel=fresh.rel, r=remote.name, b=fresh.branch),
+                lines, t("github_confirm", r=remote.name)):
             log_cancelled(fresh.path, safe_push_args(
                 check.transfer_url, check.branch, check.head_oid,
                 check.target_oid))

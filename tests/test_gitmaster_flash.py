@@ -170,6 +170,72 @@ class ConfirmDialogTests(unittest.TestCase):
         self.assertIn("A)", drawn[0])
 
 
+class PagerConfirmTests(unittest.TestCase):
+    """Die GitHub-Vorschau fragt in ihrer eigenen Ansicht nach: J/Y + ⏎
+    bestätigt, alles andere bricht ab, und die Liste bleibt dabei scrollbar.
+    Seit 2026-08-22 ersetzt das den getippten Satz „PUSH <remote>" nach dem
+    Schließen des Pagers, der unten auf der Liste leicht übersehen wurde."""
+
+    LINES = [f"line {i}" for i in range(1, 31)]
+
+    def run_dialog(self, keys, size=(12, 60)):
+        drawn = []   # (Zeile, Text) in Zeichenreihenfolge
+
+        class Screen:
+            def __init__(self):
+                self.keys = iter(keys)
+
+            def getmaxyx(self): return size
+            def erase(self): drawn.append((None, "<erase>"))
+            def addstr(self, y, x, text, *a): drawn.append((y, text))
+            def move(self, *_args): pass
+            def refresh(self): pass
+            def get_wch(self): return next(self.keys)
+
+        ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            result = ui.confirm_in_pager("Preview", self.LINES, "Publish? ")
+        return result, drawn
+
+    def test_yes_needs_return_in_both_languages(self):
+        self.assertIs(self.run_dialog(["j", "\n"])[0], True)
+        self.assertIs(self.run_dialog(["Y", "\r"])[0], True)
+        self.assertIs(self.run_dialog(["j", "a", "\n"])[0], True)
+        self.assertIs(self.run_dialog(["y", "e", "s", "\n"])[0], True)
+        # Ohne ⏎ entscheidet ein J nichts: Der Dialog wartet auf die nächste
+        # Taste (hier gibt es keine mehr). Ein bloßes J darf nicht reichen, weil
+        # das gewohnte ⏎ danach sonst die Liste trifft — dort heißt ⏎ „beenden
+        # und ins Repo wechseln".
+        with self.assertRaises(StopIteration):
+            self.run_dialog(["j"])
+
+    def test_anything_but_yes_cancels(self):
+        self.assertIs(self.run_dialog(["n", "\n"])[0], False)
+        self.assertIs(self.run_dialog(["\n"])[0], False)
+        self.assertIs(self.run_dialog(["q", "\n"])[0], False)
+        self.assertIs(self.run_dialog(["j", "x", "\n"])[0], False)
+        self.assertIs(self.run_dialog(["\x1b"])[0], False)
+
+    def test_backspace_edits_the_answer(self):
+        self.assertIs(self.run_dialog(["n", "\x7f", "j", "\n"])[0], True)
+        self.assertIs(self.run_dialog(["j", curses.KEY_BACKSPACE, "\n"])[0], False)
+
+    def test_scrolling_keeps_the_answer_and_the_list_visible(self):
+        # 12 Zeilen hoch: Titel, 9 Textzeilen, Rückfrage, Fußzeile.
+        result, drawn = self.run_dialog(
+            [curses.KEY_DOWN, curses.KEY_NPAGE, "j", curses.KEY_UP, "\n"])
+        self.assertIs(result, True)
+        footers = [text for y, text in drawn if y == 11]
+        self.assertIn(gmf_module.t("pager_footer_confirm", a=11, b=19, n=30).ljust(59),
+                      footers)
+        self.assertIn(gmf_module.t("pager_footer_confirm", a=10, b=18, n=30).ljust(59),
+                      footers)
+        # Die Antwort bleibt beim Scrollen stehen und steht in der vorletzten Zeile.
+        self.assertIn("Publish? j".ljust(58), [text for y, text in drawn if y == 10])
+        body_rows = {y for y, text in drawn if y is not None and 1 <= y <= 9}
+        self.assertEqual(body_rows, set(range(1, 10)))
+
+
 class TestRemoteBadges(unittest.TestCase):
     def test_synced_remote_is_still_named(self):
         remote = RemoteStatus("backup", is_sync=True, branch_exists=True)
@@ -332,6 +398,32 @@ class TestAgainstRealRepo(unittest.TestCase):
             self.assertIn("--no-recurse-submodules", fetch, aufrufe)
             self.assertIn("--refmap=", fetch, aufrufe)
 
+    def test_transfer_fetch_shows_a_busy_line_while_fetching(self):
+        # Ein Fetch zu GitHub kann bei großen Repos lange dauern; ohne diese
+        # Zeile sah die TUI in der Zeit eingefroren aus (Befund 2026-08-22).
+        remote = self.root / "remote.git"
+        subprocess.run(
+            ["git", "clone", "-q", "--bare", str(self.repo), str(remote)],
+            check=True, capture_output=True, text=True)
+        git(self.repo, "remote", "add", "origin", str(remote))
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        drawn = []
+
+        class Screen:
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, y, x, text, *a): drawn.append((y, text))
+            def refresh(self): pass
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            refreshed = ui._fetch_remote(st, "origin")
+
+        self.assertIsNotNone(refreshed)
+        busy = gmf_module.t("fetch_busy", r="origin")
+        self.assertTrue(any(y == 29 and text.startswith(busy)
+                            for y, text in drawn), drawn)
+
     def test_transfer_fetch_uses_every_fetch_guard(self):
         remote = self.root / "remote.git"
         subprocess.run(
@@ -342,6 +434,8 @@ class TestAgainstRealRepo(unittest.TestCase):
 
         class Screen:
             def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
 
         ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
         ui.statuses = [st]
@@ -352,7 +446,8 @@ class TestAgainstRealRepo(unittest.TestCase):
             calls.append(args)
             return original(repo, *args, **kwargs)
 
-        with mock.patch.object(gmf_module, "run_git_logged", side_effect=remember):
+        with mock.patch.object(gmf_module, "run_git_logged", side_effect=remember), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
             refreshed = ui._fetch_remote(st, "origin")
 
         self.assertIsNotNone(refreshed)
@@ -423,6 +518,8 @@ class TestAgainstRealRepo(unittest.TestCase):
 
         class Screen:
             def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
 
         ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
         ui.statuses = [st]
@@ -432,7 +529,8 @@ class TestAgainstRealRepo(unittest.TestCase):
             return subprocess.CompletedProcess(["git", "fetch"], 0, "", "")
 
         with mock.patch.object(gmf_module, "fetch_remote_safely",
-                               side_effect=change_config):
+                               side_effect=change_config), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
             refreshed = ui._fetch_remote(st, "origin")
 
         self.assertIsNone(refreshed)
@@ -4581,11 +4679,14 @@ class RemoteAndCommandLogTests(unittest.TestCase):
 
         class Screen:
             def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
 
         ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
         ui.statuses = [st]
         with mock.patch.object(
-                gmf_module, "run_git_logged", side_effect=fail_update):
+                gmf_module, "run_git_logged", side_effect=fail_update), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
             result = ui._fetch_remote(st, "origin")
 
         self.assertIsNone(result)
@@ -4902,10 +5003,13 @@ class RemoteAndCommandLogTests(unittest.TestCase):
 
         class Screen:
             def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
 
         ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
         ui.statuses = [st]
         with mock.patch.object(ui, "confirm", return_value=True), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
                 mock.patch.object(gmf_module, "run_git",
                                   side_effect=push_then_lose_result):
             ui.action_sync_push()
@@ -5018,6 +5122,71 @@ class RemoteAndCommandLogTests(unittest.TestCase):
 
         self.assertEqual(ui.message, gmf_module.t("github_changed"))
         inspect.assert_not_called()
+
+    def _public_push_fixture(self):
+        remote = gmf_module.RemoteStatus(
+            name="github", public=True, branch_exists=True,
+            fetch_fingerprints=["target-a"], push_fingerprints=["target-a"],
+            fetch_refspecs_safe=True, branch_mapping_safe=True)
+        st = gmf_module.RepoStatus(
+            path=self.repo, rel="repo", branch="main", remotes=[remote])
+        check = gmf_module.TransferCheck(
+            "ready", ahead=1, remote_ref="refs/remotes/github/main",
+            branch="main", head_oid="a" * 40, target_oid="b" * 40,
+            transfer_url="https://github.com/example/repo.git",
+            commits=["abc1234 add feature"], files=["src/app.py"])
+
+        class Screen:
+            def getmaxyx(self): return (30, 100)
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        return ui, st, check
+
+    def test_public_push_asks_inside_the_preview_and_pushes_on_yes(self):
+        ui, st, check = self._public_push_fixture()
+        asked = {}
+
+        def preview(title, lines, question):
+            asked.update(title=title, lines=lines, question=question)
+            return True
+
+        pushed = subprocess.CompletedProcess(["git", "push"], 0, "", "")
+        with mock.patch.object(ui, "_fetch_remote", return_value=st), \
+                mock.patch.object(gmf_module, "inspect_transfer", return_value=check), \
+                mock.patch.object(ui, "confirm_in_pager", side_effect=preview), \
+                mock.patch.object(ui, "prompt_line") as typed, \
+                mock.patch.object(gmf_module, "run_git_logged",
+                                  return_value=pushed) as run, \
+                mock.patch.object(gmf_module, "update_tracking_after_push",
+                                  return_value=True), \
+                mock.patch.object(ui, "refresh_one", return_value=st):
+            ui.action_github_push()
+
+        self.assertEqual(ui.message, gmf_module.t("github_pushed", r="github"))
+        # Kein getippter Satz mehr: Die Rückfrage steht in der Vorschau selbst.
+        typed.assert_not_called()
+        self.assertEqual(asked["title"], gmf_module.t(
+            "github_preview", rel="repo", r="github", b="main"))
+        self.assertEqual(asked["question"],
+                         gmf_module.t("github_confirm", r="github"))
+        self.assertIn("abc1234 add feature", asked["lines"])
+        self.assertIn("src/app.py", asked["lines"])
+        run.assert_called_once()
+        self.assertIn("push", run.call_args.args)
+
+    def test_public_push_is_cancelled_when_the_preview_question_is_declined(self):
+        ui, st, check = self._public_push_fixture()
+        with mock.patch.object(ui, "_fetch_remote", return_value=st), \
+                mock.patch.object(gmf_module, "inspect_transfer", return_value=check), \
+                mock.patch.object(ui, "confirm_in_pager", return_value=False), \
+                mock.patch.object(gmf_module, "run_git_logged") as run, \
+                mock.patch.object(gmf_module, "log_cancelled") as cancelled:
+            ui.action_github_push()
+
+        self.assertEqual(ui.message, gmf_module.t("github_cancelled"))
+        run.assert_not_called()
+        cancelled.assert_called_once()
 
     def test_successful_push_keeps_success_visible_when_tracking_update_times_out(self):
         remote = gmf_module.RemoteStatus(name="origin", branch_exists=True)

@@ -170,7 +170,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | A | Änderungen Datei für Datei in einem rein lesenden Diff-Betrachter prüfen |
 | C | Commit-Hilfe (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
-| G | geschützter GitHub-Push mit Commit-/Dateivorschau und Texteingabe |
+| G | geschützter GitHub-Push: Vorschau der ausgehenden Commits/Dateien, Bestätigung mit J ⏎ |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
 | I | rein lesende Repo-, Remote- und Branch-Details; dort `T` Remote prüfen |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
@@ -521,7 +521,8 @@ Race-Fenster ausgecheckt wurde.
 Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
 Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
 sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
-Dateinamen. Danach muss exakt `PUSH <Remote>` eingegeben werden. Auch der letzte
+Dateinamen; die Rückfrage steht direkt unter dieser Liste und wird mit `J` + ⏎
+beantwortet (jede andere Eingabe, ein leeres ⏎ oder Esc bricht ab). Auch der letzte
 Befehl überträgt nur den aktuellen Branch: freigegebene Quell-OID, exakte
 Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
 abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide

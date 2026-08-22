@@ -158,7 +158,7 @@ memorize. Case does not matter — `f` works like `F`.
 | A | inspect changes file by file in a read-only diff viewer |
 | C | commit helper (see below) |
 | P | safely push the current branch to the private sync remote |
-| G | guarded GitHub push with outgoing-commit/file preview and typed confirmation |
+| G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
 | I | read-only repository, remote and branch details; there: `T` tests a remote |
 | S | view the latest stash as a diff (read-only, scrollable) |
@@ -493,8 +493,9 @@ the race window.
 
 GitHub uses the separate `G` path. It works only when the same branch already
 exists on exactly one GitHub remote and the histories are related. Before
-publishing it shows every outgoing commit and changed file name. The exact phrase
-`PUSH <remote>` must then be typed. The final command still sends only the current
+publishing it shows every outgoing commit and changed file name; the question is
+asked right below that list and is answered with `Y` + ⏎ (any other input, an
+empty ⏎ or Esc cancels). The final command still sends only the current
 branch: approved source OID, exact target lease, no tags, no new branch. A remote
 with multiple or differing fetch/push targets is blocked entirely, even if both
 targets are on GitHub. Complex cases stay terminal-only.
