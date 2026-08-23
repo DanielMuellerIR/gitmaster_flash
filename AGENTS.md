@@ -259,6 +259,22 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   verstecken.
 - `--diff` filtert BEIDE Rechner mit demselben Suchtext (`filter_repo_dicts`).
   Nur eine Seite zu filtern erzeugte „nur hier"-Unterschiede, die es nicht gibt.
+- Die Einstellungsansicht (`,`) ändert nur, was Anzeige und Geduld betrifft.
+  `sync_remote_names`/`sync_remote_hosts` (Ziel von P) und `apps` (was gmf per
+  `open -a` startet) stehen in `READ_ONLY_SETTINGS` und bleiben der Datei
+  vorbehalten — sichtbar, aber nicht änderbar. Eine neue Einstellung gehört nur
+  dann nach `EDITABLE_SETTINGS`, wenn ein Vertipper darin nichts startet und
+  nichts umleitet.
+- Jede Eingabe läuft durch `parse_setting()`, bevor sie in die Config kommt;
+  `load_config()` prüft nichts. Die Zahlenprüfung nutzt bewusst eine Regex und
+  nicht `str.isdigit()` — letzteres hält auch „²" für eine Ziffer, `int()` aber
+  nicht, und der Wert fiele erst beim nächsten Git-Aufruf auf.
+- `save_config()` schreibt atomar (Nachbardatei + `os.replace`). Schlägt das
+  Speichern fehl, meldet die Ansicht ausdrücklich „für diese Sitzung übernommen,
+  aber nicht gespeichert" statt eines Erfolgs.
+- Die TUI bekommt den Config-Pfad übergeben; im Demo-Modus ist er `None`. Ein
+  Screenshot- oder Demo-Lauf darf die echte Einstellungsdatei nie anfassen,
+  sonst wären die Bilder maschinenabhängig — und Daniels Config verstellt.
 - Eine nicht zerlegbare Remote-URL bekommt über `endpoint_fingerprints()` einen
   Ersatzfingerprint aus dem Hash der Rohadresse. Eine leere Liste sähe auf zwei
   Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
@@ -273,7 +289,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
-- [ ] Einstellungen direkt in der TUI editieren (bisher: config.json von Hand).
 - [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).

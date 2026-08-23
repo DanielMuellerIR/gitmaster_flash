@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -233,8 +233,61 @@ TR = {
                   "I Info · H Hilfe")},
     "f2": {"en": " {apps} · A changes · C commit · S stash view",
            "de": " {apps} · A Änderungen · C Commit · S Stash-Blick"},
-    "f3": {"en": " R fetch safe remotes · P sync push · G GitHub push · Q quit",
-           "de": " R sichere Remotes fetchen · P Sync-Push · G GitHub-Push · Q Beenden"},
+    "f3": {"en": (" R fetch safe remotes · P sync push · G GitHub push · , settings"
+                  " · Q quit"),
+           "de": (" R sichere Remotes fetchen · P Sync-Push · G GitHub-Push ·"
+                  " , Einstellungen · Q Beenden")},
+    # Einstellungen (Taste ,)
+    "set_title": {"en": "Settings · {p}", "de": "Einstellungen · {p}"},
+    "set_footer": {"en": " ↑/↓ select · ⏎ change · Q/Esc back",
+                   "de": " ↑/↓ wählen · ⏎ ändern · Q/Esc zurück"},
+    "set_prompt": {"en": "{name}: ", "de": "{name}: "},
+    "set_locked_head": {
+        "en": "Only in the file — they decide where gmf writes or what it starts:",
+        "de": "Nur in der Datei — sie entscheiden, wohin gmf schreibt oder was es "
+              "startet:"},
+    "set_value_none": {"en": "(none)", "de": "(keine)"},
+    "set_not_saved": {"en": "demo mode — nothing is saved",
+                      "de": "Demo-Modus — es wird nichts gespeichert"},
+    "set_not_saved_hint": {
+        "en": "Demo mode: a change applies to this session only.",
+        "de": "Demo-Modus: Eine Änderung gilt nur für diese Sitzung."},
+    "set_saved": {"en": "Saved.", "de": "Gespeichert."},
+    "set_saved_rescan": {"en": "Saved — R reads again with the new list.",
+                         "de": "Gespeichert — R liest mit der neuen Liste neu ein."},
+    "set_save_failed": {
+        "en": "Applied for this session, but saving failed: {e}",
+        "de": "Für diese Sitzung übernommen, aber das Speichern schlug fehl: {e}"},
+    "set_err_choice": {"en": "Please enter one of: {opts}",
+                       "de": "Bitte eines davon eingeben: {opts}"},
+    "set_err_number": {"en": "Please enter a whole number.",
+                       "de": "Bitte eine ganze Zahl eingeben."},
+    "set_err_range": {"en": "Please enter a number between {lo} and {hi}.",
+                      "de": "Bitte eine Zahl zwischen {lo} und {hi} eingeben."},
+    "set_err_dirname": {
+        "en": "“{n}” is a folder name, not a path — a “/” can never match.",
+        "de": "„{n}“ ist ein Ordnername, kein Pfad — ein „/“ kann nie zutreffen."},
+    "set_lang": {"en": "Language", "de": "Sprache"},
+    "set_lang_hint": {"en": "auto follows $LANG", "de": "auto folgt $LANG"},
+    "set_compact_from": {"en": "Compact view from", "de": "Kompaktansicht ab"},
+    "set_compact_from_hint": {
+        "en": "above this count gmf starts compact; M switches anytime",
+        "de": "darüber startet gmf kompakt; M schaltet jederzeit um"},
+    "set_git_timeout": {"en": "Git timeout (s)", "de": "Git-Timeout (s)"},
+    "set_git_timeout_hint": {"en": "per single git call",
+                             "de": "je einzelnem Git-Aufruf"},
+    "set_fetch_timeout": {"en": "Fetch timeout (s)", "de": "Fetch-Timeout (s)"},
+    "set_fetch_timeout_hint": {"en": "per fetch — the network is slower",
+                               "de": "je Fetch — das Netz ist langsamer"},
+    "set_commit_timeout": {"en": "Commit timeout (s)", "de": "Commit-Timeout (s)"},
+    "set_commit_timeout_hint": {"en": "the pre-commit hook often needs minutes",
+                                "de": "der pre-commit-Hook braucht oft Minuten"},
+    "set_diff_timeout": {"en": "Diff timeout (s)", "de": "Diff-Timeout (s)"},
+    "set_diff_timeout_hint": {"en": "whole --diff run over ssh",
+                              "de": "ganzer --diff-Lauf über ssh"},
+    "set_skip_dirs": {"en": "Skip folders", "de": "Ordner überspringen"},
+    "set_skip_dirs_hint": {"en": "names, comma-separated; the scan skips them",
+                           "de": "Namen, mit Komma getrennt; der Scan lässt sie aus"},
     # Kompakte Ansicht und Protokollbereich
     "compact_more": {"en": "columns {a}-{b}/{n}", "de": "Spalten {a}-{b}/{n}"},
     "log_pane_title": {"en": " Commands", "de": " Befehle"},
@@ -568,6 +621,12 @@ def t(key: str, **kw) -> str:
     return s.format(**kw) if kw else s
 
 
+def set_ui_lang(value: str) -> None:
+    """Anzeigesprache zur Laufzeit umstellen (Einstellungen, Taste `,`)."""
+    global UI_LANG
+    UI_LANG = value
+
+
 def resolve_lang(cfg: dict, override: str | None = None) -> str:
     if override in ("en", "de"):
         return override
@@ -597,6 +656,112 @@ def load_config() -> dict:
     # App-Tasten intern immer groß (Tastendruck wird ebenfalls großgezogen).
     cfg["apps"] = {k.upper(): v for k, v in cfg.get("apps", {}).items()}
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Einstellungen in der Oberfläche (Taste `,`)
+# ---------------------------------------------------------------------------
+# Editierbar ist bewusst nur, was Anzeige und Geduld betrifft. Was mitentscheidet,
+# WOHIN gmf schreibt oder was es startet, bleibt der Datei vorbehalten:
+#
+#   sync_remote_names / sync_remote_hosts  bestimmen, welches Remote als der
+#       private Sync-Remote gilt — und damit das Ziel von P. Eine Zieländerung
+#       gehört nicht hinter einen Tastendruck in einer Liste, die man gerade
+#       durchscrollt.
+#   apps  enthält Programmpfade, die gmf mit `open -a` startet. Ein Pfad, den
+#       man in einer Zeile eintippt, ist kein Pfad, den man geprüft hat.
+#
+# Beide bleiben in der Ansicht sichtbar — nur eben lesend, mit Verweis auf die
+# Datei. Eine Einstellung zu verstecken, die es gibt, wäre schlechter als sie
+# schreibgeschützt zu zeigen.
+
+
+class Setting(NamedTuple):
+    """Eine editierbare Einstellung samt Prüfregel."""
+    key: str
+    kind: str                     # "choice" | "number" | "names"
+    minimum: int = 0
+    maximum: int = 0
+    choices: tuple = ()
+
+
+EDITABLE_SETTINGS = (
+    Setting("lang", "choice", choices=("auto", "en", "de")),
+    Setting("compact_from", "number", 0, 100_000),
+    Setting("git_timeout", "number", 1, 3_600),
+    Setting("fetch_timeout", "number", 1, 3_600),
+    Setting("commit_timeout", "number", 1, 86_400),
+    Setting("diff_timeout", "number", 1, 86_400),
+    Setting("skip_dirs", "names"),
+)
+
+READ_ONLY_SETTINGS = ("apps", "sync_remote_names", "sync_remote_hosts")
+
+_NUMBER_RE = re.compile(r"[0-9]+\Z")
+
+
+def parse_setting(setting: Setting, raw: str) -> tuple:
+    """Eingabe prüfen: liefert `(Wert, None)` oder `(None, Fehlertext)`.
+
+    Reine Logik ohne curses — genau hier entscheidet sich, ob eine krumme
+    Eingabe in die Datei gelangt.
+    """
+    text = raw.strip()
+    if setting.kind == "choice":
+        low = text.casefold()
+        if low not in setting.choices:
+            return None, t("set_err_choice", opts=" / ".join(setting.choices))
+        # "auto" heißt in der Datei `null`: dann entscheidet $LANG.
+        return (None if low == "auto" else low), None
+    if setting.kind == "number":
+        # Kein `str.isdigit()`: das hält auch "²" für eine Ziffer, `int()` aber
+        # nicht — die Prüfung ginge durch und der Aufruf danach schlüge fehl.
+        if not _NUMBER_RE.match(text):
+            return None, t("set_err_number")
+        value = int(text)
+        if not setting.minimum <= value <= setting.maximum:
+            return None, t("set_err_range", lo=setting.minimum, hi=setting.maximum)
+        return value, None
+    # "names": Ordnernamen, durch Komma getrennt. `find_repos()` vergleicht sie
+    # mit einzelnen Pfadsegmenten — ein Eintrag mit "/" könnte deshalb nie
+    # zutreffen und wäre eine stille Enttäuschung.
+    names = [part.strip() for part in text.split(",")]
+    names = [name for name in names if name]
+    for name in names:
+        if "/" in name or name in (".", ".."):
+            return None, t("set_err_dirname", n=name)
+    return names, None
+
+
+def setting_display(cfg: dict, key: str) -> str:
+    """Aktueller Wert einer Einstellung als Text für Anzeige und Eingabefeld."""
+    value = cfg.get(key)
+    if key == "lang":
+        return "auto" if value is None else str(value)
+    if key == "apps":
+        parts = [f"{k} {(v or {}).get('name', '?')}" for k, v in (value or {}).items()]
+        return ", ".join(parts) if parts else t("set_value_none")
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) if value else t("set_value_none")
+    return str(value)
+
+
+def save_config(cfg: dict, path: Path) -> None:
+    """Config atomar schreiben: erst daneben, dann umbenennen.
+
+    Ein mitten im Schreiben abgebrochener Lauf darf keine halbe JSON-Datei
+    hinterlassen. `load_config()` fiele dann zwar auf die Defaults zurück, aber
+    alle eigenen Einstellungen wären weg.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    finally:
+        # Nach `os.replace` gibt es tmp nicht mehr; das hier räumt den Fehlerweg.
+        if tmp.exists():
+            tmp.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -4459,11 +4624,15 @@ def safe_addstr(win, y, x, text, attr=0):
 
 class TUI:
     def __init__(self, stdscr, root: Path, cfg: dict, cd_file: str | None,
-                 query: str = ""):
+                 query: str = "", config_path: Path | None = None):
         self.scr = stdscr
         self.root = root
         self.cfg = cfg
         self.cd_file = cd_file
+        # Ohne Pfad wird nichts gespeichert. Der Demo-Modus läuft absichtlich
+        # ohne: Seine Config ist eine Wegwerfkopie der Defaults, und ein
+        # Screenshot-Lauf darf die echte Einstellungsdatei nie anfassen.
+        self.config_path = config_path
         # `all_statuses` ist der vollständige Scan, `statuses` die davon
         # sichtbare Auswahl. Alles Zeichnende und die Auswahl arbeiten weiter
         # auf `statuses` — ohne aktiven Filter sind beide Listen inhaltsgleich.
@@ -4929,6 +5098,142 @@ class TUI:
         self.offset = 0
         self.compact_col = 0
         self.message = t("filter_cleared")
+
+    def settings_rows(self) -> list[tuple]:
+        """Zeilen der Einstellungsansicht — ohne curses, damit prüfbar.
+
+        Jede Zeile ist ein Tupel `(art, …)`; nur `edit`-Zeilen sind anwählbar.
+        """
+        rows: list[tuple] = []
+        for setting in EDITABLE_SETTINGS:
+            rows.append(("edit", setting, t(f"set_{setting.key}"),
+                         setting_display(self.cfg, setting.key),
+                         t(f"set_{setting.key}_hint")))
+        rows.append(("blank",))
+        rows.append(("head", t("set_locked_head")))
+        for key in READ_ONLY_SETTINGS:
+            rows.append(("info", key, setting_display(self.cfg, key)))
+        return rows
+
+    def _draw_settings_page(self, rows: list[tuple], selected: int,
+                            message: str) -> None:
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        where = str(self.config_path) if self.config_path else t("set_not_saved")
+        safe_addstr(self.scr, 0, 0, (" " + t("set_title", p=where)).ljust(w - 1),
+                    curses.A_BOLD)
+        # Beschriftung UND Wert bekommen je eine feste Spaltenbreite. Ohne das
+        # beginnt jeder Hinweis woanders, und die Werte lassen sich nicht mehr
+        # untereinander vergleichen — genau dafür ist die Ansicht da.
+        labels = [row[2] for row in rows if row[0] == "edit"]
+        labels += [row[1] for row in rows if row[0] == "info"]
+        values = [row[3] for row in rows if row[0] == "edit"]
+        values += [row[2] for row in rows if row[0] == "info"]
+        label_w = min(max((cell_width(terminal_text(x)) for x in labels), default=10),
+                      max(8, w // 3))
+        # Der Wert bekommt den ganzen Rest der Zeile; nur was dann noch nicht
+        # passt, wird sichtbar gekürzt. Vollständig steht er beim Ändern im
+        # vorbelegten Eingabefeld.
+        value_x = 4 + label_w
+        value_w = min(max((cell_width(terminal_text(x)) for x in values), default=10),
+                      max(10, w - value_x - 2))
+        y = 2
+        for index, row in enumerate(rows):
+            if y >= h - 3:
+                break
+            if row[0] == "blank":
+                y += 1
+                continue
+            if row[0] == "head":
+                safe_addstr(self.scr, y, 2, row[1], curses.color_pair(C_DIM))
+                y += 1
+                continue
+            is_selected = row[0] == "edit" and index == selected
+            mark = "›" if is_selected else " "
+            if row[0] == "edit":
+                _, _, label, value, hint = row
+                safe_addstr(self.scr, y, 1, f"{mark} {pad_cells(label, label_w)}",
+                            curses.A_REVERSE if is_selected else 0)
+                safe_addstr(self.scr, y, value_x,
+                            ellipsize(terminal_text(value), value_w),
+                            color_attr(C_GREEN, is_selected))
+            else:
+                _, key, value = row
+                safe_addstr(self.scr, y, 3, pad_cells(key, label_w),
+                            curses.color_pair(C_DIM))
+                safe_addstr(self.scr, y, value_x,
+                            ellipsize(terminal_text(value), value_w),
+                            curses.color_pair(C_DIM))
+            y += 1
+        # Nur die gewählte Zeile wird erklärt, dafür über die ganze Breite. Sieben
+        # Hinweise nebeneinander passten in kein Fenster und standen abgeschnitten
+        # da — ein halber Satz erklärt nichts.
+        chosen = rows[selected] if 0 <= selected < len(rows) else None
+        hint = chosen[4] if chosen and chosen[0] == "edit" else ""
+        safe_addstr(self.scr, h - 3, 3, hint, curses.color_pair(C_DIM))
+        safe_addstr(self.scr, h - 2, 1, message, curses.color_pair(C_YELLOW))
+        safe_addstr(self.scr, h - 1, 0, t("set_footer").ljust(w - 1),
+                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        self.scr.refresh()
+
+    def action_settings(self) -> None:
+        """Einstellungen ansehen und die unkritischen davon ändern (Taste `,`)."""
+        rows = self.settings_rows()
+        editable = [i for i, row in enumerate(rows) if row[0] == "edit"]
+        selected = editable[0]
+        message = "" if self.config_path else t("set_not_saved_hint")
+        while True:
+            self._draw_settings_page(rows, selected, message)
+            ch = self.scr.getch()
+            if ch in (ord("q"), ord("Q"), 27):
+                return
+            position = editable.index(selected)
+            if ch == curses.KEY_UP:
+                selected = editable[max(0, position - 1)]
+                message = ""
+                continue
+            if ch == curses.KEY_DOWN:
+                selected = editable[min(len(editable) - 1, position + 1)]
+                message = ""
+                continue
+            if ch not in (10, 13, curses.KEY_ENTER):
+                continue
+            message = self._edit_setting(rows[selected][1])
+            rows = self.settings_rows()
+
+    def _edit_setting(self, setting: Setting) -> str:
+        """Eine Einstellung abfragen, prüfen, übernehmen. Liefert die Meldung."""
+        h, _ = self.scr.getmaxyx()
+        prompt = t("set_prompt", name=t(f"set_{setting.key}"))
+        curses.curs_set(1)
+        try:
+            raw = self.prompt_line(h - 2, prompt,
+                                   setting_display(self.cfg, setting.key)
+                                   if self.cfg.get(setting.key) not in (None, [], {})
+                                   else "")
+        finally:
+            curses.curs_set(0)
+        if raw is None:                       # Esc: nichts ändern
+            return ""
+        value, error = parse_setting(setting, raw)
+        if error:
+            return error
+        self.cfg[setting.key] = value
+        if setting.key == "lang":
+            # Sofort umschalten: Eine Sprachwahl, die erst beim nächsten Start
+            # wirkt, sieht wie ein Fehler aus.
+            set_ui_lang(resolve_lang(self.cfg))
+        if not self.config_path:
+            return t("set_not_saved_hint")
+        try:
+            save_config(self.cfg, self.config_path)
+        except OSError as exc:
+            # Der Wert gilt für diese Sitzung trotzdem — das aber sagen, sonst
+            # hält man ihn für dauerhaft gespeichert.
+            return t("set_save_failed", e=str(exc)[:120])
+        if setting.key == "skip_dirs":
+            return t("set_saved_rescan")
+        return t("set_saved")
 
     def action_open_app(self, key: str):
         st = self.current()
@@ -5715,6 +6020,8 @@ class TUI:
             self.action_stash_show()
         elif key == "/":
             self.action_filter()
+        elif key == ",":
+            self.action_settings()
         elif key in self.cfg["apps"]:
             self.action_open_app(key)
 
@@ -6223,7 +6530,10 @@ def main(argv: list[str] | None = None) -> int:
 
     def _run(stdscr):
         init_colors()
-        TUI(stdscr, root, cfg, args.cd_file, args.filter).run()
+        # Der Demo-Modus bekommt KEINEN Pfad: Seine Config ist eine Wegwerfkopie
+        # der Defaults, und ein Screenshot-Lauf darf die echte Datei nie ändern.
+        TUI(stdscr, root, cfg, args.cd_file, args.filter,
+            None if args.demo else CONFIG_PATH).run()
 
     curses.wrapper(_run)
     return 0

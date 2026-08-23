@@ -6154,6 +6154,267 @@ class FilterCliTests(unittest.TestCase):
         self.assertEqual(err, "")
 
 
+class SettingsLogicTests(unittest.TestCase):
+    """Prüfregeln der Einstellungen — reine Logik, ohne curses."""
+
+    def _setting(self, key):
+        return next(s for s in gmf_module.EDITABLE_SETTINGS if s.key == key)
+
+    def test_language_accepts_its_three_options_in_any_case(self):
+        lang = self._setting("lang")
+        self.assertEqual(gmf_module.parse_setting(lang, "de"), ("de", None))
+        self.assertEqual(gmf_module.parse_setting(lang, "  EN "), ("en", None))
+        # "auto" bedeutet in der Datei `null`: dann entscheidet $LANG.
+        self.assertEqual(gmf_module.parse_setting(lang, "Auto"), (None, None))
+
+    def test_an_unknown_language_is_refused_with_the_options(self):
+        value, error = gmf_module.parse_setting(self._setting("lang"), "klingon")
+        self.assertIsNone(value)
+        self.assertIn("auto", error)
+        self.assertIn("de", error)
+
+    def test_numbers_must_be_plain_digits(self):
+        setting = self._setting("git_timeout")
+        self.assertEqual(gmf_module.parse_setting(setting, " 42 "), (42, None))
+        for bad in ("", "abc", "1.5", "-3", "1e3", "10 20"):
+            with self.subTest(bad=bad):
+                value, error = gmf_module.parse_setting(setting, bad)
+                self.assertIsNone(value)
+                self.assertTrue(error)
+
+    def test_a_superscript_digit_is_refused_although_str_isdigit_likes_it(self):
+        # "²".isdigit() ist True, int("²") wirft aber — eine Prüfung mit isdigit()
+        # ließe den Wert durch und der nächste Git-Aufruf scheiterte.
+        self.assertTrue("²".isdigit())
+        value, error = gmf_module.parse_setting(self._setting("git_timeout"), "²")
+        self.assertIsNone(value)
+        self.assertTrue(error)
+
+    def test_numbers_outside_their_range_are_refused(self):
+        setting = self._setting("git_timeout")
+        self.assertEqual(gmf_module.parse_setting(setting, "0")[0], None)
+        self.assertEqual(gmf_module.parse_setting(setting, "3600"), (3600, None))
+        self.assertIsNone(gmf_module.parse_setting(setting, "3601")[0])
+
+    def test_compact_from_may_be_zero_so_the_compact_view_is_always_on(self):
+        self.assertEqual(gmf_module.parse_setting(self._setting("compact_from"), "0"),
+                         (0, None))
+
+    def test_skip_dirs_splits_on_commas_and_drops_blanks(self):
+        setting = self._setting("skip_dirs")
+        self.assertEqual(gmf_module.parse_setting(setting, " a , ,b,, c "),
+                         (["a", "b", "c"], None))
+        self.assertEqual(gmf_module.parse_setting(setting, "   "), ([], None))
+
+    def test_skip_dirs_refuses_a_path_because_it_could_never_match(self):
+        # find_repos() vergleicht mit einzelnen Pfadsegmenten — "a/b" träfe nie
+        # zu, und der Anwender suchte den Fehler woanders.
+        setting = self._setting("skip_dirs")
+        for bad in ("a/b", ".", ".."):
+            with self.subTest(bad=bad):
+                value, error = gmf_module.parse_setting(setting, bad)
+                self.assertIsNone(value)
+                self.assertIn(bad, error)
+
+    def test_folder_names_with_spaces_stay_allowed(self):
+        self.assertEqual(
+            gmf_module.parse_setting(self._setting("skip_dirs"), "My Folder"),
+            (["My Folder"], None))
+
+    def test_display_shows_auto_empty_lists_and_apps_readably(self):
+        cfg = {"lang": None, "skip_dirs": [], "sync_remote_names": ["origin"],
+               "apps": {"E": {"name": "Editor", "path": "/x"}}}
+        self.assertEqual(gmf_module.setting_display(cfg, "lang"), "auto")
+        self.assertEqual(gmf_module.setting_display(cfg, "skip_dirs"),
+                         gmf_module.TR["set_value_none"]["en"])
+        self.assertEqual(gmf_module.setting_display(cfg, "sync_remote_names"), "origin")
+        self.assertEqual(gmf_module.setting_display(cfg, "apps"), "E Editor")
+
+    def test_remote_identity_and_apps_are_never_editable_in_the_ui(self):
+        editable = {s.key for s in gmf_module.EDITABLE_SETTINGS}
+        for key in ("sync_remote_names", "sync_remote_hosts", "apps"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, editable)
+                self.assertIn(key, gmf_module.READ_ONLY_SETTINGS)
+
+    def test_every_editable_setting_has_a_label_and_a_hint_in_both_languages(self):
+        for setting in gmf_module.EDITABLE_SETTINGS:
+            for key in (f"set_{setting.key}", f"set_{setting.key}_hint"):
+                with self.subTest(key=key):
+                    self.assertEqual(set(gmf_module.TR[key]), {"en", "de"})
+
+
+class SaveConfigTests(unittest.TestCase):
+    """Schreiben der Config: atomar und verlustfrei."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="gmf-cfg-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = self.dir / "nested" / "config.json"
+
+    def test_it_creates_the_folder_and_writes_readable_json(self):
+        gmf_module.save_config({"lang": "de", "git_timeout": 11}, self.path)
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"lang": "de", "git_timeout": 11})
+
+    def test_unknown_keys_survive_a_save(self):
+        # Eine Config kann Schlüssel enthalten, die diese Fassung nicht kennt —
+        # etwa von einer neueren Version auf einem anderen Mac.
+        cfg = {"lang": "de", "zukunft": {"a": 1}}
+        gmf_module.save_config(cfg, self.path)
+        self.assertEqual(json.loads(self.path.read_text())["zukunft"], {"a": 1})
+
+    def test_a_failed_write_leaves_neither_a_temp_file_nor_a_broken_config(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"lang": "en"}\n')
+        with mock.patch("gitmaster_flash.os.replace", side_effect=OSError("voll")):
+            with self.assertRaises(OSError):
+                gmf_module.save_config({"lang": "de"}, self.path)
+        # Die alte Datei steht unveraendert, und daneben liegt kein Rest.
+        self.assertEqual(json.loads(self.path.read_text()), {"lang": "en"})
+        self.assertEqual(list(self.path.parent.glob("*.tmp*")), [])
+
+    def test_non_ascii_stays_readable_instead_of_being_escaped(self):
+        gmf_module.save_config({"skip_dirs": ["Bücher"]}, self.path)
+        self.assertIn("Bücher", self.path.read_text())
+
+
+class TuiSettingsTests(unittest.TestCase):
+    """Die Einstellungsansicht: Navigation, Speichern, Grenzen."""
+
+    class Screen:
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 100)
+        def erase(self): pass
+        def clear(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+        def getch(self): return next(self.keys)
+        def get_wch(self): return next(self.keys)
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="gmf-setui-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = self.dir / "config.json"
+
+    def _ui(self, keys=(), config_path="real"):
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        where = self.path if config_path == "real" else None
+        return TUI(self.Screen(keys), Path("/tmp"), cfg, None, "", where)
+
+    # Das Eingabefeld ist mit dem aktuellen Wert vorbelegt — wie ein Mensch muss
+    # ein Test ihn erst loeschen, bevor er einen neuen tippt.
+    CLEAR = ["\x7f"] * 12
+
+    def _run(self, ui):
+        with mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_settings()
+
+    def test_the_rows_list_every_setting_and_mark_only_some_editable(self):
+        ui = self._ui()
+        rows = ui.settings_rows()
+        editable = [row[1].key for row in rows if row[0] == "edit"]
+        shown_only = [row[1] for row in rows if row[0] == "info"]
+        self.assertEqual(editable, [s.key for s in gmf_module.EDITABLE_SETTINGS])
+        self.assertEqual(shown_only, list(gmf_module.READ_ONLY_SETTINGS))
+
+    def test_q_closes_the_view_without_touching_the_config(self):
+        ui = self._ui([ord("q")])
+        self._run(ui)
+        self.assertFalse(self.path.exists())
+
+    def test_changing_a_number_saves_it_and_takes_effect_at_once(self):
+        # runter zu compact_from, Enter, "7", Enter, dann q
+        ui = self._ui([curses.KEY_DOWN, 10, *self.CLEAR, "7", "\n", ord("q")])
+        self._run(ui)
+        self.assertEqual(ui.cfg["compact_from"], 7)
+        self.assertEqual(json.loads(self.path.read_text())["compact_from"], 7)
+
+    def test_a_refused_value_changes_nothing_and_explains_why(self):
+        before = DEFAULT_CONFIG["compact_from"]
+        ui = self._ui([curses.KEY_DOWN, 10, *self.CLEAR, "x", "\n", ord("q")])
+        self._run(ui)
+        self.assertEqual(ui.cfg["compact_from"], before)
+        self.assertFalse(self.path.exists())
+        self.assertTrue(any(gmf_module.TR["set_err_number"]["en"] in text
+                            for _, text in ui.scr.drawn))
+
+    def test_esc_in_the_prompt_keeps_the_old_value(self):
+        before = DEFAULT_CONFIG["compact_from"]
+        ui = self._ui([curses.KEY_DOWN, 10, "\x1b", ord("q")])
+        self._run(ui)
+        self.assertEqual(ui.cfg["compact_from"], before)
+        self.assertFalse(self.path.exists())
+
+    def test_choosing_a_language_switches_the_interface_immediately(self):
+        ui = self._ui([10, *self.CLEAR, "d", "e", "\n", ord("q")])
+        with mock.patch.object(gmf_module, "UI_LANG", "en"):
+            self._run(ui)
+            self.assertEqual(gmf_module.UI_LANG, "de")
+        self.assertEqual(ui.cfg["lang"], "de")
+
+    def test_auto_language_is_stored_as_null_not_as_the_word(self):
+        ui = self._ui([10, *self.CLEAR, "a", "u", "t", "o", "\n", ord("q")])
+        with mock.patch.object(gmf_module, "UI_LANG", "en"):
+            self._run(ui)
+        self.assertIsNone(json.loads(self.path.read_text())["lang"])
+
+    def test_without_a_config_path_nothing_is_written(self):
+        # Genau der Demo-Fall: Ein Screenshot-Lauf darf die echte Datei nie anfassen.
+        ui = self._ui([curses.KEY_DOWN, 10, *self.CLEAR, "7", "\n", ord("q")],
+                      config_path=None)
+        self._run(ui)
+        self.assertEqual(ui.cfg["compact_from"], 7)     # gilt für die Sitzung
+        self.assertFalse(self.path.exists())
+        self.assertTrue(any(gmf_module.TR["set_not_saved_hint"]["en"] in text
+                            for _, text in ui.scr.drawn))
+
+    def test_a_failed_save_says_so_instead_of_claiming_success(self):
+        ui = self._ui([curses.KEY_DOWN, 10, *self.CLEAR, "7", "\n", ord("q")])
+        with mock.patch("gitmaster_flash.save_config",
+                        side_effect=OSError("Platte voll")):
+            self._run(ui)
+        self.assertEqual(ui.cfg["compact_from"], 7)     # gilt für die Sitzung
+        self.assertTrue(any("Platte voll" in text for _, text in ui.scr.drawn))
+        self.assertFalse(any(gmf_module.TR["set_saved"]["en"] == text.strip()
+                             for _, text in ui.scr.drawn))
+
+    def test_the_selection_never_leaves_the_editable_rows(self):
+        # Zwanzig Mal runter, dann zwanzig Mal hoch: die Auswahl muss innerhalb
+        # der editierbaren Zeilen bleiben, sonst zeigte ⏎ auf eine Infozeile.
+        keys = ([curses.KEY_DOWN] * 20 + [curses.KEY_UP] * 20
+                + [10, *self.CLEAR, "3", "\n", ord("q")])
+        ui = self._ui(keys)
+        self._run(ui)
+        # Die erste editierbare Zeile ist die Sprache — "3" ist dort ungültig.
+        self.assertEqual(ui.cfg["lang"], DEFAULT_CONFIG["lang"])
+        self.assertTrue(any(gmf_module.TR["set_err_choice"]["en"].split("{")[0] in text
+                            for _, text in ui.scr.drawn))
+
+    def test_the_comma_key_reaches_the_settings_view(self):
+        ui = self._ui()
+        with mock.patch.object(TUI, "action_settings") as action:
+            ui.dispatch_action(",")
+        action.assert_called_once_with()
+
+    def test_changing_skip_dirs_says_that_a_rescan_is_needed(self):
+        rows = self._ui().settings_rows()
+        index = next(i for i, row in enumerate(rows)
+                     if row[0] == "edit" and row[1].key == "skip_dirs")
+        # An die vorbelegte Liste einen weiteren Ordner anhaengen — so, wie man
+        # es in der Oberflaeche taete.
+        keys = [curses.KEY_DOWN] * index + [10] + list(",bau") + ["\n", ord("q")]
+        ui = self._ui(keys)
+        self._run(ui)
+        self.assertTrue(any(gmf_module.TR["set_saved_rescan"]["en"] in text
+                            for _, text in ui.scr.drawn))
+
+
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):
     def test_i_key_opens_repo_info_case_insensitively(self):
         class Screen:

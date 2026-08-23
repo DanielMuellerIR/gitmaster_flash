@@ -152,6 +152,7 @@ memorize. Case does not matter — `f` works like `F`.
 | ↑ / ↓ | select a repository |
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
 | / | filter the repo list by name (see below) |
+| , | settings: view them, change the harmless ones (see below) |
 | M | switch between compact and detail view |
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
@@ -478,6 +479,32 @@ starting the UI, so a pipe does the sensible thing.
 One further flag exists but is not meant to be typed: `--cd-file` names the file
 the `gmf` shell wrapper reads the selected repository path from. The wrapper
 passes it; calling it by hand has no use.
+
+## Settings in the interface (`,`)
+
+`,` opens a list of the settings, `↑`/`↓` picks one, `⏎` changes it. The line
+above the footer explains whatever you are standing on. A changed value takes
+effect at once and is written back to `config.json` — atomically, via a
+neighbouring temporary file, so an interrupted write cannot leave you with half
+a config and none of your settings.
+
+Editable here: language, when the compact view starts, the four timeouts, and
+the folders the scan skips. Every input is checked before it is stored — a
+timeout of `abc` never reaches the file, and a skipped folder must be a *name*,
+because the scan compares it against single path segments and an entry like
+`a/b` could never match.
+
+Two groups stay in the file on purpose, and the view shows them read-only with
+that note:
+
+- `sync_remote_names` / `sync_remote_hosts` decide which remote counts as your
+  private sync remote — and therefore where `P` pushes. Changing a push target
+  does not belong behind one keystroke in a list you are scrolling through.
+- `apps` holds program paths that gmf starts with `open -a`. A path typed into a
+  one-line field is not a path anyone has verified.
+
+Showing them read-only beats hiding them: a setting you cannot find is worse
+than one you have to edit in a file.
 
 ## Configuration
 

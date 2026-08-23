@@ -164,6 +164,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | ↑ / ↓ | Repo auswählen |
 | → / ← | auf-/zuklappen (Dateien mit M/D/U/C, Stashes) |
 | / | Repo-Liste nach Namen filtern (siehe unten) |
+| , | Einstellungen ansehen und die unkritischen ändern (siehe unten) |
 | M | zwischen Kompakt- und Detailansicht umschalten |
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
@@ -502,6 +503,34 @@ Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
 Einen weiteren Schalter gibt es, er ist aber nicht zum Tippen gedacht:
 `--cd-file` nennt die Datei, aus der der `gmf`-Shell-Wrapper den ausgewählten
 Repo-Pfad liest. Der Wrapper übergibt sie; von Hand aufgerufen bringt sie nichts.
+
+## Einstellungen in der Oberfläche (`,`)
+
+`,` öffnet eine Liste der Einstellungen, `↑`/`↓` wählt eine aus, `⏎` ändert sie.
+Die Zeile über dem Footer erklärt jeweils die Zeile, auf der man steht. Ein
+geänderter Wert gilt sofort und wird in die `config.json` zurückgeschrieben —
+atomar über eine Nachbardatei, damit ein abgebrochener Schreibvorgang nicht eine
+halbe Datei und keine einzige eigene Einstellung hinterlässt.
+
+Hier änderbar: Sprache, ab wann die Kompaktansicht startet, die vier Timeouts
+und die Ordner, die der Scan auslässt. Jede Eingabe wird vor dem Speichern
+geprüft — ein Timeout `abc` erreicht die Datei nie, und ein übersprungener Ordner
+muss ein *Name* sein, weil der Scan ihn mit einzelnen Pfadsegmenten vergleicht
+und ein Eintrag wie `a/b` deshalb nie zutreffen könnte.
+
+Zwei Gruppen bleiben bewusst der Datei vorbehalten; die Ansicht zeigt sie
+schreibgeschützt mit genau diesem Hinweis:
+
+- `sync_remote_names` / `sync_remote_hosts` entscheiden, welches Remote als
+  privater Sync-Remote gilt — und damit, wohin `P` pusht. Eine Zieländerung
+  gehört nicht hinter einen Tastendruck in einer Liste, durch die man gerade
+  scrollt.
+- `apps` enthält Programmpfade, die gmf mit `open -a` startet. Ein Pfad, den man
+  in eine einzeilige Eingabe tippt, ist kein Pfad, den jemand geprüft hat.
+
+Sie schreibgeschützt zu zeigen ist besser als sie zu verstecken: Eine
+Einstellung, die man nicht findet, ist schlimmer als eine, die man in der Datei
+ändern muss.
 
 ## Konfiguration
 
