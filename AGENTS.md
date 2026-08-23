@@ -47,7 +47,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   als Bild.
   Der Bildnachbau (`replay()`) ist bewusst von der pty-Mechanik getrennt und ohne
   Kindprozess getestet — ein fehlendes Steuerzeichen verschiebt sonst still ganze
-  Zeilen, und das Bild sieht trotzdem plausibel aus.
+  Zeilen, und das Bild sieht trotzdem plausibel aus. Genau das trat am 2026-08-23
+  ein: ncurses schiebt Zeilen lieber, als sie neu zu malen (Scrollbereich
+  `ESC[t;br` plus `ESC[nS`), der Nachbau kannte beides nicht und behielt eine
+  alte Repo-Liste im Bild. `r`, `S`, `T`, `L` und `M` sind seither nachgebildet.
+  Wer hier eine Sequenz ergänzt, prüft mit `--check`, dass die vorhandenen Bilder
+  byteweise gleich bleiben — ändern sie sich, war die Ergänzung falsch oder das
+  alte Bild war es.
 - Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
   Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
   fremde Python-Dienste und Automationen unangetastet lassen.

@@ -340,6 +340,30 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
     cy = cx = 0
     cur_fg, cur_bold, cur_rev = FG, False, False
     cur_bg = None
+    # Scrollbereich (DECSTBM). ncurses schiebt Zeilen lieber, als sie neu zu
+    # malen: Es setzt einen Bereich, scrollt ihn und stellt ihn zurueck. Wer das
+    # nicht nachbildet, behaelt die alten Zeilen im Bild — und weil ringsum alles
+    # stimmt, sieht das Ergebnis trotzdem plausibel aus.
+    scroll_top, scroll_bottom = 0, rows - 1
+
+    def scroll(amount: int) -> None:
+        """Den Scrollbereich um `amount` Zeilen verschieben (negativ = nach unten)."""
+        top, bottom = scroll_top, min(scroll_bottom, rows - 1)
+        if top > bottom or not amount:
+            return
+        block = grid[top:bottom + 1]
+        blank = abs(amount)
+        if blank >= len(block):
+            moved = []
+        elif amount > 0:                            # nach oben
+            moved = block[amount:]
+        else:                                       # nach unten
+            moved = block[:amount]
+        fresh = [[Cell() for _ in range(cols)] for _ in range(
+            min(blank, len(block)))]
+        block = (moved + fresh) if amount > 0 else (fresh + moved)
+        grid[top:bottom + 1] = block
+
     i = 0
     while i < len(text):
         m = CSI.match(text, i)
@@ -410,6 +434,24 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                         grid[y] = [Cell() for _ in range(cols)]
                     for x in range(0, cx + 1):
                         grid[cy][x] = Cell()
+            elif cmd == "r":                        # Scrollbereich setzen (DECSTBM)
+                scroll_top = (nums[0] - 1) if nums else 0
+                scroll_bottom = (nums[1] - 1) if len(nums) > 1 else rows - 1
+                scroll_top = max(0, min(rows - 1, scroll_top))
+                scroll_bottom = max(scroll_top, min(rows - 1, scroll_bottom))
+                cy = cx = 0                         # DECSTBM setzt den Cursor heim
+            elif cmd == "S":                        # Bereich nach oben scrollen
+                scroll(first)
+            elif cmd == "T":                        # Bereich nach unten scrollen
+                scroll(-first)
+            elif cmd in ("L", "M"):                 # Zeilen einfuegen / loeschen
+                # Beides wirkt wie ein Scrollen des Bereichs UNTERHALB des
+                # Cursors; ausserhalb des Scrollbereichs tut es nichts.
+                if scroll_top <= cy <= scroll_bottom:
+                    keep_top = scroll_top
+                    scroll_top = cy
+                    scroll(-first if cmd == "L" else first)
+                    scroll_top = keep_top
             elif cmd == "K":                        # erase line
                 mode = nums[0] if nums else 0
                 rng = (range(cx, cols) if mode == 0 else

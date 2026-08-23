@@ -7315,6 +7315,73 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertEqual(module._cell_width("✔"), 1)
         self.assertEqual(module._cell_width("⚑"), 1)
 
+    def test_screen_replay_scrolls_the_region_curses_asks_it_to(self):
+        """ncurses schiebt Zeilen, statt sie neu zu malen — das muss nachgebildet sein.
+
+        Beobachtet am 2026-08-23 beim Filter ohne Treffer: ncurses setzte den
+        Bereich (ESC[2;30r), sprang ans Ende und scrollte ihn (ESC[6S). Der
+        Nachbau kannte weder das eine noch das andere und behielt die alte
+        Repo-Liste im Bild — ringsum stimmte alles, das Ergebnis sah deshalb
+        plausibel aus und war falsch.
+        """
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        # Bereich Zeile 2-4, ans Ende springen, um zwei Zeilen hochschieben.
+        grid = module.replay(painted + "\x1b[2;4r\x1b[4;1H\x1b[2S",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        # Ausserhalb des Bereichs bleibt alles stehen …
+        self.assertEqual(lines[0], "zeile1")
+        self.assertEqual(lines[4], "zeile5")
+        # … innerhalb rueckt zeile4 nach oben, der Rest wird leer.
+        self.assertEqual(lines[1], "zeile4")
+        self.assertEqual(lines[2], "")
+        self.assertEqual(lines[3], "")
+
+    def test_screen_replay_scrolls_the_region_down_as_well(self):
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        grid = module.replay(painted + "\x1b[2;4r\x1b[2;1H\x1b[1T",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines[0], "zeile1")
+        self.assertEqual(lines[1], "")
+        self.assertEqual(lines[2], "zeile2")
+        self.assertEqual(lines[3], "zeile3")
+        self.assertEqual(lines[4], "zeile5")
+
+    def test_screen_replay_scrolling_further_than_the_region_clears_it(self):
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        grid = module.replay(painted + "\x1b[2;4r\x1b[4;1H\x1b[9S",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines[1:4], ["", "", ""])
+        self.assertEqual([lines[0], lines[4]], ["zeile1", "zeile5"])
+
+    def test_screen_replay_inserts_and_deletes_lines_inside_the_region(self):
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        # ESC[M loescht die Cursorzeile, alles darunter rueckt hoch.
+        deleted = module.replay(painted + "\x1b[2;1H\x1b[1M", cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in deleted]
+        self.assertEqual(lines, ["zeile1", "zeile3", "zeile4", "zeile5", ""])
+        # ESC[L schiebt sie nach unten und laesst eine leere Zeile zurueck.
+        inserted = module.replay(painted + "\x1b[2;1H\x1b[1L", cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in inserted]
+        self.assertEqual(lines, ["zeile1", "", "zeile2", "zeile3", "zeile4"])
+
+    def test_setting_the_region_puts_the_cursor_home_like_a_terminal(self):
+        module, _ = self._make_screens_module()
+        grid = module.replay("\x1b[H\x1b[2J\x1b[5;1Hunten\x1b[1;5rX",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines[0], "X")
+
     def test_screen_replay_normalizes_the_random_transfer_alias(self):
         module, _ = self._make_screens_module()
         grid = module.replay(
