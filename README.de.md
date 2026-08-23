@@ -170,7 +170,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
 | A | Änderungen Datei für Datei in einem rein lesenden Diff-Betrachter prüfen |
-| C | Commit-Hilfe (siehe unten) |
+| C | Commit-Hilfe mit Auswahl-Vorschlägen (siehe unten) |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | G | geschützter GitHub-Push: Vorschau der ausgehenden Commits/Dateien, Bestätigung mit J ⏎ |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
@@ -351,22 +351,43 @@ Lokale Branches:
 ## Commit-Hilfe (`C`)
 
 ```
- Commit-Hilfe · api-gateway · prüfen, dann ⏎
+ Commit-Hilfe · api-gateway — 4/4 gewählt, prüfen, dann ⏎
  M  README.md                                                  ✔ committen
  U  notes.txt                                                  ✔ committen
  U  server.py                                                  ✔ committen
  U  build/out.o                                                ✔ committen
 
- ␣ committen an/aus · ⏎ weiter · Esc abbrechen
+ ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter · Esc abbrechen
 ```
 
 1. Alle geänderten und neuen Dateien werden gelistet. `␣` wählt sie an oder ab;
    die Hilfe ändert vor dem Commit weder `.gitignore` noch eine andere Datei im
-   Arbeitsbaum.
-2. Vor der Eingabe der Commit-Message zeigt das Tool die letzten Messages des
+   Arbeitsbaum. `A` wählt alle, `N` keine.
+2. `G` bietet fertige Teilmengen an — denn bei dreißig geänderten Dateien will
+   man meist mehrere zusammenhängende Commits statt eines großen. Drei Sichten:
+   nach Art der Änderung (geändert / neu / gelöscht), nach oberstem Ordner und
+   nach Dateiendung. Ein Vorschlag, der *alle* Dateien enthielte, fällt weg, und
+   zwei Sichten auf dieselben Dateien erscheinen nur einmal — so bleibt die Liste
+   kurz:
+
+   ```
+    Vorschläge — einer davon ersetzt die aktuelle Auswahl
+
+      geänderte Dateien (4)
+      Ordner src/ (3)
+      Ordner docs/ (2)
+   ```
+
+   Ein gewählter Vorschlag *ersetzt* die Auswahl, statt sie zu ergänzen — nach
+   zwei Vorschlägen wüsste sonst niemand mehr, was angehakt ist. Eine
+   Umbenennung wird nie getrennt: Quelle und Ziel müssen in denselben Commit,
+   deshalb zieht ein Vorschlag, der eine Hälfte trifft, die andere mit und sagt
+   das mit `+ Rename-Partner`. Vorschläge setzen nur Haken; committet wird erst
+   nach der Bestätigung im nächsten Schritt.
+3. Vor der Eingabe der Commit-Message zeigt das Tool die letzten Messages des
    Repos als Stil-Vorlage — so viele, wie über der Eingabezeile Platz haben; die
    Eingabezeile bleibt immer sichtbar.
-3. Merge-Konflikte sperren die Hilfe vollständig. Der Commit entsteht über einen temporären Index,
+4. Merge-Konflikte sperren die Hilfe vollständig. Der Commit entsteht über einen temporären Index,
    der ausschließlich die freigegebenen Pfade enthält; ein bestehender Benutzer-Index
    samt bewusst gestagter, aber abgewählter Arbeit bleibt erhalten. Für die
    committeten Pfade übernimmt der echte Index den neuen Commit — genau wie bei

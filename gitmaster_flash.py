@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -338,12 +338,35 @@ TR = {
     "pager_footer_confirm": {"en": " ↑/↓ scroll · Esc cancel · line {a}-{b} / {n}",
                              "de": " ↑/↓ scrollen · Esc abbrechen · Zeile {a}-{b} / {n}"},
     # Commit-Hilfe
-    "commit_title": {"en": "Commit helper · {rel} — review, then ⏎",
-                     "de": "Commit-Hilfe · {rel} — Vorschlag prüfen, dann ⏎"},
+    "commit_title": {
+        "en": "Commit helper · {rel} — {n}/{total} selected, review then ⏎",
+        "de": "Commit-Hilfe · {rel} — {n}/{total} gewählt, prüfen, dann ⏎"},
     "do_commit": {"en": "✔ commit", "de": "✔ committen"},
     "do_skip": {"en": "✘ skip", "de": "✘ auslassen"},
-    "commit_footer": {"en": " ␣ commit on/off · ⏎ next · Esc cancel",
-                      "de": " ␣ committen an/aus · ⏎ weiter · Esc abbrechen"},
+    "commit_footer": {
+        "en": " ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel",
+        "de": (" ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter ·"
+               " Esc abbrechen")},
+    # Vorschlaege fuer die Dateiauswahl (Taste G in der Commit-Hilfe)
+    "group_title": {
+        "en": "Suggestions — pick one, it replaces the current selection",
+        "de": "Vorschläge — einer davon ersetzt die aktuelle Auswahl"},
+    "group_footer": {"en": " ↑/↓ select · ⏎ take it · Q/Esc back",
+                     "de": " ↑/↓ wählen · ⏎ übernehmen · Q/Esc zurück"},
+    "group_none": {
+        "en": "No sensible subset here — the changes do not fall apart.",
+        "de": "Keine sinnvolle Teilmenge — die Änderungen zerfallen nicht."},
+    "group_code": {"en": "{what} ({n})", "de": "{what} ({n})"},
+    "group_code_M": {"en": "changed files", "de": "geänderte Dateien"},
+    "group_code_U": {"en": "new files", "de": "neue Dateien"},
+    "group_code_D": {"en": "deleted files", "de": "gelöschte Dateien"},
+    "group_code_C": {"en": "conflicted files", "de": "Dateien mit Konflikt"},
+    # Platzhalter heisst NICHT "key": t(key, **kw) hat selbst einen Parameter
+    # dieses Namens, und der Aufruf schluege mit "multiple values" fehl.
+    "group_dir": {"en": "folder {name}/ ({n})", "de": "Ordner {name}/ ({n})"},
+    "group_ext": {"en": "type {name} ({n})", "de": "Typ {name} ({n})"},
+    "group_with_rename": {"en": "+ rename partner", "de": "+ Rename-Partner"},
+    "group_applied": {"en": "Selection is now: {g}", "de": "Auswahl ist jetzt: {g}"},
     "commit_cancelled": {"en": "Commit helper cancelled.", "de": "Commit-Hilfe abgebrochen."},
     "nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "commit_in": {"en": "Commit in {rel}", "de": "Commit in {rel}"},
@@ -1395,6 +1418,104 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]
             d += 1
             files.append(ChangedFile("D", source, xy, rename_group=group))
     return m, d, u, c, files
+
+
+# ---------------------------------------------------------------------------
+# Vorschlaege fuer die Dateiauswahl der Commit-Hilfe
+# ---------------------------------------------------------------------------
+# Die Hilfe startet mit allen Dateien angehakt. Das ist bei drei Dateien richtig
+# und bei dreissig selten: Dann will man meist mehrere zusammenhaengende Commits
+# statt eines grossen. Diese Vorschlaege sind genau das — Teilmengen, die
+# erfahrungsgemaess zusammengehoeren. Sie waehlen nur aus; committet wird immer
+# erst nach der ausdruecklichen Bestaetigung im naechsten Schritt.
+#
+# Drei Sichten, in dieser Reihenfolge:
+#   nach Art der Aenderung (geaendert / neu / geloescht)
+#   nach oberstem Ordner    (src, docs, tests …)
+#   nach Dateiendung        (.py, .md …)
+# Vorschlaege, die ohnehin ALLE Dateien enthalten, fallen weg — dafuer gibt es
+# schon "alle". Doppelte Teilmengen erscheinen nur einmal.
+
+COMMIT_GROUP_MIN = 2            # kleiner ist keine Gruppe, sondern eine Datei
+
+
+class CommitGroup(NamedTuple):
+    """Ein Vorschlag fuer die Dateiauswahl.
+
+    `kind` ist "code", "dir" oder "ext", `key` der jeweilige Wert (Statuscode,
+    Ordnername, Endung). `completed` sagt, dass ein Rename-Partner mit
+    hineingezogen wurde — dann beschreibt `kind`/`key` die Menge nicht mehr
+    vollstaendig, und die Beschriftung muss das sagen.
+    """
+    kind: str
+    key: str
+    paths: tuple
+    completed: bool = False
+
+
+def _expand_rename_groups(paths: set, files: list) -> set:
+    """Rename-Paare vervollstaendigen.
+
+    Quelle und Ziel eines Renames gehoeren zwingend in denselben Commit. Ein
+    Vorschlag, der nur eine Haelfte trifft (etwa weil sich die Endung geaendert
+    hat), muss die andere mitnehmen — sonst schluege der Commit fehl oder
+    hinterliesse eine halbe Umbenennung.
+    """
+    groups = {f.rename_group for f in files
+              if f.rename_group and f.path in paths}
+    if not groups:
+        return paths
+    return paths | {f.path for f in files if f.rename_group in groups}
+
+
+def commit_groups(files: list) -> list[CommitGroup]:
+    """Sinnvolle Teilmengen der geaenderten Dateien vorschlagen.
+
+    Die Beschriftung baut die Oberflaeche aus dem Ergebnis, damit dieser Teil
+    ohne Sprache und ohne curses prüfbar bleibt.
+    """
+    if len(files) < COMMIT_GROUP_MIN:
+        return []
+    everything = {f.path for f in files}
+    buckets: list[tuple[str, str, set]] = []
+
+    codes: dict = {}
+    for f in files:
+        codes.setdefault(f.code, set()).add(f.path)
+    if len(codes) > 1:
+        buckets += [("code", code, paths) for code, paths in codes.items()]
+
+    folders: dict = {}
+    for f in files:
+        head, sep, _ = f.path.partition("/")
+        if sep:                      # Dateien direkt in der Wurzel haben keinen
+            folders.setdefault(head, set()).add(f.path)
+    buckets += [("dir", name, paths) for name, paths in folders.items()]
+
+    endings: dict = {}
+    for f in files:
+        ext = os.path.splitext(f.path.rsplit("/", 1)[-1])[1].lower()
+        if ext:                      # ".gitignore" ist ein Name, keine Endung
+            endings.setdefault(ext, set()).add(f.path)
+    if len(endings) > 1:
+        buckets += [("ext", ext, paths) for ext, paths in endings.items()]
+
+    out: list[CommitGroup] = []
+    seen: list[frozenset] = []
+    for kind, key, paths in buckets:
+        complete = _expand_rename_groups(paths, files)
+        if len(complete) < COMMIT_GROUP_MIN or complete == everything:
+            continue
+        if frozenset(complete) in seen:
+            continue
+        seen.append(frozenset(complete))
+        out.append(CommitGroup(kind, key, tuple(sorted(complete)),
+                               complete != paths))
+    # Grosse Vorschlaege zuerst — sie sparen die meisten Tastendruecke. Bei
+    # gleicher Groesse entscheidet der Name, damit die Liste stabil bleibt.
+    order = {"code": 0, "dir": 1, "ext": 2}
+    out.sort(key=lambda g: (order[g.kind], -len(g.paths), g.key))
+    return out
 
 
 class CommitSafetyError(RuntimeError):
@@ -6027,11 +6148,16 @@ class TUI:
         ]
         sel = 0
         off = 0
+        # Eigene Meldungszeile: Die Hilfe zeichnet ihr eigenes Bild, die Zeile
+        # der Repo-Liste ist hier nicht sichtbar. Ohne sie bliebe ein "keine
+        # sinnvolle Teilmenge" unbemerkt und G sähe kaputt aus.
+        note = ""
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0, (" " + t("commit_title", rel=st.rel)).ljust(w - 1),
-                        curses.A_BOLD)
+            chosen = sum(1 for it in items if it["include"])
+            head = t("commit_title", rel=st.rel, n=chosen, total=len(items))
+            safe_addstr(self.scr, 0, 0, (" " + head).ljust(w - 1), curses.A_BOLD)
             body_h = h - 4
             if sel < off:
                 off = sel
@@ -6047,10 +6173,12 @@ class TUI:
                 safe_addstr(self.scr, y, 1,
                             f"{it['code']}  {pad_cells(it['path'], path_width)} {label}",
                             color_attr(pair, i == sel))
+            safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
             safe_addstr(self.scr, h - 2, 0, t("commit_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
             ch = self.scr.getch()
+            note = ""
             if ch == curses.KEY_UP:
                 sel = max(0, sel - 1)
             elif ch == curses.KEY_DOWN:
@@ -6063,12 +6191,82 @@ class TUI:
                            and it["rename_group"] == selected["rename_group"]]
                 for it in related or [selected]:
                     it["include"] = include
+            elif ch in (ord("a"), ord("A")):
+                for it in items:
+                    it["include"] = True
+            elif ch in (ord("n"), ord("N")):
+                for it in items:
+                    it["include"] = False
+            elif ch in (ord("g"), ord("G")):
+                note = self._apply_commit_group(st, items)
             elif ch in (10, 13, curses.KEY_ENTER):
                 if self._commit_step2(st, items):
                     return
             elif ch == 27:
                 self.message = t("commit_cancelled")
                 return
+
+    @staticmethod
+    def commit_group_label(group: CommitGroup) -> str:
+        """Beschriftung eines Vorschlags — hier, weil sie uebersetzt wird."""
+        count = len(group.paths)
+        if group.kind == "code":
+            text = t("group_code", what=t(f"group_code_{group.key}"), n=count)
+        else:
+            text = t(f"group_{group.kind}", name=group.key, n=count)
+        # Ohne diesen Zusatz hiesse eine Gruppe "geloeschte Dateien (2)", obwohl
+        # der mitgezogene Rename-Partner eine neue Datei ist.
+        return text + (" " + t("group_with_rename") if group.completed else "")
+
+    def _apply_commit_group(self, st: RepoStatus, items: list) -> str:
+        """Vorschlaege anzeigen und den gewaehlten zur Auswahl machen.
+
+        Liefert die Meldung fuer die Hilfe zurueck, statt `self.message` zu
+        setzen: Das Bild der Repo-Liste ist hier nicht sichtbar.
+        """
+        groups = commit_groups(st.files)
+        if not groups:
+            return t("group_none")
+        picked = self._choose_commit_group(groups)
+        if picked is None:
+            return ""
+        # Genau diese Dateien — der Vorschlag ERSETZT die Auswahl, er ergaenzt
+        # sie nicht. Sonst wuesste nach zwei Vorschlaegen niemand mehr, was
+        # angehakt ist.
+        chosen = set(picked.paths)
+        for it in items:
+            it["include"] = it["path"] in chosen
+        return t("group_applied", g=self.commit_group_label(picked))
+
+    def _choose_commit_group(self, groups: list) -> tuple | None:
+        """Kleine Auswahlliste der Vorschlaege; Esc/Q schliesst sie."""
+        sel = 0
+        off = 0
+        while True:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            safe_addstr(self.scr, 0, 0, (" " + t("group_title")).ljust(w - 1),
+                        curses.A_BOLD)
+            body_h = max(1, h - 4)
+            off = min(off, sel)
+            if sel >= off + body_h:
+                off = sel - body_h + 1
+            for y, i in enumerate(range(off, min(len(groups), off + body_h)),
+                                  start=2):
+                safe_addstr(self.scr, y, 2, self.commit_group_label(groups[i]),
+                            curses.A_REVERSE if i == sel else 0)
+            safe_addstr(self.scr, h - 2, 0, t("group_footer").ljust(w - 1),
+                        curses.color_pair(C_DIM) | curses.A_REVERSE)
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch == curses.KEY_UP:
+                sel = max(0, sel - 1)
+            elif ch == curses.KEY_DOWN:
+                sel = min(len(groups) - 1, sel + 1)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                return groups[sel]
+            elif ch in (27, ord("q"), ord("Q")):
+                return None
 
     def _commit_step2(self, st: RepoStatus, items: list) -> bool:
         """Schritt 2: letzte Commit-Messages zeigen, Message erfragen, ausführen."""

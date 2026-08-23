@@ -259,6 +259,16 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   verstecken.
 - `--diff` filtert BEIDE Rechner mit demselben Suchtext (`filter_repo_dicts`).
   Nur eine Seite zu filtern erzeugte „nur hier"-Unterschiede, die es nicht gibt.
+- Die Vorschläge der Commit-Hilfe (`G`) wählen nur aus; committet wird weiterhin
+  erst nach der Bestätigung im zweiten Schritt. `commit_groups()` darf ein
+  Rename-Paar nie trennen (`_expand_rename_groups`) — ein Commit mit nur einer
+  Hälfte hinterließe eine halbe Umbenennung. Zieht ein Vorschlag dadurch etwas
+  hinein, das nicht zu seinem Namen passt, sagt die Beschriftung das über
+  `CommitGroup.completed`; sonst hieße eine Gruppe „gelöschte Dateien (2)“,
+  obwohl eine der beiden neu ist.
+- Die Commit-Hilfe zeichnet ihr eigenes Bild und hat deshalb eine eigene
+  Meldungszeile. `self.message` gehört der Repo-Liste und ist dort unsichtbar —
+  Rückmeldungen aus der Hilfe werden zurückgegeben, nicht gesetzt.
 - Der Hintergrund-Fetch (`R`) ist der einzige Ort, an dem Git-Aufrufe außerhalb
   des Hauptthreads laufen. Drei Regeln hängen daran:
   1. `_run_process_group()` trägt jeden Prozess in `_LIVE_PROCESSES` ein und
@@ -305,5 +315,4 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
-- [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).

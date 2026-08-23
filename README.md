@@ -158,7 +158,7 @@ memorize. Case does not matter — `f` works like `F`.
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
 | E | open the repository in a configured app (add your own in `config.json`) |
 | A | inspect changes file by file in a read-only diff viewer |
-| C | commit helper (see below) |
+| C | commit helper with selection suggestions (see below) |
 | P | safely push the current branch to the private sync remote |
 | G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
@@ -331,21 +331,42 @@ Local branches:
 ## Commit helper (`C`)
 
 ```
- Commit helper · api-gateway — review, then ⏎
+ Commit helper · api-gateway — 4/4 selected, review then ⏎
  M  README.md                                                    ✔ commit
  U  notes.txt                                                    ✔ commit
  U  server.py                                                    ✔ commit
  U  build/out.o                                                  ✔ commit
 
- ␣ commit on/off · ⏎ next · Esc cancel
+ ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel
 ```
 
 1. Every changed and new file is listed. `␣` selects or excludes it; the helper
    never edits `.gitignore` or any other working-tree file before the commit.
-2. Before you type the commit message, the repository's recent messages are shown
+   `A` takes all of them, `N` none.
+2. `G` offers ready-made subsets — because with thirty changed files you usually
+   want several coherent commits rather than one large one. Three views:
+   by kind of change (changed / new / deleted), by top-level folder, and by file
+   extension. A suggestion that would cover *everything* is left out, and two
+   views hitting the same files appear only once, so the list stays short:
+
+   ```
+    Suggestions — pick one, it replaces the current selection
+
+      changed files (4)
+      folder src/ (3)
+      folder docs/ (2)
+   ```
+
+   Picking one *replaces* the selection instead of adding to it — after two
+   suggestions nobody could otherwise say what is still ticked. A rename is never
+   split: source and target must go into the same commit, so a suggestion that
+   catches one half pulls in the other and says so with `+ rename partner`.
+   Suggestions only tick boxes; the commit still needs the confirmation in the
+   next step.
+3. Before you type the commit message, the repository's recent messages are shown
    as a style reference — as many as fit above the input line, which always stays
    visible.
-3. Merge conflicts block the helper completely. The commit is built in a temporary index containing
+4. Merge conflicts block the helper completely. The commit is built in a temporary index containing
    only the approved paths; an existing user index, including deliberately staged
    but excluded work, stays intact. For the committed paths the real index adopts
    the new commit, exactly as `git commit -- <path>` does — otherwise `git status`

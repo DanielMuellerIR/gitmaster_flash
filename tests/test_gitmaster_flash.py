@@ -6817,6 +6817,204 @@ class TuiBackgroundFetchTests(unittest.TestCase):
                          [gmf_module.BACKGROUND_POLL_MS, -1])
 
 
+class CommitGroupTests(unittest.TestCase):
+    """Vorschlaege fuer die Dateiauswahl — reine Logik."""
+
+    @staticmethod
+    def _f(code, path, group=""):
+        return ChangedFile(code, path, " M", group)
+
+    def _labels(self, files):
+        return [TUI.commit_group_label(g) for g in gmf_module.commit_groups(files)]
+
+    def test_a_single_file_gets_no_suggestion(self):
+        self.assertEqual(gmf_module.commit_groups([self._f("M", "a.py")]), [])
+
+    def test_it_groups_by_change_kind_folder_and_extension(self):
+        files = [self._f("M", "src/app.py"), self._f("M", "src/util.py"),
+                 self._f("U", "docs/neu.md"), self._f("M", "docs/guide.md"),
+                 self._f("M", "Makefile")]
+        found = {(g.kind, g.key): set(g.paths)
+                 for g in gmf_module.commit_groups(files)}
+        self.assertEqual(found[("dir", "src")], {"src/app.py", "src/util.py"})
+        self.assertEqual(found[("dir", "docs")], {"docs/neu.md", "docs/guide.md"})
+        # Nach Art der Aenderung: die vier geaenderten ohne die eine neue Datei.
+        self.assertEqual(found[("code", "M")],
+                         {"src/app.py", "src/util.py", "docs/guide.md", "Makefile"})
+        # Die einzelne neue Datei ergibt keine Gruppe, und die Endung .py trifft
+        # dieselben Dateien wie der Ordner src/ — beides faellt weg.
+        self.assertNotIn(("code", "U"), found)
+        self.assertNotIn(("ext", ".py"), found)
+
+    def test_a_suggestion_covering_everything_is_dropped(self):
+        # Alle Dateien sind geaendert und liegen in src/ — beides waere nur ein
+        # umstaendliches "alle", das es schon gibt.
+        files = [self._f("M", "src/a.py"), self._f("M", "src/b.py")]
+        self.assertEqual(gmf_module.commit_groups(files), [])
+
+    def test_identical_subsets_appear_only_once(self):
+        # "Ordner docs/" und "Typ .md" treffen dieselben zwei Dateien.
+        files = [self._f("M", "docs/a.md"), self._f("M", "docs/b.md"),
+                 self._f("M", "src/c.py")]
+        groups = gmf_module.commit_groups(files)
+        self.assertEqual([set(g.paths) for g in groups].count(
+            {"docs/a.md", "docs/b.md"}), 1)
+
+    def test_a_group_of_one_file_is_no_group(self):
+        files = [self._f("M", "src/a.py"), self._f("M", "src/b.py"),
+                 self._f("M", "einzeln/c.py")]
+        self.assertNotIn("einzeln", [g.key for g in gmf_module.commit_groups(files)])
+
+    def test_files_in_the_root_produce_no_folder_group(self):
+        files = [self._f("M", "a.py"), self._f("M", "b.py"), self._f("U", "src/c.py")]
+        self.assertEqual([g.key for g in gmf_module.commit_groups(files)
+                          if g.kind == "dir"], [])
+
+    def test_a_dotfile_is_a_name_not_an_extension(self):
+        files = [self._f("M", ".gitignore"), self._f("M", ".npmrc"),
+                 self._f("M", "src/a.py"), self._f("M", "src/b.py")]
+        self.assertEqual([g.key for g in gmf_module.commit_groups(files)
+                          if g.kind == "ext"], [])
+
+    def test_extensions_are_matched_regardless_of_case(self):
+        files = [self._f("M", "a/One.PY"), self._f("M", "b/two.py"),
+                 self._f("M", "c/three.md")]
+        by_ext = {g.key: set(g.paths) for g in gmf_module.commit_groups(files)
+                  if g.kind == "ext"}
+        self.assertEqual(by_ext.get(".py"), {"a/One.PY", "b/two.py"})
+
+    def test_a_rename_pair_is_never_split_across_a_suggestion(self):
+        # Quelle und Ziel muessen zusammen committet werden; ein Vorschlag, der
+        # nur eine Haelfte traefe, hinterliesse eine halbe Umbenennung.
+        files = [self._f("D", "src/alt.py", "r1"), self._f("U", "docs/neu.md", "r1"),
+                 self._f("M", "src/x.py"), self._f("M", "src/y.py")]
+        for group in gmf_module.commit_groups(files):
+            with self.subTest(group=group.key):
+                inside = {"src/alt.py", "docs/neu.md"} & set(group.paths)
+                self.assertIn(len(inside), (0, 2))
+
+    def test_a_completed_group_says_so_in_its_label(self):
+        files = [self._f("D", "src/alt.py", "r1"), self._f("U", "docs/neu.md", "r1"),
+                 self._f("M", "src/x.py"), self._f("M", "src/y.py")]
+        deleted = next(g for g in gmf_module.commit_groups(files)
+                       if g.kind == "code" and g.key == "D")
+        self.assertTrue(deleted.completed)
+        # Ohne den Zusatz hiesse die Gruppe "deleted files (2)", obwohl eine der
+        # beiden Dateien neu ist.
+        self.assertIn(gmf_module.TR["group_with_rename"]["en"],
+                      TUI.commit_group_label(deleted))
+
+    def test_bigger_suggestions_come_first_and_the_order_is_stable(self):
+        files = [self._f("M", "src/a.py"), self._f("M", "src/b.py"),
+                 self._f("M", "src/c.py"), self._f("U", "docs/d.md"),
+                 self._f("U", "docs/e.md")]
+        groups = gmf_module.commit_groups(files)
+        sizes = [len(g.paths) for g in groups if g.kind == "dir"]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        self.assertEqual([g.key for g in gmf_module.commit_groups(files)],
+                         [g.key for g in groups])
+
+    def test_every_label_exists_in_both_languages(self):
+        for code in ("M", "U", "D", "C"):
+            with self.subTest(code=code):
+                self.assertEqual(set(gmf_module.TR[f"group_code_{code}"]),
+                                 {"en", "de"})
+
+
+class CommitWizardSelectionTests(unittest.TestCase):
+    """Die neuen Auswahltasten der Commit-Hilfe: A, N und G."""
+
+    class Screen:
+        def __init__(self, keys):
+            self.keys = iter(keys)
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 100)
+        def erase(self): pass
+        def clear(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+        def getch(self): return next(self.keys)
+        def get_wch(self): return next(self.keys)
+
+    FILES = [ChangedFile("M", "src/app.py", " M"),
+             ChangedFile("M", "src/util.py", " M"),
+             ChangedFile("U", "docs/neu.md", "??")]
+
+    def _run(self, keys):
+        st = RepoStatus(path=Path("/tmp/x"), rel="x", files=list(self.FILES),
+                        modified=2, untracked=1)
+        ui = TUI(self.Screen(keys), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = ui.statuses = [st]
+        taken = {}
+
+        def step2(_self, _st, items):
+            taken["paths"] = [it["path"] for it in items if it["include"]]
+            return True
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "_commit_step2", step2):
+            ui.action_commit_wizard()
+        return taken.get("paths"), ui
+
+    def test_n_deselects_everything_and_a_brings_it_back(self):
+        taken, _ = self._run([ord("n"), 10])
+        self.assertEqual(taken, [])
+        taken, _ = self._run([ord("n"), ord("a"), 10])
+        self.assertEqual(len(taken), 3)
+
+    def test_g_replaces_the_selection_with_the_chosen_suggestion(self):
+        # G öffnet die Liste, ⏎ nimmt den ersten Vorschlag, ⏎ committet.
+        taken, _ = self._run([ord("g"), 10, 10])
+        groups = gmf_module.commit_groups(self.FILES)
+        self.assertEqual(sorted(taken), sorted(groups[0].paths))
+        # "Ersetzen" heisst ersetzen: nichts von vorher bleibt zusaetzlich drin.
+        self.assertLess(len(taken), 3)
+
+    def test_esc_in_the_suggestion_list_leaves_the_selection_untouched(self):
+        taken, _ = self._run([ord("g"), 27, 10])
+        self.assertEqual(len(taken), 3)
+
+    def test_without_a_sensible_subset_g_says_so_instead_of_an_empty_list(self):
+        st = RepoStatus(path=Path("/tmp/x"), rel="x",
+                        files=[ChangedFile("M", "src/a.py", " M"),
+                               ChangedFile("M", "src/b.py", " M")])
+        ui = TUI(self.Screen([]), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = ui.statuses = [st]
+        note = ui._apply_commit_group(st, [])
+        self.assertEqual(note, gmf_module.TR["group_none"]["en"])
+
+    def test_g_without_suggestions_shows_the_reason_in_the_helper_itself(self):
+        # Drei neue Dateien in der Wurzel: keine Teilmenge, die etwas taugt.
+        # Die Meldung muss IM Bild der Hilfe stehen — die Zeile der Repo-Liste
+        # ist hier nicht sichtbar.
+        st = RepoStatus(path=Path("/tmp/x"), rel="x",
+                        files=[ChangedFile("U", "a.log", "??"),
+                               ChangedFile("U", "b.sh", "??"),
+                               ChangedFile("U", "c.md", "??")])
+        ui = TUI(self.Screen([ord("g"), ord("n"), 10]), Path("/tmp"),
+                 DEFAULT_CONFIG, None)
+        ui.all_statuses = ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "_commit_step2", lambda *a: True):
+            ui.action_commit_wizard()
+        self.assertTrue(any(gmf_module.TR["group_none"]["en"] in text
+                            for _, text in ui.scr.drawn))
+
+    def test_the_applied_suggestion_is_named_in_the_helper(self):
+        taken, ui = self._run([ord("g"), 10, 10])
+        self.assertTrue(taken)
+        self.assertTrue(any(gmf_module.TR["group_applied"]["en"][:12] in text
+                            for _, text in ui.scr.drawn))
+
+    def test_the_title_counts_how_many_are_selected(self):
+        _, ui = self._run([ord("n"), 10])
+        self.assertTrue(any("0/3" in text for _, text in ui.scr.drawn))
+
+
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):
     def test_i_key_opens_repo_info_case_insensitively(self):
         class Screen:
