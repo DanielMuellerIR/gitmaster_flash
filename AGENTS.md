@@ -259,6 +259,22 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   verstecken.
 - `--diff` filtert BEIDE Rechner mit demselben Suchtext (`filter_repo_dicts`).
   Nur eine Seite zu filtern erzeugte „nur hier"-Unterschiede, die es nicht gibt.
+- Der Hintergrund-Fetch (`R`) ist der einzige Ort, an dem Git-Aufrufe außerhalb
+  des Hauptthreads laufen. Drei Regeln hängen daran:
+  1. `_run_process_group()` trägt jeden Prozess in `_LIVE_PROCESSES` ein und
+     prüft `_CANCEL` — beides unter derselben Sperre. Nur so kann zwischen der
+     Prüfung und dem `Popen` kein Prozess entstehen, den `cancel_git_calls()`
+     nicht mehr sieht. Wer dort etwas ändert, muss diese Klammer erhalten.
+  2. `run()` beendet den Scan in einem `finally`. Ohne das liefen git und das von
+     ihm gestartete ssh nach dem Ende der Oberfläche verwaist weiter.
+  3. Das begrenzte Warten auf eine Taste (`scr.timeout`) bleibt strikt in
+     `_wait_for_key()`. Die Unteransichten lesen mit `get_wch()`, und das wirft
+     bei abgelaufenem Zeitgeber eine `curses.error`, statt zu warten.
+- Während des Scans wird die Liste NICHT umsortiert (`_merge_scanned` setzt am
+  Platz ein), sonst sprängen Zeilen unter dem Cursor weg. Sortiert wird einmal in
+  `_finish_scan`. Ein Repo, das währenddessen lokal neu eingelesen wurde, steht in
+  `locally_refreshed` und behält seinen jüngeren Stand — lieber veraltete
+  Remote-Zahlen als ein fertiger Commit, der wieder als offene Änderung erscheint.
 - Die Einstellungsansicht (`,`) ändert nur, was Anzeige und Geduld betrifft.
   `sync_remote_names`/`sync_remote_hosts` (Ziel von P) und `apps` (was gmf per
   `open -a` startet) stehen in `READ_ONLY_SETTINGS` und bleiben der Datei
@@ -289,6 +305,5 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).
-- [ ] Fetch im Hintergrund statt blockierend mit Fortschrittsanzeige.
 - [ ] Intelligentere Commit-Vorschläge (z.B. Gruppierung nach Dateityp).
 - [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).

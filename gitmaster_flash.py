@@ -58,8 +58,10 @@ import shutil
 import signal
 import stat
 import subprocess
+import queue
 import sys
 import tempfile
+import threading
 import unicodedata
 import urllib.parse
 import uuid
@@ -67,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -233,10 +235,21 @@ TR = {
                   "I Info · H Hilfe")},
     "f2": {"en": " {apps} · A changes · C commit · S stash view",
            "de": " {apps} · A Änderungen · C Commit · S Stash-Blick"},
-    "f3": {"en": (" R fetch safe remotes · P sync push · G GitHub push · , settings"
+    "f3": {"en": (" R fetch in background · P sync push · G GitHub push · , settings"
                   " · Q quit"),
-           "de": (" R sichere Remotes fetchen · P Sync-Push · G GitHub-Push ·"
+           "de": (" R Fetch im Hintergrund · P Sync-Push · G GitHub-Push ·"
                   " , Einstellungen · Q Beenden")},
+    # Hintergrund-Fetch (Taste R)
+    "scan_started": {"en": "Fetching in the background — the list stays usable.",
+                     "de": "Fetch läuft im Hintergrund — die Liste bleibt bedienbar."},
+    "scan_already_running": {"en": "A background fetch is already running.",
+                             "de": "Ein Hintergrund-Fetch läuft bereits."},
+    "scan_progress": {"en": "fetching {done}/{total}",
+                      "de": "fetche {done}/{total}"},
+    "scan_done": {"en": "Fetch finished — {n} repos read again.",
+                  "de": "Fetch fertig — {n} Repos neu eingelesen."},
+    "scan_failed": {"en": "Background fetch stopped: {e}",
+                    "de": "Hintergrund-Fetch abgebrochen: {e}"},
     # Einstellungen (Taste ,)
     "set_title": {"en": "Settings · {p}", "de": "Einstellungen · {p}"},
     "set_footer": {"en": " ↑/↓ select · ⏎ change · Q/Esc back",
@@ -2481,6 +2494,37 @@ def summarize_fetch_failures(st: RepoStatus) -> None:
     st.fetch_error = True
 
 
+class GitCancelled(RuntimeError):
+    """Der Aufruf wurde abgebrochen, bevor er starten konnte."""
+
+
+# Beim Beenden waehrend eines Hintergrund-Scans muss Schluss sein: laufende
+# Git-Aufrufe werden getoetet, neue gar nicht erst gestartet. Ohne das liefen
+# Git und das davon gestartete ssh nach dem Ende der Oberflaeche weiter — genau
+# die verwaisten Prozesse, die dieses Programm sonst ueberall vermeidet.
+_CANCEL = threading.Event()
+_LIVE_PROCESSES: set = set()
+# Dieselbe Sperre schuetzt Start UND Abbruch. Nur so kann zwischen der Pruefung
+# des Abbruchs und dem Popen kein Prozess entstehen, den der Abbruch nicht mehr
+# sieht. Sie serialisiert nur fork/exec (Bruchteile einer Millisekunde), nicht
+# das Warten auf Git.
+_LIVE_LOCK = threading.Lock()
+
+
+def cancel_git_calls() -> None:
+    """Laufende Git-Aufrufe beenden und weitere verhindern."""
+    with _LIVE_LOCK:
+        _CANCEL.set()
+        live = list(_LIVE_PROCESSES)
+    for proc in live:
+        _kill_process_group(proc)
+
+
+def resume_git_calls() -> None:
+    """Die Sperre wieder aufheben (nach einem abgebrochenen Lauf)."""
+    _CANCEL.clear()
+
+
 def _kill_process_group(proc: subprocess.Popen) -> None:
     """Nach einem Timeout nicht nur git, sondern alles beenden, was es gestartet hat.
 
@@ -2534,12 +2578,20 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
     ssh kommt nicht an unser /dev/tty, um dort nach einer Passphrase zu fragen;
     der ssh-agent funktioniert davon unberührt weiter.
     """
-    with subprocess.Popen(
-        cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="surrogateescape",
-        env=env,
-        start_new_session=True,
-    ) as proc:
+    with _LIVE_LOCK:
+        # Nach einem Abbruch gar nicht erst starten: Ein Fetch, der jetzt noch
+        # losliefe, haenge bis zu seinem eigenen Timeout und hielte das Beenden
+        # der Oberflaeche genauso lange auf.
+        if _CANCEL.is_set():
+            raise GitCancelled(" ".join(str(part) for part in cmd[:3]))
+        proc = subprocess.Popen(
+            cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="surrogateescape",
+            env=env,
+            start_new_session=True,
+        )
+        _LIVE_PROCESSES.add(proc)
+    with proc:
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -2556,6 +2608,9 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
             # unverändert weiter an den Aufrufer.
             _stop_and_collect_process_group(proc)
             raise
+        finally:
+            with _LIVE_LOCK:
+                _LIVE_PROCESSES.discard(proc)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -3883,8 +3938,78 @@ def collect_all(root: Path, cfg: dict, fetch: bool = False,
             results.append(fut.result())
             if progress:
                 progress(done, len(repos))
-    results.sort(key=lambda s: (s.severity(), s.rel.lower()))
-    return results
+    return sort_statuses(results)
+
+
+def sort_statuses(statuses: list) -> list:
+    """Problematisches nach oben, dann alphabetisch — die Reihenfolge der Liste."""
+    return sorted(statuses, key=lambda s: (s.severity(), s.rel.lower()))
+
+
+# Wie lange die Oberflaeche waehrend eines Hintergrund-Scans hoechstens auf eine
+# Taste wartet, bevor sie neu zeichnet. 200 ms sind fluessig genug fuer eine
+# mitlaufende Anzeige und selten genug, um im Leerlauf nichts zu kosten — im
+# Leerlauf wartet getch() ohnehin unbegrenzt.
+BACKGROUND_POLL_MS = 200
+
+
+class BackgroundScan:
+    """Ein Repo-Scan mit Fetch, der die Oberflaeche nicht blockiert.
+
+    Der Fetch geht ueber das Netz und dauert bei vielen Repos Minuten. Blockierend
+    stand die Uebersicht so lange still, obwohl der lokale Zustand laengst
+    dastand. Hier laeuft er in einem eigenen Thread und meldet jedes fertige Repo
+    einzeln ueber eine Queue; die Oberflaeche traegt es beim naechsten Zeichnen
+    nach und bleibt die ganze Zeit bedienbar.
+
+    Die Queue traegt vier Nachrichten: `("total", n)` zu Beginn, `("one", st)` je
+    fertigem Repo, am Ende `("done", liste)` mit dem vollstaendigen, sortierten
+    Ergebnis — oder `("failed", exc)`, wenn der Lauf selbst scheiterte.
+    """
+
+    def __init__(self, root: Path, cfg: dict):
+        self.root = root
+        self.cfg = cfg
+        self.queue: queue.Queue = queue.Queue()
+        self.total = 0
+        self.done = 0
+        self.finished = False
+        self._thread = threading.Thread(target=self._work, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _work(self) -> None:
+        try:
+            repos = find_repos(self.root, self.cfg["skip_dirs"])
+            self.queue.put(("total", len(repos)))
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=FETCH_SCAN_WORKERS) as pool:
+                futures = [pool.submit(collect_status, repo, self.root, self.cfg,
+                                       True) for repo in repos]
+                for fut in concurrent.futures.as_completed(futures):
+                    st = fut.result()
+                    results.append(st)
+                    self.queue.put(("one", st))
+            self.queue.put(("done", sort_statuses(results)))
+        except BaseException as exc:            # noqa: BLE001 — siehe unten
+            # Auch ein Abbruch (GitCancelled) oder ein Fehler in find_repos darf
+            # den Thread nicht stumm sterben lassen: Die Oberflaeche wartete
+            # sonst ewig auf ein "done", das nie kaeme.
+            self.queue.put(("failed", exc))
+
+    def stop(self) -> None:
+        """Abbrechen und kurz auf das Auslaufen der Arbeiter warten.
+
+        `cancel_git_calls()` toetet die laufenden Git-Prozessgruppen und
+        verhindert neue; die Arbeiter laufen danach binnen Sekundenbruchteilen
+        aus. Das Warten ist begrenzt — ein haengender Thread darf das Beenden der
+        Oberflaeche nicht aufhalten, und die Prozesse sind da bereits tot.
+        """
+        cancel_git_calls()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -4650,6 +4775,14 @@ class TUI:
         self.log_top = 0           # erste sichtbare Protokollzeile
         self.log_selected = None   # gewählte Protokollzeile (None = noch nie dort)
         self.compact_col = 0       # erste sichtbare Spalte der Kompaktansicht
+        self.scan: BackgroundScan | None = None   # laufender Hintergrund-Fetch
+        # Repos, die WAEHREND des Hintergrund-Fetch lokal neu eingelesen wurden
+        # (Commit, Stash, Push). Deren Ergebnis aus dem Scan ist aelter als das,
+        # was der Anwender gerade sieht, und wird verworfen.
+        self.locally_refreshed: set[str] = set()
+        # curses wartet standardmaessig unbegrenzt auf eine Taste. Nur waehrend
+        # eines Hintergrund-Scans wird daraus ein begrenztes Warten.
+        self._input_wait = -1
 
     # -- Datenbeschaffung ---------------------------------------------------
 
@@ -4675,6 +4808,77 @@ class TUI:
         # gescrollt werden müsste. Eine spätere Umschaltung bleibt erhalten.
         if first_load and len(self.statuses) > self.cfg["compact_from"]:
             self.view_mode = "compact"
+
+    def start_background_scan(self) -> None:
+        """Fetch im Hintergrund anstossen; die Liste bleibt bedienbar."""
+        if self.scan:
+            self.message = t("scan_already_running")
+            return
+        resume_git_calls()
+        self.locally_refreshed.clear()
+        self.scan = BackgroundScan(self.root, self.cfg)
+        self.scan.start()
+        self.message = t("scan_started")
+
+    def stop_background_scan(self) -> None:
+        """Laufenden Hintergrund-Fetch beenden (beim Verlassen der Oberflaeche)."""
+        if not self.scan:
+            return
+        scan, self.scan = self.scan, None
+        scan.stop()
+
+    def drain_background_scan(self) -> None:
+        """Fertige Ergebnisse uebernehmen, ohne zu warten."""
+        scan = self.scan
+        if not scan:
+            return
+        while True:
+            try:
+                kind, payload = scan.queue.get_nowait()
+            except queue.Empty:
+                return
+            if kind == "total":
+                scan.total = payload
+            elif kind == "one":
+                scan.done += 1
+                self._merge_scanned(payload)
+            elif kind == "failed":
+                self.scan = None
+                self.message = t("scan_failed", e=str(payload)[:120])
+                return
+            else:                                   # "done"
+                self._finish_scan(payload)
+                return
+
+    def _merge_scanned(self, new: RepoStatus) -> None:
+        """Ein einzelnes Ergebnis an seinem Platz einsetzen — ohne umzusortieren.
+
+        Waehrend des Laufs bleibt die Reihenfolge bewusst stehen. Wuerde die
+        Liste bei jedem eintreffenden Repo neu sortiert, sprangen die Zeilen
+        unter dem Cursor weg und man klickte auf ein anderes Repo als gemeint.
+        Sortiert wird einmal am Ende.
+        """
+        if new.rel in self.locally_refreshed:
+            return
+        for bucket in (self.all_statuses, self.statuses):
+            for i, entry in enumerate(bucket):
+                if entry.rel == new.rel:
+                    bucket[i] = new
+                    break
+
+    def _finish_scan(self, results: list) -> None:
+        """Endergebnis uebernehmen: neue Repos dazu, verschwundene weg, sortiert."""
+        # Lokal neu eingelesene Repos behalten ihren juengeren Stand. Ihre
+        # Remote-Zahlen koennen dadurch aelter sein als der Rest — das naechste R
+        # holt sie nach. Der umgekehrte Fehler waere schlimmer: ein Commit, den
+        # die Liste wieder als offene Aenderung zeigt.
+        keep = {st.rel: st for st in self.all_statuses
+                if st.rel in self.locally_refreshed}
+        merged = [keep.get(st.rel, st) for st in results]
+        self.all_statuses = sort_statuses(merged)
+        self.apply_filter(keep_selection=True)
+        self.scan = None
+        self.message = t("scan_done", n=len(self.all_statuses))
 
     def apply_filter(self, keep_selection: bool = False) -> None:
         """Sichtliste aus Vollliste und Suchtext neu bilden.
@@ -4712,6 +4916,10 @@ class TUI:
         """
         new = collect_status(st.path, self.root, self.cfg)
         carry_fetch_failure(st, new, refetched)
+        # Ab jetzt ist der lokale Stand dieses Repos juenger als alles, was ein
+        # laufender Hintergrund-Fetch dazu noch liefern kann.
+        if self.scan:
+            self.locally_refreshed.add(new.rel)
         # Identität statt Gleichheit: Zwei Repos mit identischem Zustand sind als
         # Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
         # Beide Listen müssen nachgezogen werden, sonst zeigte ein späteres
@@ -4820,6 +5028,12 @@ class TUI:
         # einen Versionsunterschied fuer einen echten Repo-Unterschied. Auch eine
         # LAUFENDE Instanz zeigt den Code von ihrem Start: nach einem Sync im
         # Hintergrund vergleicht man sonst unbemerkt zwei Staende.
+        if self.scan:
+            # Der Fetch laeuft nebenher; die Zahl sagt, wie viel schon eingetragen
+            # ist. Ohne sie haelt man die halb aktualisierte Liste fuer das
+            # Endergebnis.
+            tail += " · " + t("scan_progress", done=self.scan.done,
+                              total=self.scan.total or "?")
         head = f" gitmaster_flash {__version__} · {self.root} · {count} · {tail}"
         safe_addstr(self.scr, 0, 0, head.ljust(w - 1), curses.A_BOLD)
 
@@ -6001,7 +6215,7 @@ class TUI:
         if key == "C":
             self.action_commit_wizard()
         elif key == "R":
-            self.reload(fetch=True)
+            self.start_background_scan()
         elif key == "P":
             self.action_sync_push()
         elif key == "G":
@@ -6028,9 +6242,39 @@ class TUI:
     def run(self):
         curses.curs_set(0)
         self.reload()
+        try:
+            self._loop()
+        finally:
+            # Beim Verlassen darf kein Git-Aufruf des Hintergrund-Scans
+            # weiterlaufen: Nach dem Ende der Oberflaeche haette niemand mehr ein
+            # Auge auf ihn, und genau daraus entstehen verwaiste ssh-Prozesse.
+            self.stop_background_scan()
+
+    def _wait_for_key(self) -> int:
+        """Auf eine Taste warten — waehrend eines Hintergrund-Scans nur begrenzt.
+
+        Danach sofort wieder unbegrenzt: Die Unteransichten lesen mit
+        `get_wch()`, und das wirft bei abgelaufenem Zeitgeber eine
+        `curses.error`, statt einfach zu warten. Das begrenzte Warten bleibt
+        deshalb strikt auf diese eine Stelle beschraenkt.
+        """
+        if not self.scan:
+            return self.scr.getch()
+        self.scr.timeout(BACKGROUND_POLL_MS)
+        try:
+            return self.scr.getch()
+        finally:
+            self.scr.timeout(-1)
+
+    def _loop(self):
         while True:
+            self.drain_background_scan()
             self.draw()
-            ch = self.scr.getch()
+            ch = self._wait_for_key()
+            if ch == -1:
+                # Nur der Zeitgeber des Hintergrund-Scans. Keine Eingabe heisst
+                # auch: die Meldung stehen lassen, sonst waere sie nach 200 ms weg.
+                continue
             self.message = ""
             st = self.current()
             # Tab schaltet den Fokus zwischen Repo-Liste und Protokoll um; im

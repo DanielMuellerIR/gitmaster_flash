@@ -176,7 +176,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
 | I | rein lesende Repo-, Remote- und Branch-Details; dort `T` Remote prüfen |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
-| R | alles neu einlesen und jedes sichere Remote einzeln fetchen |
+| R | jedes sichere Remote im Hintergrund fetchen; die Liste bleibt bedienbar |
 | Q | beenden |
 
 Die Stash-Vorschau enthält auch unversionierte und binäre Dateien; ein
@@ -185,6 +185,28 @@ gekennzeichnet. Das Anwenden oder Löschen eines Stashs bleibt danach eine
 Terminal-Aufgabe: Git kann Ziel-Branch, Index und Arbeitsbaum nicht atomar gegen
 parallele Änderungen binden und das Löschen nicht an einen bestimmten
 Reflog-Eintrag koppeln.
+
+## Fetch im Hintergrund (`R`)
+
+`R` fragt jedes sichere Remote nach seinem Stand. Über das Netz und über Dutzende
+Repos hinweg dauert das Minuten, deshalb läuft es in einem eigenen Thread: Die
+Liste bleibt die ganze Zeit bedienbar, jedes Repo wird eingetragen, sobald sein
+eigener Fetch fertig ist, und die Kopfzeile zählt mit — `fetche 12/61`.
+
+Während des Laufs bleibt die Reihenfolge bewusst stehen. Würde bei jedem
+eintreffenden Ergebnis neu sortiert, sprängen die Zeilen unter dem Cursor weg und
+man handelte an einem anderen Repo als gemeint. Sortiert wird einmal am Ende,
+zusammen mit den Repos, die zwischenzeitlich dazugekommen oder verschwunden sind.
+
+Wer während des Laufs committet, pusht oder einen Stash ansieht, behält für
+dieses Repo den Stand, den er gerade sieht: Das Ergebnis des Scans dazu ist älter
+und wird verworfen. Seine Remote-Zahlen können dann bis zum nächsten `R`
+hinterherhinken — der umgekehrte Fehler wäre schlimmer, nämlich einen fertigen
+Commit wieder als offene Änderung zu zeigen.
+
+Ein Beenden während des Fetch lässt nichts zurück. gmf beendet die Prozessgruppe
+jedes noch laufenden Git-Aufrufs und startet keine neuen mehr; weder Git noch das
+von ihm gestartete ssh läuft weiter, wenn die Oberfläche weg ist.
 
 ## Repo-Liste filtern (`/`)
 

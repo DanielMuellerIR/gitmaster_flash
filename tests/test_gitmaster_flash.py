@@ -10,6 +10,7 @@ import importlib.util
 import curses
 import math
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -6413,6 +6414,407 @@ class TuiSettingsTests(unittest.TestCase):
         self._run(ui)
         self.assertTrue(any(gmf_module.TR["set_saved_rescan"]["en"] in text
                             for _, text in ui.scr.drawn))
+
+
+class GitCancelTests(unittest.TestCase):
+    """Abbruch laufender Git-Aufrufe — die Grundlage des Hintergrund-Fetch.
+
+    Wird die Oberflaeche waehrend eines Fetch beendet, darf kein git und kein
+    davon gestartetes ssh weiterlaufen.
+    """
+
+    def setUp(self):
+        self.addCleanup(gmf_module.resume_git_calls)
+        gmf_module.resume_git_calls()
+
+    def test_a_running_call_is_killed_and_its_whole_group_with_it(self):
+        # Ein Kommando, das selbst ein langlebiges Enkelkind in derselben Gruppe
+        # startet — genau die Konstellation git + ssh.
+        script = ("import subprocess, sys, time\n"
+                  "child = subprocess.Popen(['/bin/sleep', '60'])\n"
+                  "sys.stdout.write(str(child.pid) + chr(10))\n"
+                  "sys.stdout.flush()\n"
+                  "time.sleep(60)\n")
+        started = threading.Event()
+        result = {}
+
+        def call():
+            started.set()
+            try:
+                result["run"] = gmf_module._run_process_group(
+                    [sys.executable, "-c", script], stdin=subprocess.DEVNULL,
+                    timeout=60)
+            except BaseException as exc:            # noqa: BLE001
+                result["error"] = exc
+
+        worker = threading.Thread(target=call, daemon=True)
+        worker.start()
+        started.wait(5)
+        # Warten, bis der Prozess wirklich registriert ist.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not gmf_module._LIVE_PROCESSES:
+            time.sleep(0.02)
+        self.assertTrue(gmf_module._LIVE_PROCESSES, "Prozess wurde nie registriert")
+
+        gmf_module.cancel_git_calls()
+        worker.join(timeout=10)
+        self.assertFalse(worker.is_alive(), "Der Aufruf haengt trotz Abbruch")
+        # Das Enkelkind darf den Abbruch nicht ueberleben.
+        grandchild = int((result.get("run").stdout if result.get("run")
+                          else "0").strip() or 0)
+        if grandchild:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild, 0)
+                except OSError:
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(grandchild, signal.SIGKILL)
+                self.fail("Enkelkind hat den Abbruch ueberlebt")
+
+    def test_after_a_cancel_no_new_process_is_started_at_all(self):
+        gmf_module.cancel_git_calls()
+        with mock.patch("gitmaster_flash.subprocess.Popen") as popen:
+            with self.assertRaises(gmf_module.GitCancelled):
+                gmf_module._run_process_group(["/bin/echo", "hi"],
+                                              stdin=subprocess.DEVNULL, timeout=5)
+        # Nicht "gestartet und dann getoetet", sondern gar nicht erst gestartet:
+        # ein Fetch, der jetzt losliefe, haenge bis zu seinem eigenen Timeout.
+        popen.assert_not_called()
+
+    def test_resume_lets_calls_through_again(self):
+        gmf_module.cancel_git_calls()
+        gmf_module.resume_git_calls()
+        done = gmf_module._run_process_group(["/bin/echo", "hi"],
+                                             stdin=subprocess.DEVNULL, timeout=10)
+        self.assertEqual(done.stdout.strip(), "hi")
+
+    def test_the_registry_is_empty_again_after_a_normal_call(self):
+        gmf_module._run_process_group(["/bin/echo", "hi"],
+                                      stdin=subprocess.DEVNULL, timeout=10)
+        self.assertFalse(gmf_module._LIVE_PROCESSES)
+
+
+class BackgroundScanTests(unittest.TestCase):
+    """Der Hintergrund-Scan als solcher: Meldungen, Reihenfolge, Abbruch."""
+
+    def setUp(self):
+        self.addCleanup(gmf_module.resume_git_calls)
+        gmf_module.resume_git_calls()
+        self.root = Path(tempfile.mkdtemp(prefix="gmf-bg-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def _drain(self, scan, timeout=20):
+        messages = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            kind, payload = scan.queue.get(timeout=timeout)
+            messages.append((kind, payload))
+            if kind in ("done", "failed"):
+                return messages
+        self.fail("Der Scan hat sich nie gemeldet")
+
+    def test_it_reports_a_total_then_each_repo_then_the_sorted_result(self):
+        for name in ("beta", "alpha"):
+            repo = self.root / name
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        scan = gmf_module.BackgroundScan(self.root, DEFAULT_CONFIG)
+        scan.start()
+        messages = self._drain(scan)
+        self.assertEqual(messages[0], ("total", 2))
+        self.assertEqual([kind for kind, _ in messages[1:-1]], ["one", "one"])
+        kind, results = messages[-1]
+        self.assertEqual(kind, "done")
+        # Am Ende steht die fertige Sortierung — waehrend des Laufs bewusst nicht.
+        self.assertEqual([st.rel for st in results],
+                         [st.rel for st in gmf_module.sort_statuses(results)])
+
+    def test_an_empty_root_still_finishes_instead_of_hanging(self):
+        scan = gmf_module.BackgroundScan(self.root, DEFAULT_CONFIG)
+        scan.start()
+        messages = self._drain(scan)
+        self.assertEqual(messages[0], ("total", 0))
+        self.assertEqual(messages[-1], ("done", []))
+
+    def test_a_broken_scan_reports_failed_so_nobody_waits_forever(self):
+        scan = gmf_module.BackgroundScan(self.root, DEFAULT_CONFIG)
+        with mock.patch("gitmaster_flash.find_repos", side_effect=OSError("weg")):
+            scan.start()
+            messages = self._drain(scan)
+        self.assertEqual(messages[-1][0], "failed")
+
+    def test_stop_ends_the_worker_quickly_even_with_a_slow_git(self):
+        repo = self.root / "langsam"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        # Ein Git, das haengt: ohne Abbruch liefe der Thread bis zum Timeout.
+        slow = self.root / "bin"
+        slow.mkdir()
+        (slow / "git").write_text("#!/bin/sh\nsleep 120\n")
+        (slow / "git").chmod(0o755)
+        scan = gmf_module.BackgroundScan(self.root,
+                                         {**DEFAULT_CONFIG, "fetch_timeout": 120,
+                                          "git_timeout": 120})
+        with mock.patch.dict(os.environ, {"PATH": f"{slow}:{os.environ['PATH']}"}):
+            # Beleg, dass wirklich DIESES git zum Zug kommt: Der Aufruf lautet
+            # schlicht "git" und wird ueber den PATH aufgeloest. Eine Markerdatei
+            # taugt hier nicht — SIGKILL trifft die Shell womoeglich, bevor sie
+            # die erste Zeile ausgefuehrt hat.
+            self.assertEqual(shutil.which("git"), str(slow / "git"))
+            scan.start()
+            # Warten, bis der haengende Aufruf wirklich laeuft.
+            deadline = time.monotonic() + 10
+            live = []
+            while time.monotonic() < deadline and not live:
+                live = [proc.args for proc in gmf_module._LIVE_PROCESSES]
+                time.sleep(0.02)
+            self.assertTrue(live, "Es lief nie ein Git-Aufruf")
+            self.assertEqual(live[0][:1], ["git"])
+            started = time.monotonic()
+            scan.stop()
+            elapsed = time.monotonic() - started
+        self.assertFalse(scan._thread.is_alive(), "Der Arbeiter laeuft weiter")
+        # Deutlich unter dem Timeout von 120 s — sonst waere nichts abgebrochen.
+        self.assertLess(elapsed, 15)
+        self.assertFalse(gmf_module._LIVE_PROCESSES)
+
+
+    def test_quitting_during_a_hanging_fetch_leaves_no_git_process_behind(self):
+        """Die ganze Kette: R druecken, sofort beenden, nichts bleibt uebrig.
+
+        Das ist der Fall, der ohne Abbruchmechanik verwaiste git- und
+        ssh-Prozesse hinterliesse — genau das, was dieses Programm sonst
+        ueberall vermeidet.
+        """
+        repo = self.root / "haengt"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        slow = self.root / "bin"
+        slow.mkdir()
+        (slow / "git").write_text("#!/bin/sh\nsleep 300\n")
+        (slow / "git").chmod(0o755)
+
+        seen_live = []
+
+        class Screen:
+            """R startet den Fetch, q beendet MITTEN darin.
+
+            Der Zeitgeber-Tick wartet, bis wirklich ein Git-Prozess laeuft —
+            sonst waere das q womoeglich schon durch, bevor ueberhaupt etwas zu
+            beenden war, und der Test bewiese nichts.
+            """
+
+            def __init__(self):
+                self.keys = iter([ord("R"), -1, ord("q")])
+
+            def getmaxyx(self): return (24, 100)
+            def erase(self): pass
+            def clear(self): pass
+            def addstr(self, *a): pass
+            def refresh(self): pass
+            def timeout(self, *_a): pass
+
+            def getch(self):
+                key = next(self.keys)
+                if key == -1:
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        if gmf_module._LIVE_PROCESSES:
+                            seen_live.append(True)
+                            break
+                        time.sleep(0.02)
+                return key
+
+        cfg = {**DEFAULT_CONFIG, "git_timeout": 300, "fetch_timeout": 300}
+        ui = TUI(Screen(), self.root, cfg, None)
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"PATH": f"{slow}:{os.environ['PATH']}"}), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.run()
+        elapsed = time.monotonic() - started
+        self.assertTrue(seen_live, "Beim Beenden lief gar kein Git-Aufruf")
+        # Ohne Abbruch haette das Beenden bis zum Timeout von 300 s gedauert.
+        self.assertLess(elapsed, 20)
+        self.assertIsNone(ui.scan)
+        self.assertFalse(gmf_module._LIVE_PROCESSES)
+        # Und kein sleep aus unserem Ersatz-git laeuft noch.
+        leftovers = subprocess.run(["pgrep", "-f", f"{slow}/git"],
+                                   capture_output=True, text=True).stdout.strip()
+        self.assertEqual(leftovers, "", f"uebrige Prozesse: {leftovers}")
+
+
+class TuiBackgroundFetchTests(unittest.TestCase):
+    """Wie die Oberflaeche mit den Ergebnissen des Hintergrund-Fetch umgeht."""
+
+    class Screen:
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 120)
+        def erase(self): pass
+        def clear(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+        def timeout(self, *_a): pass
+        def getch(self): return next(self.keys)
+        def get_wch(self): return next(self.keys)
+
+    @staticmethod
+    def _st(rel, **kw):
+        return RepoStatus(path=Path("/tmp") / rel, rel=rel, **kw)
+
+    def _ui(self, names, keys=()):
+        ui = TUI(self.Screen(keys), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = [self._st(n) for n in names]
+        ui.statuses = list(ui.all_statuses)
+        return ui
+
+    class FakeScan:
+        """Ein Scan, dessen Meldungen der Test selbst vorgibt."""
+
+        def __init__(self):
+            self.queue = queue.Queue()
+            self.total = 0
+            self.done = 0
+            self.stopped = False
+
+        def stop(self): self.stopped = True
+
+    def test_a_finished_repo_is_merged_without_reordering_the_list(self):
+        ui = self._ui(["alpha", "beta", "gamma"])
+        ui.scan = self.FakeScan()
+        # "gamma" wird problematisch — beim Sortieren stuende es ganz oben.
+        ui.scan.queue.put(("one", self._st("gamma", modified=3)))
+        ui.drain_background_scan()
+        self.assertEqual([s.rel for s in ui.all_statuses],
+                         ["alpha", "beta", "gamma"])
+        self.assertEqual(ui.all_statuses[2].modified, 3)
+
+    def test_the_final_result_sorts_and_takes_new_repos_along(self):
+        ui = self._ui(["alpha", "beta"])
+        ui.scan = self.FakeScan()
+        results = gmf_module.sort_statuses(
+            [self._st("alpha"), self._st("beta"), self._st("neu", modified=1)])
+        ui.scan.queue.put(("done", results))
+        ui.drain_background_scan()
+        self.assertIsNone(ui.scan)
+        self.assertEqual([s.rel for s in ui.all_statuses], ["neu", "alpha", "beta"])
+
+    def test_a_repo_that_vanished_is_gone_after_the_run(self):
+        ui = self._ui(["alpha", "weg"])
+        ui.scan = self.FakeScan()
+        ui.scan.queue.put(("done", [self._st("alpha")]))
+        ui.drain_background_scan()
+        self.assertEqual([s.rel for s in ui.all_statuses], ["alpha"])
+
+    def test_a_locally_refreshed_repo_keeps_its_newer_state(self):
+        # Der Anwender committet waehrend des Fetch. Das Ergebnis des Scans ist
+        # aelter; es darf den Commit nicht wieder als offene Aenderung zeigen.
+        ui = self._ui(["alpha"])
+        ui.scan = self.FakeScan()
+        ui.all_statuses[0] = ui.statuses[0] = self._st("alpha", modified=0)
+        ui.locally_refreshed.add("alpha")
+        ui.scan.queue.put(("one", self._st("alpha", modified=9)))
+        ui.drain_background_scan()
+        self.assertEqual(ui.all_statuses[0].modified, 0)
+        ui.scan.queue.put(("done", [self._st("alpha", modified=9)]))
+        ui.drain_background_scan()
+        self.assertEqual(ui.all_statuses[0].modified, 0)
+
+    def test_refresh_one_only_marks_repos_while_a_scan_runs(self):
+        ui = self._ui(["alpha"])
+        fresh = self._st("alpha", modified=1)
+        with mock.patch("gitmaster_flash.collect_status", return_value=fresh):
+            ui.refresh_one(ui.all_statuses[0])
+        self.assertEqual(ui.locally_refreshed, set())
+        ui.scan = self.FakeScan()
+        with mock.patch("gitmaster_flash.collect_status", return_value=fresh):
+            ui.refresh_one(ui.all_statuses[0])
+        self.assertEqual(ui.locally_refreshed, {"alpha"})
+
+    def test_a_running_scan_shows_its_progress_in_the_header(self):
+        ui = self._ui(["alpha"])
+        ui.scan = self.FakeScan()
+        ui.scan.total, ui.scan.done = 7, 3
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        self.assertIn("3/7", ui.scr.drawn[0][1])
+
+    def test_a_failed_scan_is_reported_and_ends_the_run(self):
+        ui = self._ui(["alpha"])
+        ui.scan = self.FakeScan()
+        ui.scan.queue.put(("failed", OSError("Netz weg")))
+        ui.drain_background_scan()
+        self.assertIsNone(ui.scan)
+        self.assertIn("Netz weg", ui.message)
+
+    def test_r_starts_one_scan_and_refuses_a_second(self):
+        ui = self._ui(["alpha"])
+        with mock.patch.object(gmf_module, "BackgroundScan") as factory:
+            ui.dispatch_action("R")
+            self.assertTrue(factory.return_value.start.called)
+            ui.dispatch_action("R")
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(ui.message, gmf_module.TR["scan_already_running"]["en"])
+
+    def test_leaving_the_interface_stops_a_running_scan(self):
+        ui = self._ui(["alpha"], keys=[ord("q")])
+        ui.scan = self.FakeScan()
+        stopped = ui.scan
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.run()
+        self.assertTrue(stopped.stopped, "Der Scan lief nach dem Beenden weiter")
+        self.assertIsNone(ui.scan)
+
+    def test_an_exception_in_the_loop_still_stops_the_scan(self):
+        ui = self._ui(["alpha"], keys=[])          # StopIteration beim ersten getch
+        ui.scan = self.FakeScan()
+        stopped = ui.scan
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            with self.assertRaises(StopIteration):
+                ui.run()
+        self.assertTrue(stopped.stopped)
+
+    def test_the_timer_tick_redraws_without_wiping_the_message(self):
+        # -1 heisst "keine Taste, nur der Zeitgeber". Eine Meldung, die dabei
+        # verschwaende, waere nach 200 ms weg und nie lesbar.
+        ui = self._ui(["alpha"], keys=[-1, ord("q")])
+        ui.scan = self.FakeScan()
+        ui.message = "wichtig"
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "reload"):
+            ui.run()
+        self.assertTrue(any("wichtig" in text for _, text in ui.scr.drawn))
+
+    def test_without_a_scan_the_wait_stays_unbounded(self):
+        # Nur waehrend eines Scans darf getch() begrenzt warten: Die
+        # Unteransichten lesen mit get_wch(), das bei Zeitablauf wirft.
+        ui = self._ui(["alpha"])
+        ui.scr.timeout = mock.Mock()
+        ui.scr.keys = iter([ord("x")])
+        ui._wait_for_key()
+        ui.scr.timeout.assert_not_called()
+
+    def test_during_a_scan_the_wait_is_bounded_and_reset_right_after(self):
+        ui = self._ui(["alpha"])
+        ui.scan = self.FakeScan()
+        ui.scr.timeout = mock.Mock()
+        ui.scr.keys = iter([-1])
+        ui._wait_for_key()
+        self.assertEqual([call.args[0] for call in ui.scr.timeout.call_args_list],
+                         [gmf_module.BACKGROUND_POLL_MS, -1])
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

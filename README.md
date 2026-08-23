@@ -164,7 +164,7 @@ memorize. Case does not matter — `f` works like `F`.
 | H | show the command log of this session plus the Git safety rules |
 | I | read-only repository, remote and branch details; there: `T` tests a remote |
 | S | view the latest stash as a diff (read-only, scrollable) |
-| R | reload everything and fetch each safe remote separately |
+| R | fetch every safe remote in the background; the list stays usable |
 | Q | quit |
 
 The stash preview includes untracked and binary files; a failed or unexpectedly
@@ -172,6 +172,27 @@ empty Git preview is labelled explicitly. Applying or deleting a stash remains a
 terminal task after that review: Git cannot atomically bind the target branch,
 index and working tree against concurrent changes, nor bind deletion to one
 specific reflog entry.
+
+## Fetching in the background (`R`)
+
+`R` asks every safe remote for its state. Over the network and across dozens of
+repositories that takes minutes, so it runs in a worker thread: the list stays
+usable the whole time, every repository is entered as soon as its own fetch is
+done, and the header counts along — `fetching 12/61`.
+
+While the run is going, the order deliberately stays put. Re-sorting on every
+incoming result would move rows out from under the cursor, and you would act on
+a different repository than the one you meant. Sorting happens once, at the end,
+together with repositories that appeared or vanished in the meantime.
+
+If you commit, push or view a stash during the run, that repository keeps the
+state you are looking at: the scan's result for it is older and is dropped. Its
+remote counters can then lag until the next `R` — the opposite mistake would be
+worse, showing a finished commit as an open change again.
+
+Quitting during a fetch does not leave anything behind. gmf kills the process
+group of every git call still running and refuses to start new ones, so neither
+git nor the ssh it started keeps going once the interface is gone.
 
 ## Filtering the repo list (`/`)
 
