@@ -163,6 +163,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 |---|---|
 | ↑ / ↓ | Repo auswählen |
 | → / ← | auf-/zuklappen (Dateien mit M/D/U/C, Stashes) |
+| / | Repo-Liste nach Namen filtern (siehe unten) |
 | M | zwischen Kompakt- und Detailansicht umschalten |
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
@@ -183,6 +184,36 @@ gekennzeichnet. Das Anwenden oder Löschen eines Stashs bleibt danach eine
 Terminal-Aufgabe: Git kann Ziel-Branch, Index und Arbeitsbaum nicht atomar gegen
 parallele Änderungen binden und das Löschen nicht an einen bestimmten
 Reflog-Eintrag koppeln.
+
+## Repo-Liste filtern (`/`)
+
+Ab einigen hundert Repos ist Tippen schneller als Blättern. `/` öffnet eine
+einzeilige Eingabe; die Liste schrumpft auf die Repos, deren **Pfad** den
+eingegebenen Text enthält. `Esc` in der Eingabe lässt den bestehenden Filter
+stehen, eine leere Eingabe hebt ihn auf, und `Esc` in der Liste hebt einen
+aktiven Filter auf, statt das Programm zu beenden.
+
+Mehrere durch Leerzeichen getrennte Begriffe müssen **alle** vorkommen, in
+beliebiger Reihenfolge — `arbeit api` findet also auch
+`arbeit/kunde/api-server`, ohne dass man den Teil dazwischen kennt.
+Groß- und Kleinschreibung spielt keine Rolle.
+
+Der Filter ist reine Anzeige: Er ändert nichts an einem Repo und liest auch
+nichts neu ein, das Aufheben geht deshalb ohne Wartezeit. Er trifft
+ausschließlich den Pfad, nie Branch, Remote oder Dateiinhalt — der Pfad ist die
+einzige Angabe, die in jeder Ansicht sichtbar ist, und ein Filter auf
+Unsichtbares ließe einen rätseln, warum ein Repo fehlt.
+
+Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
+ausgeblendet ist:
+
+```text
+ gitmaster_flash 0.19.0 · /Users/du/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+```
+
+`3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
+entfernten Repos, die Aufmerksamkeit bräuchten. Ohne diese Zahl könnte ein
+Filter still genau die Repos verstecken, wegen derer man gmf gestartet hat.
 
 ## Änderungen rein lesend prüfen (`A`)
 
@@ -444,6 +475,7 @@ aber keins.
 python3 gitmaster_flash.py --list          # farbige Textliste
 python3 gitmaster_flash.py --json          # maschinenlesbar
 python3 gitmaster_flash.py --json --fetch  # vorher je Repo fetchen
+python3 gitmaster_flash.py --filter api    # nur Repos, deren Pfad passt
 python3 gitmaster_flash.py --lang de       # Ausgabesprache festlegen
 python3 gitmaster_flash.py --version       # nur die Versionsnummer, sonst nichts
 
@@ -454,8 +486,17 @@ python3 gitmaster_flash.py --version       # nur die Versionsnummer, sonst nicht
 #                      (vor 0.6.0 gab --json ein nacktes Array aus)
 ```
 
+`--filter` nimmt dieselben Begriffe wie `/` in der Oberfläche und wirkt auf
+`--list`, `--json` und `--diff`; interaktiv gestartet belegt er den Filter vor,
+den `/` dann ändert. Bei `--diff` grenzt er **beide** Rechner mit denselben
+Begriffen ein — nur eine Seite zu filtern ergäbe „nur hier"-Unterschiede, die es
+gar nicht gibt. Die `--list`-Kopfzeile nennt den aktiven Filter, und ein Filter
+ohne einen einzigen Treffer sagt das auf stderr: Auf stdout sähen leere Liste
+und Exit-Code 0 sonst genau wie „alles in Ordnung" aus.
+
 Exit-Code 0 heißt: alles sauber und synchron. 1 heißt: mindestens ein Repo
-braucht Aufmerksamkeit. Ohne TTY gibt das Tool die Liste aus, statt die
+braucht Aufmerksamkeit; gezählt wird über die Repos, die den Filter passiert
+haben. Ohne TTY gibt das Tool die Liste aus, statt die
 Oberfläche zu starten — in einer Pipe passiert also das Erwartbare.
 
 Einen weiteren Schalter gibt es, er ist aber nicht zum Tippen gedacht:

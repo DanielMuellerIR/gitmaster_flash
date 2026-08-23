@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.18.10"
+__version__ = "0.19.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -178,6 +178,31 @@ TR = {
         "de": "DRIFT  {rel}: Branch '{br}' existiert auf {r} nur {m}"},
     "hdr_review": {"en": "{n} to review", "de": "{n} zu prüfen"},
     "hdr_clean": {"en": "all clean ✔", "de": "alles sauber ✔"},
+    # Filter über die Repo-Liste (Taste /)
+    "hdr_filtered": {"en": "{n}/{total} repos · filter “{q}”",
+                     "de": "{n}/{total} Repos · Filter „{q}“"},
+    # Wie viele der ausgeblendeten Repos Aufmerksamkeit bräuchten. Muss in die
+    # Kopfzeile, sonst versteckt ein Filter genau die Repos, deretwegen man gmf
+    # startet.
+    "hdr_hidden_dirty": {"en": "(+{n} hidden)", "de": "(+{n} ausgeblendet)"},
+    "filter_no_match": {"en": "no match", "de": "kein Treffer"},
+    "filter_prompt": {"en": "Filter (empty = all repos): ",
+                      "de": "Filter (leer = alle Repos): "},
+    "filter_empty_hint": {
+        "en": "No repo matches “{q}”.  /  change filter · Esc show all again",
+        "de": "Kein Repo passt auf „{q}“.  /  Filter ändern · Esc wieder alle zeigen"},
+    "no_repos_found": {"en": "No Git repo below this directory.",
+                       "de": "Kein Git-Repo unterhalb dieses Ordners."},
+    "filter_cleared": {"en": "Filter cleared — all repos visible again.",
+                       "de": "Filter aufgehoben — wieder alle Repos sichtbar."},
+    "filter_no_hit": {"en": "No repo matches “{q}”. Esc shows all again.",
+                      "de": "Kein Repo passt auf „{q}“. Esc zeigt wieder alle."},
+    "filter_active": {"en": "Filter “{q}”: {n} of {total} repos.",
+                      "de": "Filter „{q}“: {n} von {total} Repos."},
+    "hdr_filter_note": {"en": "filter “{q}”", "de": "Filter „{q}“"},
+    "filter_cli_no_hit": {
+        "en": "Note: no repo matches the filter “{q}” — nothing was checked.",
+        "de": "Hinweis: Kein Repo passt auf den Filter „{q}“ — es wurde nichts geprüft."},
     # Repo-Zeile
     "clean_synced": {"en": "✔ clean & synced", "de": "✔ sauber & synchron"},
     "no_sync_remote": {"en": "no sync remote", "de": "kein Sync-Remote"},
@@ -202,8 +227,10 @@ TR = {
     "diff_failed": {"en": "Diff for {p} failed: {e}",
                     "de": "Diff für {p} fehlgeschlagen: {e}"},
     # Footer
-    "f1": {"en": " ↑/↓/←/→ select · ⏎ cd & quit · M view · Tab log · I info · H help",
-           "de": " ↑/↓/←/→ wählen · ⏎ cd & Exit · M Ansicht · Tab Log · I Info · H Hilfe"},
+    "f1": {"en": (" ↑/↓/←/→ select · ⏎ cd & quit · / filter · M view · Tab log · "
+                  "I info · H help"),
+           "de": (" ↑/↓/←/→ wählen · ⏎ cd & Exit · / Filter · M Ansicht · Tab Log · "
+                  "I Info · H Hilfe")},
     "f2": {"en": " {apps} · A changes · C commit · S stash view",
            "de": " {apps} · A Änderungen · C Commit · S Stash-Blick"},
     "f3": {"en": " R fetch safe remotes · P sync push · G GitHub push · Q quit",
@@ -4033,7 +4060,60 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
     return [terminal_text(line) for line in out]
 
 
-def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool) -> int:
+# ---------------------------------------------------------------------------
+# Filter über die Repo-Liste
+# ---------------------------------------------------------------------------
+# Ab einigen hundert Repos ist Blättern teurer als Tippen. Der Filter arbeitet
+# ausschließlich auf dem Anzeigenamen (`rel`, also dem Pfad relativ zum
+# Scan-Start) — nicht auf Branch, Remote oder Dateiinhalt. Das ist die einzige
+# Angabe, die in JEDER Ansicht sichtbar ist; ein Filter, der auf Unsichtbares
+# trifft, ließe den Anwender rätseln, warum ein Repo fehlt.
+#
+# Mehrere durch Leerzeichen getrennte Begriffe müssen ALLE vorkommen, in
+# beliebiger Reihenfolge. So findet "arbeit api" auch "arbeit/kunde/api-server",
+# ohne dass man den Pfad dazwischen kennt.
+
+
+def filter_terms(query: str) -> list[str]:
+    """Suchtext in einzelne, klein geschriebene Begriffe zerlegen.
+
+    `casefold()` statt `lower()`: Es normalisiert auch Fälle, die `lower()`
+    stehen lässt (deutsches ß zu ss), sonst fände "STRASSE" das Repo "straße"
+    nicht.
+    """
+    return [term.casefold() for term in query.split()]
+
+
+def repo_matches_filter(rel: str, terms: list[str]) -> bool:
+    """Passt dieser Anzeigename auf alle Begriffe? Leere Liste = alles passt."""
+    name = rel.casefold()
+    return all(term in name for term in terms)
+
+
+def filter_statuses(statuses: list, query: str) -> list:
+    """Repos auf den Suchtext eingrenzen; die Reihenfolge bleibt erhalten."""
+    terms = filter_terms(query)
+    if not terms:
+        return list(statuses)
+    return [st for st in statuses if repo_matches_filter(st.rel, terms)]
+
+
+def filter_repo_dicts(repos: list, query: str) -> list:
+    """Dasselbe für die JSON-Form eines Repos (`--diff` vergleicht Dicts).
+
+    Beide Rechner werden mit demselben Filter eingegrenzt. Ein Repo, das nur auf
+    einer Seite herausfällt, ergäbe sonst einen "nur hier"-Unterschied, den es
+    gar nicht gibt.
+    """
+    terms = filter_terms(query)
+    if not terms:
+        return list(repos)
+    return [repo for repo in repos
+            if repo_matches_filter(str(repo.get("rel", "")), terms)]
+
+
+def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
+             query: str = "") -> int:
     """Rechner vergleichen; Config-Erzeugung und optionaler Fetch sind die Ausnahmen."""
     host, _, path = spec.partition(":")
     if not host or host.startswith("-") or terminal_text(host) != host:
@@ -4053,6 +4133,11 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool) ->
         return 2
     here = {"version": __version__, "root": str(root),
             "repos": [status_dict(s) for s in collect_all(root, cfg, fetch=fetch)]}
+    # Der Filter greift auf BEIDEN Seiten mit demselben Suchtext. Nur hier zu
+    # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
+    if query:
+        here["repos"] = filter_repo_dicts(here["repos"], query)
+        there = dict(there, repos=filter_repo_dicts(there.get("repos") or [], query))
     lines = diff_status(here, there, t("diff_here"), host)
     if as_json:
         print(json.dumps({"here": here.get("version"), "host": host,
@@ -4167,15 +4252,21 @@ def compact_position(index: int, rows: int) -> tuple[int, int]:
     return index % rows, index // rows
 
 
-def print_list(statuses: list[RepoStatus], root: Path | None = None) -> None:
+def print_list(statuses: list[RepoStatus], root: Path | None = None,
+               query: str = "") -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
     # umgeleiteten Datei, die man spaeter gegen die eines anderen Macs diffed —
     # ohne Version haelt man einen Versionsunterschied fuer einen Repo-Unterschied.
+    # Ein aktiver Filter gehört in dieselbe Zeile: Die Ausgabe landet oft in einer
+    # Datei, die später gegen die eines anderen Macs verglichen wird. Ohne den
+    # Filter im Kopf hielte man einen ausgeblendeten Bestand für einen echten
+    # Unterschied.
     print(f"gitmaster_flash {__version__}"
           + (f" · {terminal_text(root)}" if root else "")
-          + f" · {len(statuses)} {t('hdr_repos')}")
+          + f" · {len(statuses)} {t('hdr_repos')}"
+          + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else ""))
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
@@ -4367,12 +4458,18 @@ def safe_addstr(win, y, x, text, attr=0):
 
 
 class TUI:
-    def __init__(self, stdscr, root: Path, cfg: dict, cd_file: str | None):
+    def __init__(self, stdscr, root: Path, cfg: dict, cd_file: str | None,
+                 query: str = ""):
         self.scr = stdscr
         self.root = root
         self.cfg = cfg
         self.cd_file = cd_file
+        # `all_statuses` ist der vollständige Scan, `statuses` die davon
+        # sichtbare Auswahl. Alles Zeichnende und die Auswahl arbeiten weiter
+        # auf `statuses` — ohne aktiven Filter sind beide Listen inhaltsgleich.
+        self.all_statuses: list[RepoStatus] = []
         self.statuses: list[RepoStatus] = []
+        self.filter_query = query  # "" = kein Filter; --filter belegt ihn vor
         self.selected = 0
         self.offset = 0            # Scroll-Position
         self.expanded: set[str] = set()   # rel-Pfade der aufgeklappten Repos
@@ -4397,16 +4494,45 @@ class TUI:
             self.scr.refresh()
 
         progress(0, 0)
-        first_load = not self.statuses
+        first_load = not self.all_statuses
         # Die Ladeanzeige ist breiter als eine kurze Kompaktzeile. curses schickt
         # nur Differenzen, deshalb hier ein vollständiges Neuzeichnen erzwingen.
         self.scr.clear()
-        self.statuses = collect_all(self.root, self.cfg, fetch, progress)
-        self.selected = min(self.selected, max(0, len(self.statuses) - 1))
+        self.all_statuses = collect_all(self.root, self.cfg, fetch, progress)
+        # Ein gesetzter Filter überlebt das Neueinlesen: Wer mit R nachfetcht,
+        # will denselben Ausschnitt aktualisiert sehen, nicht wieder alles.
+        self.apply_filter(keep_selection=True)
         # Viele Repos: kompakt starten, weil die Detailansicht dann seitenweise
         # gescrollt werden müsste. Eine spätere Umschaltung bleibt erhalten.
         if first_load and len(self.statuses) > self.cfg["compact_from"]:
             self.view_mode = "compact"
+
+    def apply_filter(self, keep_selection: bool = False) -> None:
+        """Sichtliste aus Vollliste und Suchtext neu bilden.
+
+        `keep_selection` hält die Auswahl auf demselben Repo, sofern es noch
+        sichtbar ist — sonst springt sie an den Anfang. Beim Wechsel des Filters
+        ist der Sprung gewollt: Der erste Treffer ist dann das, was man sucht.
+        """
+        previous = self.statuses[self.selected] if (
+            keep_selection and 0 <= self.selected < len(self.statuses)) else None
+        self.statuses = filter_statuses(self.all_statuses, self.filter_query)
+        index = next((i for i, st in enumerate(self.statuses)
+                      if previous is not None and st.rel == previous.rel), 0)
+        self.selected = min(index, max(0, len(self.statuses) - 1))
+        self.offset = 0
+        self.compact_col = 0
+
+    def hidden_dirty(self) -> int:
+        """Wie viele Repos der Filter ausblendet, die Aufmerksamkeit bräuchten.
+
+        Diese Zahl gehört in die Kopfzeile: gmf ist ein Übersichtswerkzeug, und
+        ein Filter, der stillschweigend gerade die dreckigen Repos versteckt,
+        verkehrt seinen Zweck ins Gegenteil.
+        """
+        visible = {id(st) for st in self.statuses}
+        return sum(1 for st in self.all_statuses
+                   if id(st) not in visible and not st.clean_and_synced)
 
     def refresh_one(self, st: RepoStatus, refetched: str | None = None):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten.
@@ -4417,8 +4543,15 @@ class TUI:
         """
         new = collect_status(st.path, self.root, self.cfg)
         carry_fetch_failure(st, new, refetched)
-        idx = self.statuses.index(st)
-        self.statuses[idx] = new
+        # Identität statt Gleichheit: Zwei Repos mit identischem Zustand sind als
+        # Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
+        # Beide Listen müssen nachgezogen werden, sonst zeigte ein späteres
+        # Filterschalten wieder den alten Stand aus `all_statuses`.
+        for bucket in (self.all_statuses, self.statuses):
+            for i, entry in enumerate(bucket):
+                if entry is st:
+                    bucket[i] = new
+                    break
         return new
 
     # -- Zeichnen -----------------------------------------------------------
@@ -4500,20 +4633,41 @@ class TUI:
         h, w = self.scr.getmaxyx()
         dirty = sum(1 for s in self.statuses if not s.clean_and_synced)
         tail = t("hdr_review", n=dirty) if dirty else t("hdr_clean")
+        if self.filter_query:
+            count = t("hdr_filtered", n=len(self.statuses),
+                      total=len(self.all_statuses), q=self.filter_query)
+            # Ohne Treffer wäre "alles sauber ✔" eine Falschaussage — es ist
+            # schlicht nichts geprüft worden.
+            if not self.statuses:
+                tail = t("filter_no_match")
+            else:
+                hidden = self.hidden_dirty()
+                if hidden:
+                    tail += " " + t("hdr_hidden_dirty", n=hidden)
+        else:
+            count = f"{len(self.statuses)} {t('hdr_repos')}"
         # Version mit in die Kopfzeile: Wer zwei Ausgaben von verschiedenen Macs
         # vergleicht, muss sehen, ob dieselbe Fassung dahintersteckt — sonst haelt man
         # einen Versionsunterschied fuer einen echten Repo-Unterschied. Auch eine
         # LAUFENDE Instanz zeigt den Code von ihrem Start: nach einem Sync im
         # Hintergrund vergleicht man sonst unbemerkt zwei Staende.
-        head = (f" gitmaster_flash {__version__} · {self.root} · "
-                f"{len(self.statuses)} {t('hdr_repos')} · {tail}")
+        head = f" gitmaster_flash {__version__} · {self.root} · {count} · {tail}"
         safe_addstr(self.scr, 0, 0, head.ljust(w - 1), curses.A_BOLD)
 
         # Höhe aufteilen: Kopf, Repo-Bereich, Protokoll, Meldung, 3 Footerzeilen.
         available = max(1, h - 5)
         log_h = self.log_height(h)
         body_h = max(1, available - log_h)
-        if self.view_mode == "compact":
+        if not self.statuses:
+            # Beide Körper-Renderer setzen mindestens ein Repo voraus (die
+            # kompakte Ansicht rechnet mit einer Spaltenbreite). Der leere Fall
+            # gehört deshalb hierher und nicht in sie hinein.
+            safe_addstr(self.scr, 1, 2,
+                        t("filter_empty_hint", q=self.filter_query)
+                        if self.filter_query else t("no_repos_found"),
+                        curses.color_pair(C_YELLOW))
+            body_h = 1
+        elif self.view_mode == "compact":
             # Die kompakte Liste braucht nur so viele Zeilen, wie ihre Spalten hoch
             # sind (plus ggf. die Hinweiszeile) — der frei bleibende Platz darunter
             # gehört dem Protokoll.
@@ -4711,9 +4865,13 @@ class TUI:
                     curses.color_pair(C_DIM) | curses.A_REVERSE)
         self.scr.refresh()
 
-    def prompt_line(self, y: int, prompt: str) -> str | None:
-        """Einzeilige Texteingabe; Esc bricht ab, ⏎ bestätigt."""
-        buf: list[str] = []
+    def prompt_line(self, y: int, prompt: str, initial: str = "") -> str | None:
+        """Einzeilige Texteingabe; Esc bricht ab, ⏎ bestätigt.
+
+        `initial` belegt das Feld vor. Einen bestehenden Filter will man meist
+        verfeinern, nicht neu tippen.
+        """
+        buf: list[str] = list(initial)
         while True:
             h, w = self.scr.getmaxyx()
             safe_addstr(self.scr, y, 1, (prompt + "".join(buf)).ljust(w - 2),
@@ -4736,6 +4894,41 @@ class TUI:
 
     def current(self) -> RepoStatus | None:
         return self.statuses[self.selected] if self.statuses else None
+
+    def action_filter(self):
+        """Repo-Liste über einen Suchtext eingrenzen (Taste /).
+
+        Leere Eingabe hebt den Filter auf; Esc lässt ihn unverändert. Der Filter
+        ist reine Anzeige — er verändert nichts am Scan und an keinem Repo.
+        """
+        h, _ = self.scr.getmaxyx()
+        curses.curs_set(1)
+        try:
+            answer = self.prompt_line(h - 4, t("filter_prompt"), self.filter_query)
+        finally:
+            curses.curs_set(0)
+        if answer is None:          # Esc: bestehenden Filter unangetastet lassen
+            return
+        self.filter_query = answer
+        self.apply_filter()
+        if not self.filter_query:
+            self.message = t("filter_cleared")
+        elif not self.statuses:
+            self.message = t("filter_no_hit", q=self.filter_query)
+        else:
+            self.message = t("filter_active", n=len(self.statuses),
+                             total=len(self.all_statuses), q=self.filter_query)
+
+    def clear_filter(self) -> None:
+        """Filter aufheben und die Auswahl auf dem sichtbaren Repo halten."""
+        current = self.current()
+        self.filter_query = ""
+        self.statuses = list(self.all_statuses)
+        self.selected = next((i for i, st in enumerate(self.statuses)
+                              if current is not None and st.rel == current.rel), 0)
+        self.offset = 0
+        self.compact_col = 0
+        self.message = t("filter_cleared")
 
     def action_open_app(self, key: str):
         st = self.current()
@@ -5520,6 +5713,8 @@ class TUI:
             self.view_mode = "detail" if self.view_mode == "compact" else "compact"
         elif key == "S":
             self.action_stash_show()
+        elif key == "/":
+            self.action_filter()
         elif key in self.cfg["apps"]:
             self.action_open_app(key)
 
@@ -5581,6 +5776,12 @@ class TUI:
                     return
                 continue
             elif ch == 27:  # Esc
+                # Bei aktivem Filter räumt Esc erst ihn weg. Sonst beendete die
+                # naheliegendste Taste zum Abbrechen einer Einschränkung gleich
+                # das ganze Programm.
+                if self.filter_query:
+                    self.clear_filter()
+                    continue
                 return
 
             # Buchstaben-Kürzel: groß ODER klein akzeptieren (F wie f).
@@ -5950,6 +6151,11 @@ def main(argv: list[str] | None = None) -> int:
                          "remote-tracking refs. Needs `ssh HOST` to work; "
                          "gitmaster_flash need NOT be installed there. PATH overrides "
                          "the directory scanned on the other side.")
+    ap.add_argument("--filter", metavar="TEXT", default="",
+                    help="only show repos whose path contains ALL whitespace-separated "
+                         "terms (case-insensitive, any order). Applies to --list, "
+                         "--json and --diff (there on both machines alike), and "
+                         "preselects the filter in the TUI, where / changes it.")
     ap.add_argument("--lang", choices=["en", "de"],
                     help="UI language (overrides config; default: auto from $LANG)")
     ap.add_argument("--demo", action="store_true",
@@ -5992,10 +6198,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if args.diff:
-        return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json)
+        return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json,
+                        query=args.filter)
 
     if args.list or args.json or not sys.stdout.isatty():
-        statuses = collect_all(root, cfg, fetch=args.fetch)
+        statuses = filter_statuses(collect_all(root, cfg, fetch=args.fetch),
+                                   args.filter)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
@@ -6004,13 +6212,18 @@ def main(argv: list[str] | None = None) -> int:
                               "repos": [status_dict(s) for s in statuses]},
                              indent=2, ensure_ascii=False))
         else:
-            print_list(statuses, root)
+            print_list(statuses, root, args.filter)
+        # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
+        # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
+        # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
+        if args.filter and not statuses:
+            print(t("filter_cli_no_hit", q=args.filter), file=sys.stderr)
         # Exit-Code 1, wenn irgendein Repo Aufmerksamkeit braucht (skriptbar).
         return 0 if all(s.clean_and_synced for s in statuses) else 1
 
     def _run(stdscr):
         init_colors()
-        TUI(stdscr, root, cfg, args.cd_file).run()
+        TUI(stdscr, root, cfg, args.cd_file, args.filter).run()
 
     curses.wrapper(_run)
     return 0

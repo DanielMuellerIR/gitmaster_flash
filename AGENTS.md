@@ -243,6 +243,22 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Remote-Namen; die Leser dekodieren sie mit `surrogateescape`, und roh
   serialisiert ergäbe das ungültiges UTF-8 oder einen `UnicodeEncodeError`.
   Neue JSON-Felder deshalb gleich dort anschließen.
+- Der Filter (`/`, `--filter`) grenzt nur die ANZEIGE ein: `all_statuses` bleibt
+  der vollständige Scan, `statuses` ist die sichtbare Auswahl, und alles
+  Zeichnende sowie die Auswahl arbeiten unverändert auf `statuses`. Wer eine
+  Liste anfasst, muss die andere mitziehen — `refresh_one()` tut das über
+  Identität (`is`), nicht über Gleichheit: Zwei Repos mit identischem Zustand
+  sind als Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
+- Ein aktiver Filter muss in JEDER Ausgabe stehen, die man später vergleicht oder
+  als Übersicht liest: Kopfzeile der TUI, Kopfzeile von `--list`, und bei
+  `--list`/`--json` ohne Treffer zusätzlich ein Hinweis auf stderr. Sonst sieht
+  ein ausgeblendeter Bestand wie ein echter Unterschied aus, und eine leere
+  Trefferliste mit Exit-Code 0 wie „alles in Ordnung". Aus demselben Grund nennt
+  die Kopfzeile mit `hidden_dirty()` die ausgeblendeten Repos, die
+  Aufmerksamkeit bräuchten — ein Übersichtswerkzeug darf nicht ausgerechnet die
+  verstecken.
+- `--diff` filtert BEIDE Rechner mit demselben Suchtext (`filter_repo_dicts`).
+  Nur eine Seite zu filtern erzeugte „nur hier"-Unterschiede, die es nicht gibt.
 - Eine nicht zerlegbare Remote-URL bekommt über `endpoint_fingerprints()` einen
   Ersatzfingerprint aus dem Hash der Rohadresse. Eine leere Liste sähe auf zwei
   Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
@@ -254,8 +270,6 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
       an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
       im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
       Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
-- [ ] Suche/Filter über die Repo-Liste (wird ab einigen hundert Repos wichtiger als
-      die Anzeige selbst; dort ist dann der Scan der Flaschenhals).
 - [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
       einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
       sauber trifft (siehe Grenze des Generators oben).

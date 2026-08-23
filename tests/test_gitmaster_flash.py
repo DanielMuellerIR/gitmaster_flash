@@ -4,6 +4,7 @@ Die TUI selbst wird nicht getestet — die Datensammlung dafür schon:
 gegen ein echtes, temporär angelegtes Git-Repo.
 """
 
+import io
 import json
 import importlib.util
 import curses
@@ -5885,6 +5886,272 @@ class CompactViewTests(unittest.TestCase):
         self.assertIn("git config gmf.test value", drawn)
         self.assertEqual(ui.log_height(30), 3)
         self.assertEqual(ui.log_height(12), 0)     # winziges Fenster: Repos gehen vor
+
+
+class RepoFilterLogicTests(unittest.TestCase):
+    """Die reine Filterlogik — ohne curses, ohne Git."""
+
+    @staticmethod
+    def _st(rel):
+        return RepoStatus(path=Path("/tmp") / rel, rel=rel)
+
+    def test_empty_query_keeps_every_repo_and_its_order(self):
+        names = ["zeta", "alpha", "mitte"]
+        statuses = [self._st(n) for n in names]
+        for query in ("", "   ", "\t"):
+            with self.subTest(query=repr(query)):
+                self.assertEqual([s.rel for s in
+                                  gmf_module.filter_statuses(statuses, query)], names)
+
+    def test_query_is_a_substring_of_the_path_not_a_prefix(self):
+        statuses = [self._st("arbeit/kunde/api-server"), self._st("privat/blog")]
+        hit = gmf_module.filter_statuses(statuses, "api")
+        self.assertEqual([s.rel for s in hit], ["arbeit/kunde/api-server"])
+
+    def test_all_terms_must_match_in_any_order(self):
+        statuses = [self._st("arbeit/kunde/api-server"), self._st("arbeit/blog"),
+                    self._st("privat/api-spielwiese")]
+        # Beide Begriffe zusammen treffen nur das eine Repo — und die Reihenfolge
+        # der Begriffe darf daran nichts ändern.
+        for query in ("arbeit api", "api arbeit"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    [s.rel for s in gmf_module.filter_statuses(statuses, query)],
+                    ["arbeit/kunde/api-server"])
+
+    def test_matching_ignores_case_including_the_german_sharp_s(self):
+        statuses = [self._st("Straße"), self._st("ANDERES")]
+        self.assertEqual([s.rel for s in gmf_module.filter_statuses(statuses, "STRASSE")],
+                         ["Straße"])
+        self.assertEqual([s.rel for s in gmf_module.filter_statuses(statuses, "anderes")],
+                         ["ANDERES"])
+
+    def test_no_match_yields_an_empty_list_not_the_whole_list(self):
+        statuses = [self._st("alpha"), self._st("beta")]
+        self.assertEqual(gmf_module.filter_statuses(statuses, "gibtsnicht"), [])
+
+    def test_filtering_returns_a_new_list_and_never_mutates_the_input(self):
+        statuses = [self._st("alpha"), self._st("beta")]
+        result = gmf_module.filter_statuses(statuses, "")
+        self.assertIsNot(result, statuses)
+        result.clear()
+        self.assertEqual(len(statuses), 2)
+
+    def test_the_dict_form_filters_by_the_same_rule(self):
+        repos = [{"rel": "arbeit/api"}, {"rel": "privat/blog"}, {}]
+        self.assertEqual(gmf_module.filter_repo_dicts(repos, "api"),
+                         [{"rel": "arbeit/api"}])
+        # Ein Repo ohne "rel" darf den Filter nicht sprengen — die Gegenseite
+        # eines --diff liefert fremdes JSON, auf dessen Felder man sich nicht
+        # verlassen kann.
+        self.assertEqual(len(gmf_module.filter_repo_dicts(repos, "")), 3)
+
+
+class TuiFilterTests(unittest.TestCase):
+    """Verhalten des Filters in der TUI: Auswahl, Kopfzeile, Esc."""
+
+    class Screen:
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 100)
+        def erase(self): pass
+        def clear(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+        def getch(self): return next(self.keys)
+        def get_wch(self): return next(self.keys)
+
+    def _ui(self, names, keys=(), dirty=()):
+        ui = TUI(self.Screen(keys), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp") / n, rel=n,
+                                      modified=1 if n in dirty else 0)
+                           for n in names]
+        ui.statuses = list(ui.all_statuses)
+        return ui
+
+    def test_applying_a_filter_narrows_the_visible_list_only(self):
+        ui = self._ui(["api-gateway", "blog", "api-docs"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        self.assertEqual([s.rel for s in ui.statuses], ["api-gateway", "api-docs"])
+        # Der Filter ist reine Anzeige: der Scan bleibt vollständig, sonst
+        # müsste ein Aufheben des Filters neu einlesen.
+        self.assertEqual(len(ui.all_statuses), 3)
+
+    def test_a_new_filter_moves_the_selection_to_the_first_hit(self):
+        ui = self._ui(["blog", "api-gateway", "api-docs"])
+        ui.selected = 0                      # steht auf "blog"
+        ui.filter_query = "api"
+        ui.apply_filter()
+        self.assertEqual(ui.current().rel, "api-gateway")
+
+    def test_reload_keeps_the_selected_repo_under_an_active_filter(self):
+        ui = self._ui(["api-gateway", "blog", "api-docs"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        ui.selected = 1                      # "api-docs"
+        ui.apply_filter(keep_selection=True)
+        self.assertEqual(ui.current().rel, "api-docs")
+
+    def test_selection_falls_back_to_the_top_when_its_repo_vanishes(self):
+        ui = self._ui(["api-gateway", "blog"])
+        ui.selected = 1                      # "blog"
+        ui.filter_query = "api"
+        ui.apply_filter(keep_selection=True)
+        self.assertEqual(ui.selected, 0)
+        self.assertEqual(ui.current().rel, "api-gateway")
+
+    def test_current_is_none_when_nothing_matches(self):
+        ui = self._ui(["alpha", "beta"])
+        ui.filter_query = "gibtsnicht"
+        ui.apply_filter()
+        self.assertIsNone(ui.current())
+
+    def test_hidden_dirty_counts_only_repos_the_filter_removed(self):
+        ui = self._ui(["api-gateway", "blog", "notizen"],
+                      dirty=("blog", "notizen", "api-gateway"))
+        ui.filter_query = "api"
+        ui.apply_filter()
+        # Zwei schmutzige Repos sind ausgeblendet; das sichtbare zählt nicht mit.
+        self.assertEqual(ui.hidden_dirty(), 2)
+
+    def test_the_header_names_the_filter_and_the_hidden_dirty_repos(self):
+        ui = self._ui(["api-gateway", "blog"], dirty=("blog",))
+        ui.filter_query = "api"
+        ui.apply_filter()
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        head = ui.scr.drawn[0][1]
+        self.assertIn("1/2", head)
+        self.assertIn("api", head)
+        # Ein Filter, der das einzige zu prüfende Repo versteckt, muss das sagen.
+        self.assertIn("1", head.split("+")[-1])
+        self.assertIn("+", head)
+
+    def test_an_empty_result_never_claims_everything_is_clean(self):
+        ui = self._ui(["alpha", "beta"], dirty=("alpha",))
+        ui.filter_query = "gibtsnicht"
+        ui.apply_filter()
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        head = ui.scr.drawn[0][1]
+        self.assertNotIn(gmf_module.TR["hdr_clean"]["en"], head)
+        self.assertIn(gmf_module.TR["filter_no_match"]["en"], head)
+
+    def test_an_empty_result_draws_a_hint_instead_of_an_empty_area(self):
+        ui = self._ui(["alpha"])
+        ui.filter_query = "gibtsnicht"
+        ui.apply_filter()
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        self.assertTrue(any("gibtsnicht" in text for _, text in ui.scr.drawn[1:]))
+
+    def test_clear_filter_restores_every_repo_and_holds_the_selection(self):
+        ui = self._ui(["blog", "api-gateway", "api-docs"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        ui.selected = 1                      # "api-docs"
+        ui.clear_filter()
+        self.assertEqual(ui.filter_query, "")
+        self.assertEqual(len(ui.statuses), 3)
+        self.assertEqual(ui.current().rel, "api-docs")
+
+    def test_the_prompt_starts_from_the_current_filter_and_can_extend_it(self):
+        # Esc im Dialog lässt den bestehenden Filter unangetastet …
+        ui = self._ui(["api-gateway"], keys=["\x1b"])
+        ui.filter_query = "api"
+        with mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_filter()
+        self.assertEqual(ui.filter_query, "api")
+        # … und das Feld ist mit ihm vorbelegt, sodass ⏎ ihn unverändert bestätigt.
+        ui = self._ui(["api-gateway", "blog"], keys=["\n"])
+        ui.filter_query = "api"
+        with mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_filter()
+        self.assertEqual(ui.filter_query, "api")
+        self.assertEqual([s.rel for s in ui.statuses], ["api-gateway"])
+
+    def test_an_emptied_prompt_clears_the_filter(self):
+        ui = self._ui(["api-gateway", "blog"], keys=["\x7f", "\x7f", "\x7f", "\n"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        with mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_filter()
+        self.assertEqual(ui.filter_query, "")
+        self.assertEqual(len(ui.statuses), 2)
+
+    def test_slash_reaches_the_filter_action(self):
+        ui = self._ui(["alpha"])
+        with mock.patch.object(TUI, "action_filter") as action:
+            ui.dispatch_action("/")
+        action.assert_called_once_with()
+
+    def test_refresh_one_updates_both_lists_so_the_filter_can_be_lifted(self):
+        ui = self._ui(["api-gateway", "blog"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        old = ui.statuses[0]
+        fresh = RepoStatus(path=old.path, rel=old.rel, modified=7)
+        with mock.patch("gitmaster_flash.collect_status", return_value=fresh):
+            ui.refresh_one(old)
+        ui.clear_filter()
+        # Ohne Nachziehen in all_statuses zeigte das Aufheben des Filters wieder
+        # den alten Stand.
+        self.assertEqual([s.modified for s in ui.statuses if s.rel == "api-gateway"],
+                         [7])
+
+
+class FilterCliTests(unittest.TestCase):
+    """--filter auf der nicht-interaktiven Schnittstelle."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="gmf-narrow-cli-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        for name in ("api-gateway", "blog"):
+            repo = self.root / name
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+
+    def _run(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        # `main()` setzt die modulweite Sprache. Ohne diese Klammer traegt der
+        # Test seine Umgebungssprache in alle folgenden Tests weiter, die auf der
+        # englischen Basis bestehen. `--lang en` haelt zusaetzlich die hier
+        # geprueften Texte unabhaengig von $LANG.
+        with mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(sys, "stderr", err), \
+                mock.patch.object(gmf_module, "UI_LANG", "en"):
+            code = gmf_module.main([str(self.root), "--lang", "en", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_list_shows_only_matching_repos_and_names_the_filter(self):
+        _, out, _ = self._run("--list", "--filter", "api")
+        self.assertIn("api-gateway", out)
+        self.assertNotIn("blog", out)
+        self.assertIn("api", out.splitlines()[0])
+
+    def test_json_carries_only_matching_repos(self):
+        _, out, _ = self._run("--json", "--filter", "api")
+        payload = json.loads(out)
+        self.assertEqual([r["rel"] for r in payload["repos"]], ["api-gateway"])
+
+    def test_a_filter_without_hits_says_so_on_stderr_not_on_stdout(self):
+        code, out, err = self._run("--json", "--filter", "gibtsnicht")
+        self.assertEqual(json.loads(out)["repos"], [])
+        self.assertIn("gibtsnicht", err)
+        # Der Exit-Code bleibt skriptbar: kein sichtbares Repo braucht etwas.
+        self.assertEqual(code, 0)
+
+    def test_without_a_filter_nothing_changes_in_the_header(self):
+        _, out, err = self._run("--list")
+        self.assertNotIn("filter", out.splitlines()[0].lower())
+        self.assertEqual(err, "")
 
 
 class DisplayAndIntegrationSafetyTests(unittest.TestCase):

@@ -151,6 +151,7 @@ memorize. Case does not matter — `f` works like `F`.
 |---|---|
 | ↑ / ↓ | select a repository |
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
+| / | filter the repo list by name (see below) |
 | M | switch between compact and detail view |
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
@@ -170,6 +171,34 @@ empty Git preview is labelled explicitly. Applying or deleting a stash remains a
 terminal task after that review: Git cannot atomically bind the target branch,
 index and working tree against concurrent changes, nor bind deletion to one
 specific reflog entry.
+
+## Filtering the repo list (`/`)
+
+Past a few hundred repositories, typing beats scrolling. `/` opens a one-line
+prompt; the list shrinks to the repositories whose **path** contains what you
+typed. `Esc` in the prompt keeps the current filter, an empty input clears it,
+and `Esc` in the list clears an active filter instead of quitting.
+
+Several terms separated by spaces must **all** occur, in any order — so
+`work api` also finds `work/customer/api-server` without you knowing the part in
+between. Matching ignores case.
+
+The filter is display only: it changes nothing in any repository and does not
+re-run the scan, so lifting it is instant. It matches the path alone, never the
+branch, remote or file contents — the path is the one thing visible in every
+view, and a filter keyed on something invisible would leave you guessing why a
+repository is missing.
+
+Because gmf exists to give you the overview, the header keeps saying what is
+hidden:
+
+```text
+ gitmaster_flash 0.19.0 · /Users/you/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+```
+
+`3/61` is how much you see, and `+7 hidden` counts the repositories the filter
+removed that would need attention. Without that number a filter could quietly
+hide exactly the repositories you started gmf for.
 
 ## Changes: read-only inspection (`A`)
 
@@ -422,6 +451,7 @@ some of them at random — which looks like a broken repo but isn't.
 python3 gitmaster_flash.py --list          # colored text list
 python3 gitmaster_flash.py --json          # machine-readable
 python3 gitmaster_flash.py --json --fetch  # fetch each repo first
+python3 gitmaster_flash.py --filter api    # only repos whose path matches
 python3 gitmaster_flash.py --lang de       # force the output language
 python3 gitmaster_flash.py --version       # bare version number, nothing else
 
@@ -432,8 +462,17 @@ python3 gitmaster_flash.py --version       # bare version number, nothing else
 #                    (before 0.6.0 --json printed a bare array)
 ```
 
+`--filter` takes the same terms as `/` in the UI and works with `--list`,
+`--json` and `--diff`; started interactively it preselects the filter, which `/`
+then changes. With `--diff` it narrows **both** machines by the same terms —
+filtering only one side would report "only here" differences that do not exist.
+The `--list` header names the active filter, and a filter without a single hit
+says so on stderr: on stdout an empty list and exit code 0 would otherwise look
+exactly like "everything is fine".
+
 Exit code 0 means everything is clean and in sync, 1 means at least one
-repository needs attention. Without a TTY the tool prints the list instead of
+repository needs attention; it is computed over the repositories that passed the
+filter. Without a TTY the tool prints the list instead of
 starting the UI, so a pipe does the sensible thing.
 
 One further flag exists but is not meant to be typed: `--cd-file` names the file

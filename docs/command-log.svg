@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 948 364" width="948" height="364" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
 <title>gitmaster_flash — the command log with the focus on it</title>
 <rect width="948" height="364" rx="8" fill="#1c1c1c"/>
-<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.18.10 · ~/git · 27 repos · 21 to review                                                   </text>
+<text x="12.0" y="25.0" fill="#d8d8d8" font-weight="bold" xml:space="preserve"> gitmaster_flash 0.19.0 · ~/git · 27 repos · 21 to review                                                    </text>
 <text x="20.4" y="42.0" fill="#e5c07b" xml:space="preserve">↑1  api-gateway      </text>
 <text x="213.6" y="42.0" fill="#e06c75" xml:space="preserve">⚠   ml-experiments   </text>
 <text x="406.8" y="42.0" fill="#e5c07b" xml:space="preserve">↑5  chess-engine     </text>
@@ -35,7 +35,7 @@
 <rect x="20.4" y="182.0" width="907.2" height="17.0" fill="#d8d8d8"/>
 <text x="20.4" y="195.0" fill="#1c1c1c" xml:space="preserve">✔ api-gateway: git -c core.hooksPath=/dev/null reset -q dfd7a41641021f2a835f4deb6bc61467efd078e5 -- ':(liter</text>
 <rect x="12.0" y="301.0" width="915.6" height="17.0" fill="#d8d8d8"/>
-<text x="12.0" y="314.0" fill="#1c1c1c" xml:space="preserve"> ↑/↓/←/→ select · ⏎ cd &amp; quit · M view · Tab log · I info · H help                                           </text>
+<text x="12.0" y="314.0" fill="#1c1c1c" xml:space="preserve"> ↑/↓/←/→ select · ⏎ cd &amp; quit · / filter · M view · Tab log · I info · H help                                </text>
 <rect x="12.0" y="318.0" width="915.6" height="17.0" fill="#d8d8d8"/>
 <text x="12.0" y="331.0" fill="#1c1c1c" xml:space="preserve"> E Editor · A changes · C commit · S stash view                                                              </text>
 <rect x="12.0" y="335.0" width="915.6" height="17.0" fill="#d8d8d8"/>
