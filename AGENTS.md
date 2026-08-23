@@ -306,13 +306,23 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
   die Konfiguration ohnehin nicht belegbar ist.
 
+## Bewusst nicht umgesetzt
+
+Keine offenen Aufgaben, sondern getroffene Entscheidungen und bekannte Grenzen.
+Sie standen bis 2026-08-23 als offene Kästchen im Backlog und sahen dadurch wie
+liegengebliebene Arbeit aus.
+
+- **Verlauf umschreiben (`reset`, Squash) bleibt draußen** (Entscheidung
+  2026-08-03). Nichts davon ist an einer Datei sichtbar, der Zielzustand lässt
+  sich nur mit der Commit-Historie im Kopf benennen, und ein falsch geratener
+  `reset --hard` kostet Commits statt Dateien. Bleibt Handarbeit im Einzelfall.
+- **Kein Bild zeigt einen abgebrochenen Dialog** (`⊘`-Zeile). Der einzige Weg
+  dorthin führt über die Info-Ansicht, die der Bildnachbau nicht sauber trifft —
+  siehe „Grenze des Generators" oben. Solche Ansichten gehören als
+  vorformatierter Textblock ins README, nicht als Bild.
+
 ## Offene Punkte / Ideen
 
-- [ ] Verlauf umschreiben (`reset`, Squash) bleibt bewusst draußen. Nichts davon ist
-      an einer Datei sichtbar, der Zielzustand lässt sich nur mit der Commit-Historie
-      im Kopf benennen, und ein falsch geratener `reset --hard` kostet Commits statt
-      Dateien. Bleibt Handarbeit im Einzelfall (Entscheidung 2026-08-03).
-- [ ] Kein Bild zeigt bisher einen abgebrochenen Dialog (`⊘`-Zeile), weil der
-      einzige Weg dorthin über die Info-Ansicht führt — die der Nachbau nicht
-      sauber trifft (siehe Grenze des Generators oben).
-- [ ] Screenshots in `docs/` bei UI-Änderungen neu aufnehmen (Rezept oben).
+- (derzeit keine; die vier Feature-Punkte Suche/Filter, Einstellungen in der
+  Oberfläche, Hintergrund-Fetch und Commit-Vorschläge sind am 2026-08-23
+  umgesetzt worden)
