@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import string
 import subprocess
@@ -6335,6 +6336,56 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
             parent.stdout.close()
             parent.kill()
             parent.wait()
+
+    def test_pty_cleanup_notes_the_descendants_before_the_pty_closes(self):
+        """Der Schnappschuss muss VOR `os.close(fd)` liegen, nicht danach.
+
+        Das PTY-Kind ist Sitzungsführer seines Terminals: Sobald der Generator
+        den Master schließt, bekommt es SIGHUP und stirbt. Ein erst danach
+        gezogener Schnappschuss über die Eltern-Kind-Kette findet die in einer
+        eigenen Session gestarteten Git-/Hook-Enkel nicht mehr — sie hängen dann
+        an init und liefen weiter. Dieser Test fährt genau diese Reihenfolge im
+        echten `_render_in_pty()` und nicht in einem Nachbau ab.
+        """
+        module, _ = self._make_screens_module()
+        owned_tmp = tempfile.mkdtemp(prefix="gmf-pty-cleanup-")
+        pid_file = os.path.join(owned_tmp, "grandchild.pid")
+        stand_in = os.path.join(owned_tmp, "stand_in.py")
+        # Steht anstelle von gitmaster_flash.py im PTY: startet wie ein echter
+        # Git-Aufruf einen Enkel in EIGENER Session und blockiert danach, damit
+        # erst das Schließen des Masters die Aufnahme beendet.
+        Path(stand_in).write_text(
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)\n"
+            "with open(sys.argv[1], 'w') as fh:\n"
+            "    fh.write(str(child.pid))\n"
+            "sys.stdout.write('READY\\n')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n")
+
+        grandchild = None
+        try:
+            with mock.patch.object(module, "GMF", stand_in):
+                module._render_in_pty([pid_file], b"", 0.2, owned_tmp,
+                                      ready_marker=b"READY")
+            grandchild = int(Path(pid_file).read_text().strip())
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild, 0)
+                except OSError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("Enkel in eigener Session hat die Aufnahme überlebt")
+        finally:
+            if grandchild is not None:
+                try:
+                    os.kill(grandchild, signal.SIGKILL)
+                except OSError:
+                    pass
+            shutil.rmtree(owned_tmp, ignore_errors=True)
 
     def test_readme_screens_exist_in_both_languages(self):
         module, _ = self._make_screens_module()

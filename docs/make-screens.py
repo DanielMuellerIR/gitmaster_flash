@@ -288,6 +288,13 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
             marker = (key_markers or {}).get(index)
             buf += _read_pty_until(fd, quiet=settle, marker=marker)
     finally:
+        # Die Nachfahren ALS ERSTES notieren — noch bei offenem PTY und
+        # garantiert lebendem Kind. Schon `os.close(fd)` beendet das Kind per
+        # SIGHUP (es ist Sitzungsführer des PTY); danach hängen seine Git-/Hook-
+        # Enkel an init, und die Eltern-Kind-Kette, die sie eindeutig als unsere
+        # ausweist, ist weg. Ein Blick erst nach dem Schließen findet sie nicht
+        # mehr und ließe sie laufen.
+        descendants = _descendant_pids(pid)
         try:
             os.write(fd, b"q")                      # quit the TUI
         except OSError:
@@ -297,10 +304,11 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
             os.close(fd)
         except OSError:
             pass
-        # Die Nachfahren NOCH VOR dem Töten des PTY-Kindes notieren: Danach hängen
-        # sie an init, und die Eltern-Kind-Kette, die sie eindeutig als unsere
-        # ausweist, ist weg.
-        descendants = _descendant_pids(pid)
+        # Zweiter Blick für alles, was das Kind zwischen Schnappschuss und
+        # Schließen noch gestartet hat. Ein PID doppelt zu beenden schadet
+        # nicht, einen zu übersehen schon.
+        descendants = descendants + [later for later in _descendant_pids(pid)
+                                     if later not in descendants]
         # Immer genau das Kind begrenzt einsammeln. Ein ignoriertes SIGTERM darf
         # weder den Generator noch den nächsten Screenshot blockieren.
         _terminate_pty_child(pid)
