@@ -306,7 +306,8 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   aber nicht gespeichert" statt eines Erfolgs.
 - Die TUI bekommt den Config-Pfad übergeben; im Demo-Modus ist er `None`. Ein
   Screenshot- oder Demo-Lauf darf die echte Einstellungsdatei nie anfassen,
-  sonst wären die Bilder maschinenabhängig — und Daniels Config verstellt.
+  sonst wären die Bilder maschinenabhängig — und die persönlichen Einstellungen
+  verstellt.
 - Eine nicht zerlegbare Remote-URL bekommt über `endpoint_fingerprints()` einen
   Ersatzfingerprint aus dem Hash der Rohadresse. Eine leere Liste sähe auf zwei
   Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
