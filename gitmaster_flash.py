@@ -4094,7 +4094,6 @@ class BackgroundScan:
         self.queue: queue.Queue = queue.Queue()
         self.total = 0
         self.done = 0
-        self.finished = False
         self._thread = threading.Thread(target=self._work, daemon=True)
 
     def start(self) -> None:
@@ -4483,6 +4482,19 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
 # Mehrere durch Leerzeichen getrennte Begriffe müssen ALLE vorkommen, in
 # beliebiger Reihenfolge. So findet "arbeit api" auch "arbeit/kunde/api-server",
 # ohne dass man den Pfad dazwischen kennt.
+
+
+def canonical_filter_query(query: str) -> str:
+    """Suchtext auf seine Wirkung bringen: Leerraum weg, Woerter einfach getrennt.
+
+    `filter_terms` zerlegt mit `split()`; eine Eingabe aus lauter Leerzeichen
+    ergibt dort KEINE Begriffe und zeigt alle Repos. Kopfzeile, Esc-Bedeutung und
+    die Meldungen lasen dagegen den Rohstring und hielten ihn fuer einen aktiven
+    Filter — die optisch leere Eingabe hob den Filter also nicht auf, obwohl die
+    Doku genau das zusagt (Review-Fund 2026-08-25). Deshalb hier an der
+    Eingabegrenze kanonisieren.
+    """
+    return " ".join(query.split())
 
 
 def filter_terms(query: str) -> list[str]:
@@ -4884,7 +4896,7 @@ class TUI:
         # auf `statuses` — ohne aktiven Filter sind beide Listen inhaltsgleich.
         self.all_statuses: list[RepoStatus] = []
         self.statuses: list[RepoStatus] = []
-        self.filter_query = query  # "" = kein Filter; --filter belegt ihn vor
+        self.filter_query = canonical_filter_query(query)  # "" = kein Filter; --filter belegt ihn vor
         self.selected = 0
         self.offset = 0            # Scroll-Position
         self.expanded: set[str] = set()   # rel-Pfade der aufgeklappten Repos
@@ -4900,10 +4912,14 @@ class TUI:
         # Repos, die WAEHREND des Hintergrund-Fetch lokal neu eingelesen wurden
         # (Commit, Stash, Push). Deren Ergebnis aus dem Scan ist aelter als das,
         # was der Anwender gerade sieht, und wird verworfen.
-        self.locally_refreshed: set[str] = set()
+        # Geschluesselt ueber den ECHTEN Pfad, nicht ueber `rel`: Der Anzeigename ist
+        # NFC-normalisiert, und zwei unter Linux zulaessige Ordner, die sich nur in
+        # NFC/NFD unterscheiden, bekaemen denselben Schluessel — der Hintergrund-Fetch
+        # ersetzte dann den Zustand des einen durch den des anderen
+        # (Review-Fund 2026-08-25).
+        self.locally_refreshed: set[Path] = set()
         # curses wartet standardmaessig unbegrenzt auf eine Taste. Nur waehrend
         # eines Hintergrund-Scans wird daraus ein begrenztes Warten.
-        self._input_wait = -1
 
     # -- Datenbeschaffung ---------------------------------------------------
 
@@ -4979,11 +4995,11 @@ class TUI:
         unter dem Cursor weg und man klickte auf ein anderes Repo als gemeint.
         Sortiert wird einmal am Ende.
         """
-        if new.rel in self.locally_refreshed:
+        if new.path in self.locally_refreshed:
             return
         for bucket in (self.all_statuses, self.statuses):
             for i, entry in enumerate(bucket):
-                if entry.rel == new.rel:
+                if entry.path == new.path:
                     bucket[i] = new
                     break
 
@@ -4993,9 +5009,9 @@ class TUI:
         # Remote-Zahlen koennen dadurch aelter sein als der Rest — das naechste R
         # holt sie nach. Der umgekehrte Fehler waere schlimmer: ein Commit, den
         # die Liste wieder als offene Aenderung zeigt.
-        keep = {st.rel: st for st in self.all_statuses
-                if st.rel in self.locally_refreshed}
-        merged = [keep.get(st.rel, st) for st in results]
+        keep = {st.path: st for st in self.all_statuses
+                if st.path in self.locally_refreshed}
+        merged = [keep.get(st.path, st) for st in results]
         self.all_statuses = sort_statuses(merged)
         self.apply_filter(keep_selection=True)
         self.scan = None
@@ -5040,7 +5056,7 @@ class TUI:
         # Ab jetzt ist der lokale Stand dieses Repos juenger als alles, was ein
         # laufender Hintergrund-Fetch dazu noch liefern kann.
         if self.scan:
-            self.locally_refreshed.add(new.rel)
+            self.locally_refreshed.add(new.path)
         # Identität statt Gleichheit: Zwei Repos mit identischem Zustand sind als
         # Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
         # Beide Listen müssen nachgezogen werden, sonst zeigte ein späteres
@@ -5413,7 +5429,7 @@ class TUI:
             curses.curs_set(0)
         if answer is None:          # Esc: bestehenden Filter unangetastet lassen
             return
-        self.filter_query = answer
+        self.filter_query = canonical_filter_query(answer)
         self.apply_filter()
         if not self.filter_query:
             self.message = t("filter_cleared")
@@ -6961,12 +6977,13 @@ def main(argv: list[str] | None = None) -> int:
                               "repos": [status_dict(s) for s in statuses]},
                              indent=2, ensure_ascii=False))
         else:
-            print_list(statuses, root, args.filter)
+            print_list(statuses, root, canonical_filter_query(args.filter))
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
-        if args.filter and not statuses:
-            print(t("filter_cli_no_hit", q=args.filter), file=sys.stderr)
+        if canonical_filter_query(args.filter) and not statuses:
+            print(t("filter_cli_no_hit", q=canonical_filter_query(args.filter)),
+                  file=sys.stderr)
         # Exit-Code 1, wenn irgendein Repo Aufmerksamkeit braucht (skriptbar).
         return 0 if all(s.clean_and_synced for s in statuses) else 1
 

@@ -5973,6 +5973,18 @@ class TuiFilterTests(unittest.TestCase):
         ui.statuses = list(ui.all_statuses)
         return ui
 
+    def test_a_blank_filter_is_no_filter_at_all(self):
+        """Review-Fund 2026-08-25: Eine Eingabe aus lauter Leerzeichen blieb aktiv.
+
+        `filter_terms` zerlegt mit `split()` und zeigt dann alle Repos, waehrend
+        Kopfzeile, Meldungen und die Esc-Bedeutung den nichtleeren Rohstring als
+        aktiven Filter lasen. Kanonisiert wird jetzt an der Eingabegrenze.
+        """
+        self.assertEqual(gmf_module.canonical_filter_query("   "), "")
+        self.assertEqual(gmf_module.canonical_filter_query("  api   docs "), "api docs")
+        ui = TUI(self.Screen(()), Path("/tmp"), DEFAULT_CONFIG, None, "   ")
+        self.assertEqual(ui.filter_query, "")
+
     def test_applying_a_filter_narrows_the_visible_list_only(self):
         ui = self._ui(["api-gateway", "blog", "api-docs"])
         ui.filter_query = "api"
@@ -6720,7 +6732,9 @@ class TuiBackgroundFetchTests(unittest.TestCase):
         ui = self._ui(["alpha"])
         ui.scan = self.FakeScan()
         ui.all_statuses[0] = ui.statuses[0] = self._st("alpha", modified=0)
-        ui.locally_refreshed.add("alpha")
+        # Geschluesselt ueber den echten Pfad, nicht ueber den Anzeigenamen
+        # (Review-Fund 2026-08-25).
+        ui.locally_refreshed.add(Path("/tmp") / "alpha")
         ui.scan.queue.put(("one", self._st("alpha", modified=9)))
         ui.drain_background_scan()
         self.assertEqual(ui.all_statuses[0].modified, 0)
@@ -6737,7 +6751,39 @@ class TuiBackgroundFetchTests(unittest.TestCase):
         ui.scan = self.FakeScan()
         with mock.patch("gitmaster_flash.collect_status", return_value=fresh):
             ui.refresh_one(ui.all_statuses[0])
-        self.assertEqual(ui.locally_refreshed, {"alpha"})
+        self.assertEqual(ui.locally_refreshed, {Path("/tmp") / "alpha"})
+
+    def test_two_repos_differing_only_in_unicode_form_stay_apart(self):
+        """Review-Fund 2026-08-25: `rel` ist NFC-normalisiert, der Pfad nicht.
+
+        Zwei unter Linux zulaessige Ordner, deren Namen sich nur in NFC/NFD
+        unterscheiden, bekamen denselben Anzeigenamen. Ueber ihn zusammengefuehrt,
+        ersetzte der Hintergrund-Fetch den einen Zustand durch den anderen.
+        """
+        nfc = "caf\u00e9"          # é als EIN Codepoint
+        nfd = "cafe\u0301"         # e + kombinierender Akzent
+        vorher = [
+            RepoStatus(path=Path("/tmp") / nfc, rel=nfc, modified=1),
+            RepoStatus(path=Path("/tmp") / nfd, rel=nfc, modified=2),
+        ]
+        ui = self._ui([])
+        ui.all_statuses = list(vorher)
+        ui.statuses = list(vorher)
+        ui.scan = self.FakeScan()
+        ui.locally_refreshed.add(Path("/tmp") / nfc)
+        ui.scan.queue.put(("done", [
+            RepoStatus(path=Path("/tmp") / nfc, rel=nfc, modified=99),
+            RepoStatus(path=Path("/tmp") / nfd, rel=nfc, modified=2),
+        ]))
+        ui.drain_background_scan()
+
+        # Nach Pfad nachschlagen, nicht nach Anzeigename: Der ist fuer beide gleich.
+        nach_pfad = {str(s.path): s.modified for s in ui.all_statuses}
+        self.assertEqual(len(ui.all_statuses), 2)
+        self.assertEqual(nach_pfad[f"/tmp/{nfc}"], 1,
+                         "Der lokal aufgefrischte Eintrag behaelt seinen juengeren Stand")
+        self.assertEqual(nach_pfad[f"/tmp/{nfd}"], 2,
+                         "Der andere Eintrag darf davon nicht ueberschrieben werden")
 
     def test_a_running_scan_shows_its_progress_in_the_header(self):
         ui = self._ui(["alpha"])
