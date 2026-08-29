@@ -215,6 +215,10 @@ loop_head_end() {
 # Wie weit reicht der Rumpf hinter einem fertigen Kopf? Setzt `short_loop_kind`
 # auf `line` (Rumpf endet auf dieser Zeile, `short_loop_end` nennt sein letztes
 # Wort), `do`, `brace` oder `pending` (der Rumpf beginnt erst später).
+# `short_loop_body_at` nennt zusätzlich das erste echte Wort des Rumpfes — dort
+# beginnt ein Kommando, und nur dort. Für einen Klammerrumpf bleibt es 0: Das
+# `{` legt der Blockstapel selbst an, und eine Marke darauf ließe ihn den schon
+# vollständig gelesenen Block ein zweites Mal öffnen.
 short_loop_body() {
   local -i start="$1" i j n begun=0 brace=0
   shift
@@ -223,6 +227,7 @@ short_loop_body() {
   n=${#words}
   short_loop_kind=pending
   short_loop_end=0
+  short_loop_body_at=0
   for ((i = start; i <= n; i++)); do
     word="${words[i]}"
     [[ "$word" == \#* ]] && break
@@ -245,6 +250,11 @@ short_loop_body() {
             if (( brace == 0 )); then
               short_loop_kind=line
               short_loop_end=$j
+              # Auch im Klammerrumpf beginnt hinter dem `{` ein Kommando. Ohne
+              # diese Marke blieb `for x (a b) { return }` unbemerkt, obwohl es
+              # die .zshrc abbricht — und eine spätere source-Zeile galt
+              # fälschlich als wirksam (Fund 2026-08-29 beim Nachbuchen).
+              (( i + 1 <= n )) && short_loop_body_at=$((i + 1))
               return 0
             fi
           fi
@@ -253,6 +263,7 @@ short_loop_body() {
         return 0
       fi
       begun=1
+      short_loop_body_at=$i
       continue
     fi
     if ends_sublist "$word"; then
@@ -277,10 +288,11 @@ short_loop_body() {
 resolve_sourced_path() {
   local line="$1" word path raw_path last_path="" modifier_mode="" block_kind=""
   local short_loop_kind=""
-  local -a words top_level
+  local -a words top_level body_start
   local -i command_start=1 i paren_depth=0 assignment_depth=0 \
     in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1 \
-    block_depth=0 loop_head=0 short_loop_end=0 short_close=0
+    block_depth=0 loop_head=0 short_loop_end=0 short_loop_body_at=0 \
+    short_close=0
   # zshs `(z)`-Lexer trennt wie die Shell, fuehrt den Inhalt aber nicht aus.
   # Quotes bleiben am Token und ein `#` innerhalb von Quotes wird deshalb nie
   # mit einem Kommentar verwechselt. Ebenso bleibt `source` in einem
@@ -335,6 +347,11 @@ resolve_sourced_path() {
           && loop_head_end "$i" "${words[@]}"; then
         short_loop_body $((loop_head + 1)) "${words[@]}"
         [[ "$short_loop_kind" == line ]] && short_close=$short_loop_end
+        # Hinter dem Kopf beginnt ein Kommando. Ohne diese Marke bliebe der
+        # zweite Durchgang dort auf `command_start=0` stehen und uebersaehe ein
+        # `return` im Rumpf — `for x (a b) return` bricht die .zshrc aber ab,
+        # und alles danach ist unerreichbar (Fund 2026-08-29).
+        (( short_loop_body_at )) && body_start[$short_loop_body_at]=1
       fi
     elif block_closer_kind "$word"; then
       if (( block_depth == 0 )); then
@@ -361,6 +378,8 @@ resolve_sourced_path() {
   for ((i = 1; i <= ${#words}; i++)); do
     word="${words[i]}"
     [[ "$word" == \#* ]] && break
+    # Der Rumpf einer Kurzform beginnt an einem Kommandoanfang (siehe oben).
+    (( ${body_start[i]:-0} )) && command_start=1
     if (( assignment_depth )); then
       [[ "$word" == '(' ]] && assignment_depth=$((assignment_depth + 1))
       [[ "$word" == ')' ]] && assignment_depth=$((assignment_depth - 1))
@@ -732,7 +751,8 @@ zshrc_context_state() {
   local line="$1" state="$2" word previous="" opener="" context
   local block_kind="" short_loop_kind=""
   local -i command_start=1 function_pending=0 nested_safe=0 \
-    open_subs=0 open_index=0 wi=0 loop_head=0 short_loop_end=0 short_close=0
+    open_subs=0 open_index=0 wi=0 loop_head=0 short_loop_end=0 short_close=0 \
+    short_body_at=0 short_loop_body_at=0
   local -a words stack
   [[ -n "$state" ]] && stack=("${(@s:,:)state}")
   if line_leaves_quote_open "$line"; then
@@ -764,6 +784,13 @@ zshrc_context_state() {
     if (( short_close && wi > short_close )); then
       [[ "${stack[-1]:-}" == shortloop ]] && stack[-1]=()
       short_close=0
+    fi
+    # Hinter dem Kopf beginnt ein Kommando. Ohne diese Marke stuende hier
+    # `command_start=0`, und ein `return` im Rumpf bliebe unbemerkt —
+    # `for x (a b) return` bricht die .zshrc aber ab (Fund 2026-08-29).
+    if (( short_body_at && wi == short_body_at )); then
+      command_start=1
+      short_body_at=0
     fi
     if [[ "$word" == '<<' || "$word" == '<<-' || "$word" == *'`'* ]]; then
       # Mehrere/nachgestellte Here-Docs und mehrzeilige Backtick-Ersetzungen
@@ -836,6 +863,7 @@ zshrc_context_state() {
             brace)   opener=brace ;;
             pending) opener=shortpending ;;
           esac
+          short_body_at=$short_loop_body_at
         fi
       else
         case "$word" in

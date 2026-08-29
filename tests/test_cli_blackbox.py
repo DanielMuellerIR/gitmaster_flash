@@ -823,6 +823,37 @@ class InstallScriptTests(unittest.TestCase):
                 # heraus — als Beleg fuer eine Registrierung zaehlt das nicht.
                 self.assertIn("Registered wrapper", result.stdout)
 
+    def test_a_return_in_a_short_loop_body_still_aborts_the_file(self):
+        """`for x (a b) return` bricht die .zshrc ab — alles danach ist tot.
+
+        Der Rumpf einer Kurzform beginnt an einem Kommandoanfang. Ohne diese
+        Marke stand der Scanner dort noch auf "mitten im Kommando", übersah das
+        `return` und erklärte eine spätere source-Zeile für wirksam — der
+        Installer meldete "Already installed", während `gmf` nie entsteht
+        (Fund 2026-08-29 beim Nachbuchen).
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        rumpf = (
+            "for x (a b) {stopper}",              # gewoehnlicher Rumpf
+            "repeat 2; {stopper}",                # Trenner vor dem Rumpf
+            "for x (a b) {{ {stopper} }}",        # Klammerrumpf
+            "for x (a b)\n{stopper}",             # Rumpf auf der Folgezeile
+        )
+        for stopper in ("return", "exit 0"):
+          for form in rumpf:
+            with self.subTest(stopper=stopper, form=form):
+                zshrc.write_text(
+                    form.format(stopper=stopper) + f"\nsource -- {wrapper}\n")
+                # Belegen, dass die Datei den Wrapper wirklich nicht lädt.
+                self.assertFalse(self._loads_the_wrapper())
+
+                result = self._install()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("cannot prove a top-level registration",
+                              result.stderr)
+
     def test_a_while_condition_is_not_treated_as_a_short_loop_head(self):
         """`while false; print x` sieht wie eine Kurzform aus und ist keine.
 
