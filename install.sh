@@ -64,13 +64,56 @@ is_command_modifier() {
      || "$1" == command || "$1" == builtin ]]
 }
 
+# Auch die Blockgrammatik gehört zu den Regeln, die beide Scanner teilen
+# müssen: `if`, die Schleifen und `case` machen einen Block auf, den jeweils ein
+# eigenes Wort wieder schließt. Stünden diese Listen zweimal im Skript, ließe
+# schon ein einziges nur einseitig ergänztes Schlüsselwort die beiden
+# Vorstellungen vom Blockkontext auseinanderlaufen — der eine Scanner hielte
+# eine Zeile für Top-Level, der andere für Blockinneres. Beide Ausgänge sind
+# falsch: doppelt eintragen oder ein nie ausgeführtes `source` als
+# Registrierung anerkennen. Beide Funktionen liefern die ART des Blocks in
+# `block_kind` — der Mehrzeilen-Stapel braucht sie, um Anfang und Ende einander
+# zuzuordnen. Ueber eine Variable statt ueber die Ausgabe, weil sie je Wort
+# aufgerufen werden und eine Kommandoersetzung dafuer jedes Mal einen Prozess
+# kostete; die Aufrufer deklarieren `block_kind` selbst als `local`.
+block_opener_kind() {
+  case "$1" in
+    if) block_kind=if ;;
+    for|foreach|while|until|select|repeat) block_kind=loop ;;
+    'case') block_kind=case ;;
+    *) block_kind=""; return 1 ;;
+  esac
+}
+
+block_closer_kind() {
+  case "$1" in
+    fi) block_kind=if ;;
+    # `end` schliesst die zsh-eigene Schleifenform `foreach x (a b) … end`.
+    # Ohne diese Zeile blieb der Blockstapel bis zum Dateiende offen, und der
+    # Installer lehnte eine voellig gueltige .zshrc mit "unclosed or
+    # unsupported shell block" ab, statt sich zu registrieren (Fund
+    # 2026-08-29).
+    done|end) block_kind=loop ;;
+    'esac') block_kind=case ;;
+    *) block_kind=""; return 1 ;;
+  esac
+}
+
+# Bewusst NICHT abgedeckt bleiben zwei weitere zsh-Kurzformen, deren Rumpf ohne
+# eigenes Schlusswort am Zeilenende aufhoert: `for name (woerter) kommando` und
+# `repeat n kommando`. Sie von ihren langen Fassungen zu unterscheiden verlangt
+# einen Blick voraus auf ein spaeteres `do` — das waere ein echter Parser, kein
+# Schluesselwortvergleich. Bis dahin bricht der Installer bei solchen Dateien
+# mit Exit 1 ab und schreibt nichts; das ist die sichere Richtung, aber eine
+# Einschraenkung, keine Absicht.
+
 # Denselben Pfad kann man verschieden schreiben: `~/git/...`, `$HOME/git/...`,
 # mit oder ohne Quotes. Ein reiner Textvergleich hielte das für ein anderes Repo
 # und verlangte grundlos Handarbeit — deshalb wird der Pfad aus der bestehenden
 # Zeile herausgelöst und aufgelöst verglichen. Bewusst OHNE eval: die .zshrc ist
 # hier Datei-Inhalt, kein Code, den dieses Skript ausführen darf.
 resolve_sourced_path() {
-  local line="$1" word path raw_path last_path="" modifier_mode=""
+  local line="$1" word path raw_path last_path="" modifier_mode="" block_kind=""
   local -a words top_level
   local -i command_start=1 i paren_depth=0 assignment_depth=0 \
     in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1 \
@@ -113,28 +156,31 @@ resolve_sourced_path() {
     if (( ! scan_command_start )); then
       continue
     fi
-    case "$word" in
-      if|for|foreach|while|until|select|repeat|case|function)
-        # Blockanfang: alles bis zum passenden Schluesselwort steht darin.
-        block_depth=$((block_depth + 1))
-        top_level[i]=0
-        ;;
-      fi|done|esac)
-        if (( block_depth == 0 )); then
-          # Ein Blockende ohne Anfang auf dieser Zeile: Der Kontext kommt von
-          # weiter oben, hier laesst sich nichts belegen.
-          return 1
-        fi
-        block_depth=$((block_depth - 1))
-        top_level[i]=0
-        ;;
-      then|elif|else|do)
-        # Diese Woerter gehoeren in einen bereits gezaehlten Block. Ohne
-        # Blockanfang auf derselben Zeile bleibt der Kontext unklar.
-        (( block_depth == 0 )) && return 1
-        top_level[i]=0
-        ;;
-    esac
+    if block_opener_kind "$word" || [[ "$word" == function ]]; then
+      # Blockanfang: alles bis zum passenden Schluesselwort steht darin. Welche
+      # Art es ist, spielt hier keine Rolle — gezaehlt wird nur die Tiefe.
+      block_depth=$((block_depth + 1))
+      top_level[i]=0
+    elif block_closer_kind "$word"; then
+      if (( block_depth == 0 )); then
+        # Ein Blockende ohne Anfang auf dieser Zeile: Der Kontext kommt von
+        # weiter oben, hier laesst sich nichts belegen.
+        return 1
+      fi
+      block_depth=$((block_depth - 1))
+      top_level[i]=0
+    else
+      case "$word" in
+        then|elif|else|do)
+          # Diese Woerter gehoeren in einen bereits gezaehlten Block. Ohne
+          # Blockanfang auf derselben Zeile bleibt der Kontext unklar. Sie
+          # stehen bewusst nur hier: Der Mehrzeilen-Stapel unten braucht von
+          # ihnen nur `then` und `do`, und das fuer eine andere Frage.
+          (( block_depth == 0 )) && return 1
+          top_level[i]=0
+          ;;
+      esac
+    fi
     scan_command_start=0
   done
   for ((i = 1; i <= ${#words}; i++)); do
@@ -509,6 +555,7 @@ unclosed_substitutions() {
 # test_unclosed_shell_context_fails_without_appending_a_registration.
 zshrc_context_state() {
   local line="$1" state="$2" word previous="" opener="" context
+  local block_kind=""
   local -i command_start=1 function_pending=0 nested_safe=0 \
     open_subs=0 open_index=0
   local -a words stack
@@ -574,44 +621,47 @@ zshrc_context_state() {
     fi
     if (( command_start )); then
       opener=""
-      case "$word" in
-        return|exit|exec)
-          # Ein Abbruch in einem beim Sourcen ausgeführten if-/case-/Loop-/
-          # Brace-Block kann jede spätere Registrierung unerreichbar machen.
-          # Nur Funktions-, Subshell- und Kommandoersetzungs-Körper laufen beim
-          # bloßen Sourcen der .zshrc nachweislich nicht in diesem Kontext.
-          nested_safe=0
-          for context in "${stack[@]}"; do
-            [[ "$context" == function || "$context" == paren \
-               || "$context" == command ]] && nested_safe=1
-          done
-          if (( ! nested_safe )); then
-            print -r -- opaque
-            return 0
-          fi
-          ;;
-        fi)   [[ "${stack[-1]:-}" == if ]] && stack[-1]=() ;;
-        done) [[ "${stack[-1]:-}" == loop ]] && stack[-1]=() ;;
-        'esac') [[ "${stack[-1]:-}" == case ]] && stack[-1]=() ;;
-        '}')
-          if [[ "${stack[-1]:-}" == brace || "${stack[-1]:-}" == function ]]; then
-            stack[-1]=()
-          fi
-          ;;
-        if) opener=if ;;
-        for|foreach|while|until|select|repeat) opener=loop ;;
-        'case') opener=case ;;
-        '{') opener=brace ;;
-        '(') opener=paren ;;
-        function|coproc)
-          function_pending=1
-          ;;
-        then|do)
-          command_start=1
-          previous="$word"
-          continue
-          ;;
-      esac
+      # Blockanfang und -ende kommen aus derselben Grammatik wie im
+      # Kandidatenresolver; hier wird zusaetzlich die ART gebraucht, damit ein
+      # `fi` nur ein `if` schliesst und nicht irgendeinen offenen Block.
+      if block_closer_kind "$word"; then
+        [[ "${stack[-1]:-}" == "$block_kind" ]] && stack[-1]=()
+      elif block_opener_kind "$word"; then
+        opener="$block_kind"
+      else
+        case "$word" in
+          return|exit|exec)
+            # Ein Abbruch in einem beim Sourcen ausgeführten if-/case-/Loop-/
+            # Brace-Block kann jede spätere Registrierung unerreichbar machen.
+            # Nur Funktions-, Subshell- und Kommandoersetzungs-Körper laufen beim
+            # bloßen Sourcen der .zshrc nachweislich nicht in diesem Kontext.
+            nested_safe=0
+            for context in "${stack[@]}"; do
+              [[ "$context" == function || "$context" == paren \
+                 || "$context" == command ]] && nested_safe=1
+            done
+            if (( ! nested_safe )); then
+              print -r -- opaque
+              return 0
+            fi
+            ;;
+          '}')
+            if [[ "${stack[-1]:-}" == brace || "${stack[-1]:-}" == function ]]; then
+              stack[-1]=()
+            fi
+            ;;
+          '{') opener=brace ;;
+          '(') opener=paren ;;
+          function|coproc)
+            function_pending=1
+            ;;
+          then|do)
+            command_start=1
+            previous="$word"
+            continue
+            ;;
+        esac
+      fi
       [[ -n "$opener" ]] && stack+=("$opener")
     fi
     if [[ "$word" == "()" && -n "$previous" ]]; then

@@ -633,12 +633,30 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Registered wrapper", result.stdout)
 
     def _is_active_line(self, line: str) -> bool:
-        """Den quote-aware Lexer aus install.sh anwenden — ohne Selbsttest."""
+        """Den quote-aware Lexer aus install.sh anwenden — ohne Selbsttest.
+
+        Geladen wird der GANZE Funktionsblock, nicht nur `resolve_sourced_path`.
+        Die Funktion ruft `is_command_separator`, `is_assignment_word` und
+        `is_command_modifier` auf; fehlen sie, meldet zsh "command not found",
+        die Aufrufe gelten als falsch, und der Scanner arbeitet stiller nach
+        einer anderen Grammatik als der Installer. Zwei Zeilen des Korpus
+        entschied er dadurch nachweislich anders, und eine kaputte
+        Helferfunktion waere hier gar nicht aufgefallen (Fund 2026-08-29).
+        Der Block enthaelt ausschliesslich Definitionen — der Selbsttest und
+        das Anhaengen an die .zshrc stehen dahinter und laufen deshalb nicht
+        mit. `wrapper_path`/`quoted_wrapper` setzt der Aufrufer, weil
+        `resolve_sourced_path` die vom Installer selbst geschriebene
+        serialisierte Form daran erkennt.
+        """
         script = (
-            'source <(sed -n "/^resolve_sourced_path()/,/^}/p" %s)\n'
+            'source <(sed -n "/^is_assignment_word()/,/^# Nur echte, lexikalisch/p" %s'
+            ' | sed "\\$d")\n'
+            'wrapper_path=%s\n'
+            'quoted_wrapper="${(qqq)wrapper_path}"\n'
             'path="$(resolve_sourced_path "$1")" || exit 1\n'
             '[[ "${path:t}" == gmf.zsh ]]\n'
-            % shlex.quote(str(self.repo / "install.sh"))
+            % (shlex.quote(str(self.repo / "install.sh")),
+               shlex.quote(str(self.repo / "gmf.zsh")))
         )
         result = subprocess.run(["zsh", "-c", script, "zsh", line],
                                 capture_output=True, text=True)
@@ -673,6 +691,48 @@ class InstallScriptTests(unittest.TestCase):
         for line in passiv:
             with self.subTest(line=line):
                 self.assertFalse(self._is_active_line(line))
+
+    def test_the_lexer_check_really_loads_the_shared_grammar(self):
+        """Zwei Zeilen, die nur MIT den Helferfunktionen richtig entschieden werden.
+
+        Frueher lud die Pruefung nur `resolve_sourced_path`. `is_assignment_word`
+        und `is_command_separator` fehlten dann, ihre Aufrufe galten als falsch,
+        und beide Zeilen hier wurden abgelehnt — obwohl der Installer selbst sie
+        als Registrierung erkennt. Eine kaputte Helferfunktion waere so nie
+        aufgefallen.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        # Praefix-Zuweisung: braucht is_assignment_word im ersten Durchgang.
+        self.assertTrue(self._is_active_line(f"VAR=1 source -- {wrapper}"))
+        # Geschlossener Block plus Trenner: braucht is_command_separator, damit
+        # das `fi` ueberhaupt als Kommandoanfang gesehen wird.
+        self.assertTrue(
+            self._is_active_line(f"if true; then :; fi; source -- {wrapper}"))
+
+    def test_a_foreach_loop_does_not_block_the_installation(self):
+        """`foreach x (…) … end` ist gueltiges zsh — der Blockstapel kannte `end` nicht.
+
+        Der Stapel blieb dadurch bis zum Dateiende offen, und der Installer
+        brach mit "unclosed or unsupported shell block" ab, statt sich
+        einzutragen: eine einwandfreie .zshrc, in die man nicht installieren
+        konnte (Fund 2026-08-29).
+        """
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text("foreach x (a b)\n  print -r -- $x\nend\n")
+        # Erst belegen, dass zsh die Datei wirklich annimmt.
+        check = subprocess.run(["zsh", "-n", str(zshrc)],
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Registered wrapper", result.stdout)
+        self.assertTrue(self._loads_the_wrapper())
+        # Und der zweite Lauf erkennt die eigene Zeile wieder.
+        again = self._install()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("Already installed", again.stdout)
 
     def test_hash_inside_quoted_clone_path_stays_idempotent(self):
         clone = self.home / "project # copy"

@@ -326,6 +326,16 @@ liegengebliebene Arbeit aus.
   2026-08-03). Nichts davon ist an einer Datei sichtbar, der Zielzustand lässt
   sich nur mit der Commit-Historie im Kopf benennen, und ein falsch geratener
   `reset --hard` kostet Commits statt Dateien. Bleibt Handarbeit im Einzelfall.
+- **Der zshrc-Scanner in `install.sh` kennt zwei zsh-Kurzformen nicht**:
+  `for name (woerter) kommando` und `repeat n kommando`. Beide haben keinen
+  eigenen Schluss (`done`), ihr Rumpf endet am Zeilenende. Sie von der langen
+  Fassung zu unterscheiden verlangt einen Blick voraus auf ein spaeteres `do` —
+  also einen echten Parser statt eines Schluesselwortvergleichs. Solange das so
+  ist, bricht der Installer bei einer solchen `.zshrc` mit Exit 1 ab und
+  schreibt nichts. Sichere Richtung, aber eine Einschraenkung: Die Datei ist
+  gueltig, die Meldung „Fix the file syntax" trifft sie nicht. `foreach x (…) …
+  end` ist seit 2026-08-29 abgedeckt, weil `end` ein Schluesselwort ist und in
+  die gemeinsame Blockgrammatik passte (Fund 2026-08-29).
 - **Kein Bild zeigt einen abgebrochenen Dialog** (`⊘`-Zeile). Der einzige Weg
   dorthin führt über die Info-Ansicht, die der Bildnachbau nicht sauber trifft —
   siehe „Grenze des Generators" oben. Solche Ansichten gehören als
