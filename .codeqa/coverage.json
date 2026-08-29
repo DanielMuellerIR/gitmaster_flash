@@ -2,12 +2,12 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260829T180724876938+0200",
-    "token_budget": 4000000,
+    "id": "20260829T203952085645+0200",
+    "token_budget": 100000,
     "status": "complete",
-    "started_at": "2026-08-29T18:07:24+02:00",
-    "tokens_spent": 334952,
-    "finished_at": "2026-08-29T19:52:04+02:00",
+    "started_at": "2026-08-29T20:39:52+02:00",
+    "tokens_spent": 54763,
+    "finished_at": "2026-08-29T20:57:49+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -27,6 +27,15 @@
       "started_at": "2026-08-19T20:26:44+02:00",
       "tokens_spent": 348914,
       "finished_at": "2026-08-19T21:57:14+02:00",
+      "finish_reason": "all-current"
+    },
+    {
+      "id": "20260829T180724876938+0200",
+      "token_budget": 4000000,
+      "status": "complete",
+      "started_at": "2026-08-29T18:07:24+02:00",
+      "tokens_spent": 334952,
+      "finished_at": "2026-08-29T19:52:04+02:00",
       "finish_reason": "all-current"
     }
   ],
@@ -81,16 +90,16 @@
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T180724876938+0200",
-        "completed_at": "2026-08-29T19:51:47+02:00",
-        "observed_head": "8d78a0176965d57029c380cfeafb997550731168",
-        "content_sha256": "7dd193d2dd37b6dfe23f1952561de5df115aa94f73aca220143eb73a07f345d3",
+        "campaign_id": "20260829T203952085645+0200",
+        "completed_at": "2026-08-29T20:54:33+02:00",
+        "observed_head": "5e8836547179b535701456cb2e262aaa9e16541a",
+        "content_sha256": "da7abe63ac9ae3dfc970ae08588a136999c199f0f945e05a136b3e6dbcd12132",
         "file_count": 3,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Nachbuchung: Das Delta seit dem Abschluss von heute Nachmittag besteht ausschliesslich aus Kommentartext — die in dieser Sitzung selbst geschriebenen Kommentare wurden auf die Umlaut-Schreibweise der uebrigen Datei gebracht. Kein ausfuehrbarer Zeile geaendert (der Diff enthaelt ausser Kommentarzeilen nichts), und die Urteile beider Scanner ueber den Pruefkorpus sind zeichengleich geblieben.",
+        "outcome": "improved",
+        "summary": "Delta seit 8d78a01 geprueft: die Abdeckung der zsh-Kurzformen (baa8d9e) mit den drei gemeinsamen Funktionen ends_sublist, loop_head_end und short_loop_body sowie 4 neuen Blackbox-Tests. Der Review war kein Abnicken der eigenen Arbeit: Ein adversarialer Durchlauf ueber 13 Randfaelle gegen echtes zsh brachte einen falsch-positiven Fall ans Licht. 'for x (a b) return' meldete 'Already installed', obwohl das return die .zshrc abbricht und gmf nie entsteht. Ursache: Nach dem Schluesselwort stand command_start auf 0, und beide Scanner pruefen return/exit/exec nur an einem Kommandoanfang; solange die Kurzform den Block bis zum Dateiende offen liess, fiel das nicht auf. short_loop_body meldet jetzt zusaetzlich das erste echte Wort des Rumpfes (5e88365). Beim Klammerrumpf zeigt die Marke hinter das '{' statt darauf — darauf haette sie den schon gelesenen Block ein zweites Mal geoeffnet, woran ein erster Versuch scheiterte. Ein zweiter Fund derselben Art: 'for x (a b) { return }' war ebenfalls falsch-positiv und ist mit derselben Marke behoben. Bewusst konservativ geblieben und geprueft: zwei Kurzformen hintereinander, Kurzform mit offenem Quote, Kopf ueber das Zeilenende hinaus — alle drei werden abgelehnt statt geraten.",
         "tests": [
-          "git diff b8aa922 HEAD -- install.sh enthaelt ausschliesslich Kommentarzeilen; Verdikte von resolve_sourced_path und zshrc_context_state ueber 138 einzeilige .zshrc-Faelle vor und nach der Aenderung zeichengleich; zsh -n install.sh gmf.zsh; tests.test_cli_blackbox 48 OK; volle Suite 501 Tests OK"
+          "python3 -m unittest discover -s tests: 506 Tests OK (1 neuer mit 8 Teilfaellen); tests.test_cli_blackbox dreimal je 53 OK; 13 adversariale Randfaelle und 5 Klammervarianten gegen echtes zsh geprueft (definiert die Datei nach dem Sourcen wirklich gmf?) — kein gefaehrlicher Fall mehr, vorher zwei; 24 Kurz- und Langform-Dateien ebenso ohne falsch-positives Urteil; Verdikte beider Scanner ueber den 138-Zeilen-Korpus und 14 mehrzeilige Dateien zeichengleich zum Stand vor der Kurzform-Arbeit; Gegenprobe: 4 der 8 Teilfaelle des neuen Tests scheitern auf baa8d9e; zsh -n install.sh gmf.zsh; git diff --check"
         ]
       }
     },
@@ -151,16 +160,16 @@
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T180724876938+0200",
-        "completed_at": "2026-08-29T19:51:27+02:00",
-        "observed_head": "8d78a0176965d57029c380cfeafb997550731168",
-        "content_sha256": "80ca0454b992a872bcfccef2bca634ed998f4fd119550a94d366d232c2fc84d1",
+        "campaign_id": "20260829T203952085645+0200",
+        "completed_at": "2026-08-29T20:57:34+02:00",
+        "observed_head": "7577339d48da176e9ec4dd796b6d52d1653e9944",
+        "content_sha256": "df686c339de0a4c81ed7adf20036a120964780b77503d2f31e91609163eefc50",
         "file_count": 1,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Erster vollstaendiger Review des Regelwerks, das bisher gar nicht im QA-Scope lag — obwohl es die Datei ist, die jede spaetere Session vor der Arbeit liest. Mechanisch geprueft: Alle 40 in Backticks genannten Bezeichner existieren im Code, kein lokaler Link zeigt ins Leere, die genannten Zahlen stimmen (12 lokale und 8 Fetch-Worker, zehn Sekunden git_timeout), und die Abschnitte zu den vier Releases 0.19-0.22 sind vollstaendig. Ein inhaltlicher Fund: Die Regel, dass ein Repo ueber seinen echten Pfad und nicht ueber den NFC-normalisierten Anzeigenamen wiedererkannt wird, stand nur als Kommentar an der ersten Fundstelle. Genau deshalb ist derselbe Fehler vier Tage spaeter ein zweites Mal entstanden (Hintergrund-Fetch 2026-08-25, Auswahl in apply_filter 2026-08-29). Sie steht jetzt als Regel. Dazu zwei Glaettungen: der beim Nachtragen des --diff-Falls ausgefranste Absatz zum Filter, und die Schreibweise der heute ergaenzten Eintraege auf die Umlaut-Konvention der Datei.",
+        "summary": "Delta seit 8d78a01 geprueft: AGENTS.md hat die Kurzform-Regel aufgenommen und den Eintrag unter 'Bewusst nicht umgesetzt' von den zwei erledigten Formen auf die verbliebene Grenze umgestellt (while/until). Alle inhaltlichen Behauptungen des Deltas gegen die Shell nachgeprueft und zutreffend: 'repeat 2; print hi' gibt hi hi, 'for x (a b) print $x; print E' gibt a b E, '&&'/'||'/'|' beenden den Rumpf nicht, 'while false; print x' laeuft endlos. Eine Luecke geschlossen: Der beim Nachbuchen des Nachbarbereichs gefundene Kommandoanfang im Kurzform-Rumpf (short_loop_body_at) stand nur als Kommentar in install.sh. Genau so war die NFC-Regel am 2026-08-25 schon einmal an einer Stelle notiert und an der naechsten wieder verletzt worden; deshalb steht sie jetzt samt der Klammer-Feinheit im Regelwerk.",
         "tests": [
-          "Alle 40 Bezeichner aus AGENTS.md im Code belegt (Skript ueber gitmaster_flash.py, docs/make-screens.py, install.sh, gmf.zsh und beide Testdateien); alle Markdown-Links auf vorhandene Dateien; LOCAL_SCAN_WORKERS=12 und FETCH_SCAN_WORKERS=8 gegen den Text geprueft; python3 -m unittest discover -s tests: 501 Tests OK; tests.test_cli_blackbox 48 OK; zsh -n install.sh; Verdikte beider zsh-Scanner ueber den 138-Zeilen-Korpus nach der reinen Kommentaraenderung zeichengleich; git diff --check"
+          "Alle 43 in AGENTS.md genannten Bezeichner im Code belegt (Skript ueber gitmaster_flash.py, docs/make-screens.py, install.sh, gmf.zsh und beide Testdateien); alle Markdown-Links auf vorhandene Dateien; die vier zitierten Shell-Ausgaben einzeln nachgemessen; python3 -m unittest discover -s tests: 506 Tests OK; git diff --check"
         ]
       }
     }
