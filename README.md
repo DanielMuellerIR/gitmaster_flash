@@ -215,7 +215,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -509,9 +509,11 @@ python3 gitmaster_flash.py --version       # bare version number, nothing else
 `--json` and `--diff`; started interactively it preselects the filter, which `/`
 then changes. With `--diff` it narrows **both** machines by the same terms —
 filtering only one side would report "only here" differences that do not exist.
-The `--list` header names the active filter, and a filter without a single hit
-says so on stderr: on stdout an empty list and exit code 0 would otherwise look
-exactly like "everything is fine".
+Every output names the active filter: the `--list` header, and a leading line
+in the `--diff` report that says how many repositories on each machine passed
+it. A filter without a single hit says so on stderr — on stdout an empty list,
+or "no differences", together with exit code 0 would otherwise look exactly like
+"everything is fine".
 
 Exit code 0 means everything is clean and in sync, 1 means at least one
 repository needs attention; it is computed over the repositories that passed the

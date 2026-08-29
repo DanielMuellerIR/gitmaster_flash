@@ -6062,6 +6062,26 @@ class TuiFilterTests(unittest.TestCase):
             ui.draw()
         self.assertTrue(any("gibtsnicht" in text for _, text in ui.scr.drawn[1:]))
 
+    def test_the_selection_follows_the_real_path_not_the_display_name(self):
+        """Zwei Ordner, die sich nur in NFC/NFD unterscheiden, tragen dasselbe `rel`.
+
+        `collect_status()` normalisiert den Anzeigenamen auf NFC, damit die
+        Spaltenbreiten stimmen. Auf einem Linux-Server sind beide Ordner
+        nebeneinander erlaubt — die Auswahl darf sie dann nicht verwechseln.
+        Derselbe Fehler war am 2026-08-25 schon beim Hintergrund-Fetch behoben
+        worden; hier stand er noch.
+        """
+        nfd, nfc = "cafe\u0301", "caf\u00e9"
+        ui = TUI(self.Screen(()), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = [
+            RepoStatus(path=Path("/tmp") / nfd, rel=nfc),
+            RepoStatus(path=Path("/tmp") / nfc, rel=nfc),
+        ]
+        ui.statuses = list(ui.all_statuses)
+        ui.selected = 1                       # der zweite der beiden Ordner
+        ui.apply_filter(keep_selection=True)
+        self.assertEqual(ui.current().path, Path("/tmp") / nfc)
+
     def test_clear_filter_restores_every_repo_and_holds_the_selection(self):
         ui = self._ui(["blog", "api-gateway", "api-docs"])
         ui.filter_query = "api"
@@ -6165,6 +6185,72 @@ class FilterCliTests(unittest.TestCase):
         _, out, err = self._run("--list")
         self.assertNotIn("filter", out.splitlines()[0].lower())
         self.assertEqual(err, "")
+
+    # -- --diff: derselbe Filter, dieselbe Ehrlichkeit ----------------------
+    # Der Rechnervergleich bekam den Filter in 0.19.0 mit, aber nicht die beiden
+    # Zusagen, die ihn erst lesbar machen: Ein Filter ohne Treffer meldete
+    # "keine Unterschiede" mit Exit-Code 0 — nicht zu unterscheiden von zwei
+    # wirklich uebereinstimmenden Rechnern — und eine aufgehobene Ausgabe
+    # verriet nicht, dass ueberhaupt gefiltert wurde.
+
+    def _diff(self, *argv, remote_repos):
+        payload = {"version": gmf_module.__version__, "root": "/dort",
+                   "repos": remote_repos}
+        with mock.patch.object(gmf_module, "fetch_remote_status",
+                               return_value=payload):
+            return self._run("--diff", "host:/dort", *argv)
+
+    def _remote_repo(self, rel, **fields):
+        return {"rel": rel, "branch": "main", "remote_state": None,
+                "modified": 0, "untracked": 0, "deleted": 0, "conflicts": 0,
+                "stashes": 0, "remotes": [], **fields}
+
+    def test_a_diff_filter_without_hits_does_not_claim_agreement(self):
+        code, out, err = self._diff(
+            "--filter", "gibtsnicht",
+            remote_repos=[self._remote_repo("api-gateway", branch="andere")])
+        # Ohne den Hinweis stuende hier nur "No differences to host." — dasselbe
+        # Bild, das zwei tatsaechlich gleiche Rechner erzeugen.
+        self.assertIn("gibtsnicht", err)
+        self.assertEqual(code, 0)
+
+    def test_the_diff_output_names_an_active_filter(self):
+        code, out, err = self._diff(
+            "--filter", "api",
+            remote_repos=[self._remote_repo("api-gateway", branch="andere"),
+                          self._remote_repo("blog")])
+        self.assertIn("api", out.splitlines()[0])
+        # Der Hinweis ist kein Unterschied: Der Exit-Code beschreibt weiterhin
+        # nur die Vergleichszeilen.
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+
+    def test_an_unfiltered_diff_prints_no_extra_line(self):
+        code, out, err = self._diff(
+            remote_repos=[self._remote_repo("api-gateway"),
+                          self._remote_repo("blog")])
+        self.assertNotIn("filter", out.lower())
+        self.assertEqual(err, "")
+
+    def test_the_filter_text_cannot_carry_escapes_into_the_terminal(self):
+        """Der Suchtext kommt roh von der Kommandozeile.
+
+        `print_list()` schickt ihn seit jeher durch `terminal_text()`; die
+        beiden Hinweiszeilen taten das nicht. Ein Filtertext mit der
+        Loeschsequenz ESC[2J haette den Bildschirm des Lesers geleert.
+        """
+        _, out, err = self._run("--list", "--filter", "\x1b[2Japi")
+        self.assertNotIn("\x1b", out + err)
+        _, out, err = self._diff("--filter", "\x1b[2Jgibtsnicht",
+                                 remote_repos=[self._remote_repo("api-gateway")])
+        self.assertNotIn("\x1b", out + err)
+        self.assertIn("gibtsnicht", err)
+
+    def test_a_whitespace_only_filter_reaches_the_comparison_as_no_filter(self):
+        """Kanonisiert wird einmal in `main()` — auch fuer `--diff`."""
+        with mock.patch.object(gmf_module, "run_diff", return_value=0) as run:
+            self._run("--diff", "host:/dort", "--filter", "   ")
+        self.assertEqual(run.call_args.kwargs["query"], "")
 
 
 class SettingsLogicTests(unittest.TestCase):

@@ -231,7 +231,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -534,9 +534,11 @@ python3 gitmaster_flash.py --version       # nur die Versionsnummer, sonst nicht
 `--list`, `--json` und `--diff`; interaktiv gestartet belegt er den Filter vor,
 den `/` dann ändert. Bei `--diff` grenzt er **beide** Rechner mit denselben
 Begriffen ein — nur eine Seite zu filtern ergäbe „nur hier"-Unterschiede, die es
-gar nicht gibt. Die `--list`-Kopfzeile nennt den aktiven Filter, und ein Filter
-ohne einen einzigen Treffer sagt das auf stderr: Auf stdout sähen leere Liste
-und Exit-Code 0 sonst genau wie „alles in Ordnung" aus.
+gar nicht gibt. Jede Ausgabe nennt den aktiven Filter: die `--list`-Kopfzeile,
+und beim `--diff` eine erste Zeile, die sagt, wie viele Repos je Rechner ihn
+passiert haben. Ein Filter ohne einen einzigen Treffer sagt das auf stderr — auf
+stdout sähen leere Liste oder „keine Unterschiede" mit Exit-Code 0 sonst genau
+wie „alles in Ordnung" aus.
 
 Exit-Code 0 heißt: alles sauber und synchron. 1 heißt: mindestens ein Repo
 braucht Aufmerksamkeit; gezählt wird über die Repos, die den Filter passiert

@@ -256,8 +256,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Identität (`is`), nicht über Gleichheit: Zwei Repos mit identischem Zustand
   sind als Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
 - Ein aktiver Filter muss in JEDER Ausgabe stehen, die man später vergleicht oder
-  als Übersicht liest: Kopfzeile der TUI, Kopfzeile von `--list`, und bei
-  `--list`/`--json` ohne Treffer zusätzlich ein Hinweis auf stderr. Sonst sieht
+  als Übersicht liest: Kopfzeile der TUI, Kopfzeile von `--list`, erste Zeile des
+  `--diff`-Berichts, und ohne Treffer zusätzlich ein Hinweis auf stderr — bei
+  `--list`/`--json` ebenso wie bei `--diff`, wo „keine Unterschiede" mit
+  Exit-Code 0 sonst nicht von zwei wirklich gleichen Rechnern zu unterscheiden
+  wäre (Fund 2026-08-29). Sonst sieht
   ein ausgeblendeter Bestand wie ein echter Unterschied aus, und eine leere
   Trefferliste mit Exit-Code 0 wie „alles in Ordnung". Aus demselben Grund nennt
   die Kopfzeile mit `hidden_dirty()` die ausgeblendeten Repos, die

@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.0"
+__version__ = "0.22.1"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -205,6 +205,14 @@ TR = {
     "filter_cli_no_hit": {
         "en": "Note: no repo matches the filter “{q}” — nothing was checked.",
         "de": "Hinweis: Kein Repo passt auf den Filter „{q}“ — es wurde nichts geprüft."},
+    # Der Rechnervergleich braucht dieselbe Angabe: Seine Ausgabe wird gelesen
+    # und aufgehoben wie eine Liste, und ohne den Filter im Text hielte man
+    # einen ausgeblendeten Bestand für Übereinstimmung.
+    "diff_filter_note": {
+        "en": "Filter “{q}”: comparing {n} of {total} repos here, "
+              "{m} of {mt} on {h}.",
+        "de": "Filter „{q}“: verglichen werden {n} von {total} Repos hier, "
+              "{m} von {mt} auf {h}."},
     # Repo-Zeile
     "clean_synced": {"en": "✔ clean & synced", "de": "✔ sauber & synchron"},
     "no_sync_remote": {"en": "no sync remote", "de": "kein Sync-Remote"},
@@ -1511,8 +1519,10 @@ def commit_groups(files: list) -> list[CommitGroup]:
         seen.append(frozenset(complete))
         out.append(CommitGroup(kind, key, tuple(sorted(complete)),
                                complete != paths))
-    # Grosse Vorschlaege zuerst — sie sparen die meisten Tastendruecke. Bei
-    # gleicher Groesse entscheidet der Name, damit die Liste stabil bleibt.
+    # Erst die drei Sichten in ihrer Reihenfolge (Art der Aenderung, Ordner,
+    # Endung), innerhalb einer Sicht die groessten Vorschlaege zuerst — sie
+    # sparen die meisten Tastendruecke. Bei gleicher Groesse entscheidet der
+    # Name, damit die Liste stabil bleibt.
     order = {"code": 0, "dir": 1, "ext": 2}
     out.sort(key=lambda g: (order[g.kind], -len(g.paths), g.key))
     return out
@@ -4558,14 +4568,34 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
             "repos": [status_dict(s) for s in collect_all(root, cfg, fetch=fetch)]}
     # Der Filter greift auf BEIDEN Seiten mit demselben Suchtext. Nur hier zu
     # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
+    note = ""
     if query:
-        here["repos"] = filter_repo_dicts(here["repos"], query)
-        there = dict(there, repos=filter_repo_dicts(there.get("repos") or [], query))
+        here_all, there_all = here["repos"], there.get("repos") or []
+        here["repos"] = filter_repo_dicts(here_all, query)
+        there = dict(there, repos=filter_repo_dicts(there_all, query))
+        # `terminal_text()` wie in `print_list()`: Der Suchtext kommt roh von der
+        # Kommandozeile und darf im Terminal keine Steuerzeichen ausfuehren.
+        # Gefiltert wird weiter mit dem Rohtext — nur die Ausgabe wird entschaerft.
+        shown = terminal_text(query)
+        note = t("diff_filter_note", q=shown,
+                 n=len(here["repos"]), total=len(here_all),
+                 m=len(there["repos"]), mt=len(there_all), h=host)
+        # Passt der Filter auf keiner Seite, wurde nichts verglichen. Ohne diesen
+        # Hinweis stünde am Ende "keine Unterschiede" mit Exit-Code 0 da — genau
+        # das Bild, das ein wirklich übereinstimmendes Paar Rechner erzeugt.
+        if not here["repos"] and not there["repos"]:
+            print(t("filter_cli_no_hit", q=shown), file=sys.stderr)
     lines = diff_status(here, there, t("diff_here"), host)
     if as_json:
+        # Die JSON-Form bleibt wie `--json` frei von Zusatztexten; der Hinweis
+        # oben steht dafür auf stderr.
         print(json.dumps({"here": here.get("version"), "host": host,
                           "differences": lines}, indent=2, ensure_ascii=False))
     else:
+        # Der Hinweis zählt nicht als Unterschied und geht deshalb getrennt
+        # heraus: Der Exit-Code beschreibt weiterhin nur die Vergleichszeilen.
+        if note:
+            print(note)
         print("\n".join(lines) if lines else t("diff_same", h=host))
     return 1 if lines else 0
 
@@ -5027,8 +5057,13 @@ class TUI:
         previous = self.statuses[self.selected] if (
             keep_selection and 0 <= self.selected < len(self.statuses)) else None
         self.statuses = filter_statuses(self.all_statuses, self.filter_query)
+        # Wiedererkannt wird über den ECHTEN Pfad, nicht über `rel`: Der
+        # Anzeigename ist NFC-normalisiert, und zwei nebeneinanderliegende
+        # Ordner, die sich nur in NFC/NFD unterscheiden, tragen denselben — die
+        # Auswahl landete dann auf dem falschen Repo. Identität (`is`) reicht
+        # hier nicht: Nach `reload()` sind alle Objekte neu.
         index = next((i for i, st in enumerate(self.statuses)
-                      if previous is not None and st.rel == previous.rel), 0)
+                      if previous is not None and st.path == previous.path), 0)
         self.selected = min(index, max(0, len(self.statuses) - 1))
         self.offset = 0
         self.compact_col = 0
@@ -5440,14 +5475,16 @@ class TUI:
                              total=len(self.all_statuses), q=self.filter_query)
 
     def clear_filter(self) -> None:
-        """Filter aufheben und die Auswahl auf dem sichtbaren Repo halten."""
-        current = self.current()
+        """Filter aufheben und die Auswahl auf dem sichtbaren Repo halten.
+
+        Ohne Suchtext liefert `filter_statuses()` wieder die vollständige Liste;
+        die Auswahl hält `apply_filter()` selbst nach. Eine zweite Fassung
+        derselben Schritte war schon einmal auseinandergelaufen — sie verglich
+        noch `rel`, während die übrigen Stellen längst auf dem echten Pfad
+        arbeiteten.
+        """
         self.filter_query = ""
-        self.statuses = list(self.all_statuses)
-        self.selected = next((i for i, st in enumerate(self.statuses)
-                              if current is not None and st.rel == current.rel), 0)
-        self.offset = 0
-        self.compact_col = 0
+        self.apply_filter(keep_selection=True)
         self.message = t("filter_cleared")
 
     def settings_rows(self) -> list[tuple]:
@@ -6962,13 +6999,17 @@ def main(argv: list[str] | None = None) -> int:
             print(t("not_a_dir", p=root), file=sys.stderr)
             return 1
 
+    # Einmal kanonisieren, dann überall derselbe Text: Eine Eingabe aus lauter
+    # Leerzeichen ist kein Filter, und jeder Weg — TUI, --list, --json, --diff —
+    # muss dasselbe darüber denken.
+    query = canonical_filter_query(args.filter)
+
     if args.diff:
         return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json,
-                        query=args.filter)
+                        query=query)
 
     if args.list or args.json or not sys.stdout.isatty():
-        statuses = filter_statuses(collect_all(root, cfg, fetch=args.fetch),
-                                   args.filter)
+        statuses = filter_statuses(collect_all(root, cfg, fetch=args.fetch), query)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
@@ -6977,13 +7018,12 @@ def main(argv: list[str] | None = None) -> int:
                               "repos": [status_dict(s) for s in statuses]},
                              indent=2, ensure_ascii=False))
         else:
-            print_list(statuses, root, canonical_filter_query(args.filter))
+            print_list(statuses, root, query)
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
-        if canonical_filter_query(args.filter) and not statuses:
-            print(t("filter_cli_no_hit", q=canonical_filter_query(args.filter)),
-                  file=sys.stderr)
+        if query and not statuses:
+            print(t("filter_cli_no_hit", q=terminal_text(query)), file=sys.stderr)
         # Exit-Code 1, wenn irgendein Repo Aufmerksamkeit braucht (skriptbar).
         return 0 if all(s.clean_and_synced for s in statuses) else 1
 
@@ -6991,7 +7031,7 @@ def main(argv: list[str] | None = None) -> int:
         init_colors()
         # Der Demo-Modus bekommt KEINEN Pfad: Seine Config ist eine Wegwerfkopie
         # der Defaults, und ein Screenshot-Lauf darf die echte Datei nie ändern.
-        TUI(stdscr, root, cfg, args.cd_file, args.filter,
+        TUI(stdscr, root, cfg, args.cd_file, query,
             None if args.demo else CONFIG_PATH).run()
 
     curses.wrapper(_run)
