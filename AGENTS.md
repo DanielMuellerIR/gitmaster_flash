@@ -255,14 +255,25 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Liste anfasst, muss die andere mitziehen — `refresh_one()` tut das über
   Identität (`is`), nicht über Gleichheit: Zwei Repos mit identischem Zustand
   sind als Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
-- Ein aktiver Filter muss in JEDER Ausgabe stehen, die man später vergleicht oder
-  als Übersicht liest: Kopfzeile der TUI, Kopfzeile von `--list`, erste Zeile des
-  `--diff`-Berichts, und ohne Treffer zusätzlich ein Hinweis auf stderr — bei
-  `--list`/`--json` ebenso wie bei `--diff`, wo „keine Unterschiede" mit
-  Exit-Code 0 sonst nicht von zwei wirklich gleichen Rechnern zu unterscheiden
-  wäre (Fund 2026-08-29). Sonst sieht
-  ein ausgeblendeter Bestand wie ein echter Unterschied aus, und eine leere
-  Trefferliste mit Exit-Code 0 wie „alles in Ordnung". Aus demselben Grund nennt
+- Ein Repo wird über seinen ECHTEN Pfad (`st.path`) oder über Objektidentität
+  wiedererkannt, nie über den Anzeigenamen `rel`. `collect_status()`
+  normalisiert `rel` auf NFC, damit die Spaltenbreiten stimmen; zwei
+  nebeneinanderliegende Ordner, die sich nur in NFC/NFD unterscheiden — unter
+  Linux zulässig —, tragen danach denselben `rel`. Wo Objekte neu entstehen
+  (nach `reload()` oder dem Hintergrund-Scan) reicht `is` nicht, dort ist
+  `path` der Schlüssel. Dieselbe Verwechslung trat zweimal auf: erst im
+  Hintergrund-Fetch (`locally_refreshed`, behoben 2026-08-25), dann beim
+  Wiederfinden der Auswahl in `apply_filter()` (behoben 2026-08-29).
+- Ein aktiver Filter muss in JEDER Ausgabe stehen, die man später vergleicht
+  oder als Übersicht liest: Kopfzeile der TUI, Kopfzeile von `--list`, erste
+  Zeile des `--diff`-Berichts. Ohne Treffer kommt überall ein Hinweis auf
+  stderr dazu — bei `--list`/`--json` ebenso wie bei `--diff`, wo „keine
+  Unterschiede" mit Exit-Code 0 sonst nicht von zwei wirklich gleichen Rechnern
+  zu unterscheiden wäre (Fund 2026-08-29). Sonst sieht ein ausgeblendeter
+  Bestand wie ein echter Unterschied aus, und eine leere Trefferliste mit
+  Exit-Code 0 wie „alles in Ordnung". Der Suchtext kommt roh von der
+  Kommandozeile und geht deshalb an jeder Ausgabegrenze durch
+  `terminal_text()`. Aus demselben Grund nennt
   die Kopfzeile mit `hidden_dirty()` die ausgeblendeten Repos, die
   Aufmerksamkeit bräuchten — ein Übersichtswerkzeug darf nicht ausgerechnet die
   verstecken.
@@ -326,16 +337,17 @@ liegengebliebene Arbeit aus.
   2026-08-03). Nichts davon ist an einer Datei sichtbar, der Zielzustand lässt
   sich nur mit der Commit-Historie im Kopf benennen, und ein falsch geratener
   `reset --hard` kostet Commits statt Dateien. Bleibt Handarbeit im Einzelfall.
-- **Der zshrc-Scanner in `install.sh` kennt zwei zsh-Kurzformen nicht**:
-  `for name (woerter) kommando` und `repeat n kommando`. Beide haben keinen
-  eigenen Schluss (`done`), ihr Rumpf endet am Zeilenende. Sie von der langen
-  Fassung zu unterscheiden verlangt einen Blick voraus auf ein spaeteres `do` —
-  also einen echten Parser statt eines Schluesselwortvergleichs. Solange das so
-  ist, bricht der Installer bei einer solchen `.zshrc` mit Exit 1 ab und
-  schreibt nichts. Sichere Richtung, aber eine Einschraenkung: Die Datei ist
-  gueltig, die Meldung „Fix the file syntax" trifft sie nicht. `foreach x (…) …
-  end` ist seit 2026-08-29 abgedeckt, weil `end` ein Schluesselwort ist und in
-  die gemeinsame Blockgrammatik passte (Fund 2026-08-29).
+- **Der zshrc-Scanner in `install.sh` kennt zwei zsh-Kurzformen nicht**
+  (Fund 2026-08-29): `for name (wörter) kommando` und `repeat n kommando`.
+  Beide haben keinen eigenen Schluss (`done`), ihr Rumpf endet am Zeilenende.
+  Sie von der langen Fassung zu unterscheiden verlangt einen Blick voraus auf
+  ein späteres `do` — also einen echten Parser statt eines
+  Schlüsselwortvergleichs. Solange das so ist, bricht der Installer bei einer
+  solchen `.zshrc` mit Exit 1 ab und schreibt nichts. Sichere Richtung, aber
+  eine Einschränkung: Die Datei ist gültig, die Meldung „Fix the file syntax"
+  trifft sie nicht. `foreach x (…) … end` ist seit demselben Tag abgedeckt,
+  weil `end` ein Schlüsselwort ist und deshalb in die gemeinsame
+  Blockgrammatik (`block_opener_kind`/`block_closer_kind`) passte.
 - **Kein Bild zeigt einen abgebrochenen Dialog** (`⊘`-Zeile). Der einzige Weg
   dorthin führt über die Info-Ansicht, die der Bildnachbau nicht sauber trifft —
   siehe „Grenze des Generators" oben. Solche Ansichten gehören als

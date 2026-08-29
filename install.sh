@@ -73,8 +73,8 @@ is_command_modifier() {
 # falsch: doppelt eintragen oder ein nie ausgeführtes `source` als
 # Registrierung anerkennen. Beide Funktionen liefern die ART des Blocks in
 # `block_kind` — der Mehrzeilen-Stapel braucht sie, um Anfang und Ende einander
-# zuzuordnen. Ueber eine Variable statt ueber die Ausgabe, weil sie je Wort
-# aufgerufen werden und eine Kommandoersetzung dafuer jedes Mal einen Prozess
+# zuzuordnen. Über eine Variable statt über die Ausgabe, weil sie je Wort
+# aufgerufen werden und eine Kommandoersetzung dafür jedes Mal einen Prozess
 # kostete; die Aufrufer deklarieren `block_kind` selbst als `local`.
 block_opener_kind() {
   case "$1" in
@@ -88,9 +88,9 @@ block_opener_kind() {
 block_closer_kind() {
   case "$1" in
     fi) block_kind=if ;;
-    # `end` schliesst die zsh-eigene Schleifenform `foreach x (a b) … end`.
+    # `end` schließt die zsh-eigene Schleifenform `foreach x (a b) … end`.
     # Ohne diese Zeile blieb der Blockstapel bis zum Dateiende offen, und der
-    # Installer lehnte eine voellig gueltige .zshrc mit "unclosed or
+    # Installer lehnte eine völlig gültige .zshrc mit "unclosed or
     # unsupported shell block" ab, statt sich zu registrieren (Fund
     # 2026-08-29).
     done|end) block_kind=loop ;;
@@ -100,12 +100,12 @@ block_closer_kind() {
 }
 
 # Bewusst NICHT abgedeckt bleiben zwei weitere zsh-Kurzformen, deren Rumpf ohne
-# eigenes Schlusswort am Zeilenende aufhoert: `for name (woerter) kommando` und
+# eigenes Schlusswort am Zeilenende aufhört: `for name (wörter) kommando` und
 # `repeat n kommando`. Sie von ihren langen Fassungen zu unterscheiden verlangt
-# einen Blick voraus auf ein spaeteres `do` — das waere ein echter Parser, kein
-# Schluesselwortvergleich. Bis dahin bricht der Installer bei solchen Dateien
+# einen Blick voraus auf ein späteres `do` — das wäre ein echter Parser, kein
+# Schlüsselwortvergleich. Bis dahin bricht der Installer bei solchen Dateien
 # mit Exit 1 ab und schreibt nichts; das ist die sichere Richtung, aber eine
-# Einschraenkung, keine Absicht.
+# Einschränkung, keine Absicht.
 
 # Denselben Pfad kann man verschieden schreiben: `~/git/...`, `$HOME/git/...`,
 # mit oder ohne Quotes. Ein reiner Textvergleich hielte das für ein anderes Repo
@@ -157,14 +157,14 @@ resolve_sourced_path() {
       continue
     fi
     if block_opener_kind "$word" || [[ "$word" == function ]]; then
-      # Blockanfang: alles bis zum passenden Schluesselwort steht darin. Welche
-      # Art es ist, spielt hier keine Rolle — gezaehlt wird nur die Tiefe.
+      # Blockanfang: alles bis zum passenden Schlüsselwort steht darin. Welche
+      # Art es ist, spielt hier keine Rolle — gezählt wird nur die Tiefe.
       block_depth=$((block_depth + 1))
       top_level[i]=0
     elif block_closer_kind "$word"; then
       if (( block_depth == 0 )); then
         # Ein Blockende ohne Anfang auf dieser Zeile: Der Kontext kommt von
-        # weiter oben, hier laesst sich nichts belegen.
+        # weiter oben, hier lässt sich nichts belegen.
         return 1
       fi
       block_depth=$((block_depth - 1))
@@ -172,10 +172,10 @@ resolve_sourced_path() {
     else
       case "$word" in
         then|elif|else|do)
-          # Diese Woerter gehoeren in einen bereits gezaehlten Block. Ohne
+          # Diese Wörter gehören in einen bereits gezählten Block. Ohne
           # Blockanfang auf derselben Zeile bleibt der Kontext unklar. Sie
           # stehen bewusst nur hier: Der Mehrzeilen-Stapel unten braucht von
-          # ihnen nur `then` und `do`, und das fuer eine andere Frage.
+          # ihnen nur `then` und `do`, und das für eine andere Frage.
           (( block_depth == 0 )) && return 1
           top_level[i]=0
           ;;
@@ -622,8 +622,8 @@ zshrc_context_state() {
     if (( command_start )); then
       opener=""
       # Blockanfang und -ende kommen aus derselben Grammatik wie im
-      # Kandidatenresolver; hier wird zusaetzlich die ART gebraucht, damit ein
-      # `fi` nur ein `if` schliesst und nicht irgendeinen offenen Block.
+      # Kandidatenresolver; hier wird zusätzlich die ART gebraucht, damit ein
+      # `fi` nur ein `if` schließt und nicht irgendeinen offenen Block.
       if block_closer_kind "$word"; then
         [[ "${stack[-1]:-}" == "$block_kind" ]] && stack[-1]=()
       elif block_opener_kind "$word"; then
