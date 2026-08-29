@@ -7507,6 +7507,45 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         lines = ["".join(cell.ch for cell in row).rstrip() for row in inserted]
         self.assertEqual(lines, ["zeile1", "", "zeile2", "zeile3", "zeile4"])
 
+    def test_a_line_feed_at_the_bottom_edge_scrolls_the_region(self):
+        """Der Zeilenvorschub ist die haeufigste Scroll-Ursache — und fehlte.
+
+        Die Ergaenzung vom 2026-08-23 bildete ESC[S/T/L/M nach, nicht aber den
+        einfachen Zeilenvorschub. terminfo nennt ihn `ind`, und ncurses schickt
+        dafuer genau ein Byte. Der Nachbau setzte den Cursor am unteren Rand
+        einfach wieder auf dieselbe Zeile: Die oberste Zeile blieb stehen, alles
+        Folgende landete eine Zeile zu hoch — wieder ein Bild, das ringsum
+        stimmt und trotzdem falsch ist. In den sechs aufgezeichneten Stroemen
+        kommt dieser Fall achtmal vor (gemessen 2026-08-29).
+        """
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        # Bereich Zeile 1-3, Cursor auf dessen letzte Zeile, dann ein CR/LF.
+        grid = module.replay(painted + "\x1b[1;3r\x1b[3;1H\r\nneu",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        # Der Bereich rueckt hoch, die neue Zeile bleibt in seiner letzten Zeile.
+        self.assertEqual(lines[:3], ["zeile2", "zeile3", "neu"])
+        # Ausserhalb des Bereichs bleibt alles unberuehrt.
+        self.assertEqual(lines[3:], ["zeile4", "zeile5"])
+
+    def test_a_reverse_index_at_the_top_edge_scrolls_the_region_down(self):
+        """ESC M ist das Gegenstueck (`ri`); der Zweig fuer unbekannte Escapes
+        verschluckte es lautlos."""
+        module, _ = self._make_screens_module()
+        painted = "\x1b[H\x1b[2J" + "".join(
+            f"\x1b[{n};1Hzeile{n}" for n in range(1, 6))
+        grid = module.replay(painted + "\x1b[2;4r\x1b[2;1H\x1bM",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines, ["zeile1", "", "zeile2", "zeile3", "zeile5"])
+        # Mitten im Bereich bewegt es nur den Cursor eine Zeile nach oben.
+        grid = module.replay(painted + "\x1b[1;5r\x1b[3;1H\x1bMX",
+                             cols=12, rows=5)
+        lines = ["".join(cell.ch for cell in row).rstrip() for row in grid]
+        self.assertEqual(lines[1], "Xeile2")
+
     def test_setting_the_region_puts_the_cursor_home_like_a_terminal(self):
         module, _ = self._make_screens_module()
         grid = module.replay("\x1b[H\x1b[2J\x1b[5;1Hunten\x1b[1;5rX",

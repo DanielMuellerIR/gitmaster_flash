@@ -469,11 +469,36 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
         if text.startswith("\x1b(", i) or text.startswith("\x1b)", i):
             i += 3
             continue
+        # ESC M (reverse index) ist das Gegenstueck zum Zeilenvorschub: Am
+        # OBEREN Rand des Scrollbereichs schiebt es die Zeilen nach unten. Es
+        # ist die terminfo-Faehigkeit `ri`, die ncurses fuer genau diesen Fall
+        # sendet. Ohne eigene Behandlung schluckt der Zweig fuer unbekannte
+        # Escapes weiter unten die zwei Bytes — der Text bliebe heil, die
+        # Verschiebung fiele lautlos aus, und das Bild saehe trotzdem plausibel
+        # aus.
+        if text.startswith("\x1bM", i):
+            if cy == scroll_top:
+                scroll(-1)
+            else:
+                cy = max(0, cy - 1)
+            i += 2
+            continue
         ch = text[i]
         if ch == "\r":
             cx = 0
         elif ch == "\n":
-            cy, cx = min(cy + 1, rows - 1), 0
+            # Steht der Cursor auf der letzten Zeile des Scrollbereichs, schiebt
+            # ein Terminal den Bereich hoch und laesst den Cursor stehen. Der
+            # Nachbau setzte ihn dort nur auf dieselbe Zeile zurueck: Die
+            # oberste Zeile blieb stehen, alles Weitere landete eine Zeile zu
+            # hoch. Der Zeilenvorschub ist die terminfo-Faehigkeit `ind` und
+            # kommt in den aufgezeichneten Stroemen tatsaechlich vor — achtmal,
+            # jedes Mal genau an dieser Kante (belegt 2026-08-29).
+            if cy == scroll_bottom:
+                scroll(1)
+                cx = 0
+            else:
+                cy, cx = min(cy + 1, rows - 1), 0
         elif ch == "\x08":                          # backspace: one cell to the left
             cx = max(0, cx - 1)
         elif ch == "\x1b":
