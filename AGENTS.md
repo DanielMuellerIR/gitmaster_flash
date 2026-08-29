@@ -268,6 +268,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   etwas ergänzt, prüft es zuerst an der Shell selbst: Die Grammatik ist an
   mehreren Stellen anders, als sie aussieht (siehe `while` unter „Bewusst nicht
   umgesetzt").
+  Der Rumpf beginnt an einem KOMMANDOANFANG, und beide Scanner müssen ihn dort
+  auch so behandeln (`short_loop_body_at`): Sie prüfen `return`/`exit`/`exec`
+  nur an einer solchen Stelle, und `for x (a b) return` bricht die `.zshrc` ab
+  — jede spätere `source`-Zeile ist dann unerreichbar. Solange die Kurzform den
+  Block bis zum Dateiende offen ließ, fiel das nicht auf; mit ihrer Erkennung
+  wurde daraus ein „Already installed" für eine Datei ohne `gmf`
+  (Fund 2026-08-29). Bei einem Klammerrumpf zeigt die Marke HINTER das `{`,
+  nicht darauf: Auf dem `{` öffnete der Blockstapel den bereits vollständig
+  gelesenen Block ein zweites Mal, und das eine `}` räumte nur einen davon ab.
 - Ein Repo wird über seinen ECHTEN Pfad (`st.path`) oder über Objektidentität
   wiedererkannt, nie über den Anzeigenamen `rel`. `collect_status()`
   normalisiert `rel` auf NFC, damit die Spaltenbreiten stimmen; zwei
