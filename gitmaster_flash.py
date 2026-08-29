@@ -5885,6 +5885,92 @@ class TUI:
             self.message = t("push_io_unknown")
             return None
 
+    # Die beiden Push-Wege (P zum Sync-Remote, G zu GitHub) unterscheiden sich
+    # in der Rückfrage und in den Meldungen — nicht in ihren Schutzschritten.
+    # Die standen bis 2026-08-29 zweimal im Code. Eine später nur an einer
+    # Stelle geschärfte Prüfung hätte den anderen Weg stillschweigend schwächer
+    # gelassen, und zwar den, an dem niemand die Änderung gesucht hätte.
+    #
+    # `expected_public` bleibt bewusst ein Argument und wird NICHT aus
+    # `remote.public` abgeleitet: Es ist die Erwartung des Aufrufers, gegen die
+    # `inspect_transfer()` prüft. Aus derselben Angabe zu lesen, die geprüft
+    # werden soll, hieße den Abgleich abzuschaffen.
+
+    def _approved_transfer(self, st: RepoStatus, remote: RemoteStatus,
+                           changed_key: str, *, expected_public: bool):
+        """Fetchen, gegen den gezeigten Stand abgleichen, Übertragung prüfen.
+
+        Liefert `(fresh, check)` oder `None`; die Meldung setzt die Methode
+        selbst. `None` heißt immer: nicht weitermachen.
+        """
+        fresh = self._fetch_remote(st, remote.name)
+        if not fresh:
+            return None
+        if (fresh.branch != st.branch
+                or self._remote_approval_signature(
+                    self._remote(fresh, remote.name))
+                != self._remote_approval_signature(remote)):
+            self.message = t(changed_key)
+            return None
+        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
+                                 self.cfg["git_timeout"],
+                                 expected_public=expected_public)
+        if not check.ready:
+            self.message = self._transfer_message(check, remote.name, fresh.branch)
+            return None
+        return fresh, check
+
+    def _reapproved_transfer(self, fresh: RepoStatus, remote: RemoteStatus,
+                             check: TransferCheck, changed_key: str, *,
+                             expected_public: bool):
+        """Unmittelbar vor dem Push noch einmal fetchen und die Freigabe prüfen.
+
+        Ändert sich der ausgehende Satz zwischen Rückfrage und Push, wird nicht
+        mit einer veralteten Freigabe gepusht. Liefert `(newest, final)` oder
+        `None`.
+        """
+        newest = self._fetch_remote(fresh, remote.name)
+        if not newest:
+            return None
+        final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
+                                 self.cfg["git_timeout"],
+                                 expected_public=expected_public)
+        if (not final.ready
+                or final.approval_signature() != check.approval_signature()):
+            self.message = t(changed_key)
+            return None
+        return newest, final
+
+    def _push_and_report(self, newest: RepoStatus, final: TransferCheck,
+                         remote: RemoteStatus, pushed_key: str) -> None:
+        """Den freigegebenen Push ausführen und sein Ergebnis benennen.
+
+        Ein erfolgreicher Push mit misslungener Tracking-Aktualisierung ist
+        NICHT dasselbe wie ein Fehlschlag und bekommt deshalb eine eigene
+        Meldung; ein fehlender Login ebenfalls.
+        """
+        r = self._run_approved_push(newest, final)
+        if r is None:
+            return
+        if r.returncode == 0:
+            # Reihenfolge: erst das Tracking nachziehen, dann neu einlesen.
+            # Andersherum zeigte die Liste noch den Stand von VOR der
+            # Aktualisierung, also weiterhin ausstehende Commits.
+            tracking_ok = update_tracking_after_push(
+                newest.path, final, self.cfg["git_timeout"])
+            self.refresh_one(newest)
+            self.message = (t(pushed_key, r=remote.name) if tracking_ok
+                            else t("push_tracking_changed"))
+            return
+        self.refresh_one(newest)
+        if credentials_missing(
+                r, keychain_helper=remote_uses_keychain_helper(
+                    newest.path, remote.name, self.cfg["git_timeout"],
+                    for_push=True)):
+            self.message = t("transfer_auth_missing", r=remote.name)
+        else:
+            self.message = t("push_outcome_unknown", code=r.returncode)
+
     def action_sync_push(self):
         """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
         st = self.current()
@@ -5901,52 +5987,24 @@ class TUI:
         if remote.public:
             self.message = t("public_simple_block")
             return
-        fresh = self._fetch_remote(st, remote.name)
-        if not fresh:
+        approved = self._approved_transfer(st, remote, "transfer_changed",
+                                           expected_public=False)
+        if not approved:
             return
-        if (fresh.branch != st.branch
-                or self._remote_approval_signature(
-                    self._remote(fresh, remote.name))
-                != self._remote_approval_signature(remote)):
-            self.message = t("transfer_changed")
-            return
-        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
-                                 self.cfg["git_timeout"], expected_public=False)
-        if not check.ready:
-            self.message = self._transfer_message(check, remote.name, fresh.branch)
-            return
+        fresh, check = approved
         if not self.confirm(t("confirm_sync_push", n=check.ahead, r=remote.name)):
             log_cancelled(fresh.path, safe_push_args(
                 check.transfer_url, check.branch, check.head_oid,
                 check.target_oid))
             self.message = t("cancelled")
             return
-        newest = self._fetch_remote(fresh, remote.name)
-        if not newest:
+        reapproved = self._reapproved_transfer(fresh, remote, check,
+                                               "transfer_changed",
+                                               expected_public=False)
+        if not reapproved:
             return
-        final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
-                                 self.cfg["git_timeout"], expected_public=False)
-        if not final.ready or final.approval_signature() != check.approval_signature():
-            self.message = t("transfer_changed")
-            return
-        r = self._run_approved_push(newest, final)
-        if r is None:
-            return
-        if r.returncode == 0:
-            tracking_ok = update_tracking_after_push(
-                newest.path, final, self.cfg["git_timeout"])
-            self.refresh_one(newest)
-            self.message = (t("sync_pushed", r=remote.name) if tracking_ok
-                            else t("push_tracking_changed"))
-        elif credentials_missing(
-                r, keychain_helper=remote_uses_keychain_helper(
-                    newest.path, remote.name, self.cfg["git_timeout"],
-                    for_push=True)):
-            self.refresh_one(newest)
-            self.message = t("transfer_auth_missing", r=remote.name)
-        else:
-            self.refresh_one(newest)
-            self.message = t("push_outcome_unknown", code=r.returncode)
+        newest, final = reapproved
+        self._push_and_report(newest, final, remote, "sync_pushed")
 
     def action_github_push(self):
         """Öffentlicher Push nur nach Vorschau + ausgeschriebener Bestätigung."""
@@ -5964,20 +6022,11 @@ class TUI:
         if not remote.transfer_safe:
             self.message = t("remote_url_mismatch", r=remote.name)
             return
-        fresh = self._fetch_remote(st, remote.name)
-        if not fresh:
+        approved = self._approved_transfer(st, remote, "github_changed",
+                                           expected_public=True)
+        if not approved:
             return
-        if (fresh.branch != st.branch
-                or self._remote_approval_signature(
-                    self._remote(fresh, remote.name))
-                != self._remote_approval_signature(remote)):
-            self.message = t("github_changed")
-            return
-        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
-                                 self.cfg["git_timeout"], expected_public=True)
-        if not check.ready:
-            self.message = self._transfer_message(check, remote.name, fresh.branch)
-            return
+        fresh, check = approved
 
         lines = [
             t("preview_branch_only"),
@@ -6002,35 +6051,13 @@ class TUI:
             self.message = t("github_cancelled")
             return
 
-        # Unmittelbar vor dem öffentlichen Push erneut fetchen. Ändert sich der
-        # ausgehende Satz seit der Vorschau, wird nicht mit veralteter Freigabe gepusht.
-        newest = self._fetch_remote(fresh, remote.name)
-        if not newest:
+        reapproved = self._reapproved_transfer(fresh, remote, check,
+                                               "github_changed",
+                                               expected_public=True)
+        if not reapproved:
             return
-        final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
-                                 self.cfg["git_timeout"], expected_public=True)
-        if (not final.ready
-                or final.approval_signature() != check.approval_signature()):
-            self.message = t("github_changed")
-            return
-        r = self._run_approved_push(newest, final)
-        if r is None:
-            return
-        if r.returncode == 0:
-            tracking_ok = update_tracking_after_push(
-                newest.path, final, self.cfg["git_timeout"])
-            self.refresh_one(newest)
-            self.message = (t("github_pushed", r=remote.name) if tracking_ok
-                            else t("push_tracking_changed"))
-        elif credentials_missing(
-                r, keychain_helper=remote_uses_keychain_helper(
-                    newest.path, remote.name, self.cfg["git_timeout"],
-                    for_push=True)):
-            self.refresh_one(newest)
-            self.message = t("transfer_auth_missing", r=remote.name)
-        else:
-            self.refresh_one(newest)
-            self.message = t("push_outcome_unknown", code=r.returncode)
+        newest, final = reapproved
+        self._push_and_report(newest, final, remote, "github_pushed")
 
     def action_git_help(self):
         """Kurzhilfe — und darüber das Protokoll der wirklich abgesetzten Befehle."""

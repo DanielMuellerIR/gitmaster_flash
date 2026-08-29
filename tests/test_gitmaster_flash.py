@@ -5,6 +5,7 @@ gegen ein echtes, temporär angelegtes Git-Repo.
 """
 
 import contextlib
+import dataclasses
 import io
 import json
 import importlib.util
@@ -5191,6 +5192,59 @@ class RemoteAndCommandLogTests(unittest.TestCase):
         self.assertEqual(ui.message, gmf_module.t("github_cancelled"))
         run.assert_not_called()
         cancelled.assert_called_once()
+
+    def test_both_push_paths_abort_when_the_approval_changes_before_the_push(self):
+        """Der zweite Fetch direkt vor dem Push ist der Schutz gegen ein
+        veraltetes Ja.
+
+        Bis 2026-08-29 stand diese Pruefung zweimal im Code — einmal je
+        Push-Weg. Geprueft war bisher nur der Abgleich VOR der Rueckfrage;
+        dieser hier haengt nun an derselben Methode fuer beide Wege und faellt
+        auf, wenn einer der beiden sie verliert.
+        """
+        first = gmf_module.TransferCheck(
+            "ready", ahead=1, remote_ref="refs/remotes/x/main", branch="main",
+            head_oid="a" * 40, target_oid="b" * 40,
+            transfer_url="https://example.invalid/repo.git",
+            commits=["abc1234 add feature"], files=["src/app.py"])
+        # Zwischen Rueckfrage und Push ist ein weiterer Commit dazugekommen:
+        # dieselbe Uebertragung, aber nicht mehr die freigegebene.
+        # `dataclasses.replace` statt `copy.replace`: Letzteres gibt es erst ab
+        # Python 3.13, und install.sh faehrt diese Suite als Selbsttest auf der
+        # Maschine des Anwenders.
+        second = dataclasses.replace(first, head_oid="c" * 40)
+        self.assertNotEqual(first.approval_signature(),
+                            second.approval_signature())
+
+        class Screen:
+            def getmaxyx(self): return (30, 100)
+
+        cases = (
+            ("action_sync_push", "transfer_changed", "origin", False, "confirm"),
+            ("action_github_push", "github_changed", "github", True,
+             "confirm_in_pager"),
+        )
+        for action, message_key, name, public, ask in cases:
+            with self.subTest(weg=action):
+                remote = gmf_module.RemoteStatus(
+                    name=name, public=public, branch_exists=True,
+                    fetch_fingerprints=["target-a"],
+                    push_fingerprints=["target-a"],
+                    fetch_refspecs_safe=True, branch_mapping_safe=True)
+                st = gmf_module.RepoStatus(
+                    path=self.repo, rel="repo", branch="main",
+                    remote=None if public else name, remotes=[remote])
+                ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+                ui.statuses = [st]
+                with mock.patch.object(ui, "_fetch_remote", return_value=st), \
+                        mock.patch.object(gmf_module, "inspect_transfer",
+                                          side_effect=[first, second]), \
+                        mock.patch.object(ui, ask, return_value=True), \
+                        mock.patch.object(gmf_module, "run_git_logged") as run:
+                    getattr(ui, action)()
+
+                self.assertEqual(ui.message, gmf_module.t(message_key))
+                run.assert_not_called()
 
     def test_successful_push_keeps_success_visible_when_tracking_update_times_out(self):
         remote = gmf_module.RemoteStatus(name="origin", branch_exists=True)
