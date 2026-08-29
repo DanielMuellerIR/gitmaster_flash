@@ -255,6 +255,19 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Liste anfasst, muss die andere mitziehen — `refresh_one()` tut das über
   Identität (`is`), nicht über Gleichheit: Zwei Repos mit identischem Zustand
   sind als Dataclass gleich, `list.index()` träfe dann womöglich das falsche.
+- Die zsh-Kurzformen der Schleifen (`for x (a b) kommando`, `repeat n kommando`,
+  `for ((…)) kommando`, `for x in a b; kommando`, `select x (a b) kommando`)
+  haben kein `done`: Ihr Rumpf ist genau EINE Teilliste. Beide Scanner in
+  `install.sh` behandeln sie über dieselben drei Funktionen — `ends_sublist`,
+  `loop_head_end`, `short_loop_body`. Die Regel dahinter: Sobald der Kopf
+  feststeht, führende Trenner überspringen; dann entscheidet das erste Wort —
+  `do` heißt doch lange Fassung, `{` heißt Klammerrumpf, alles andere ist die
+  eine Teilliste. Ein `;` VOR dem Rumpf gehört noch zum Kopf (`repeat 2; print
+  hi` gibt „hi hi" aus), ein `;` danach beendet ihn (`for x (a b) print $x;
+  print E` gibt „a b E" aus), und `&&`, `||`, `|` beenden ihn nicht. Wer hier
+  etwas ergänzt, prüft es zuerst an der Shell selbst: Die Grammatik ist an
+  mehreren Stellen anders, als sie aussieht (siehe `while` unter „Bewusst nicht
+  umgesetzt").
 - Ein Repo wird über seinen ECHTEN Pfad (`st.path`) oder über Objektidentität
   wiedererkannt, nie über den Anzeigenamen `rel`. `collect_status()`
   normalisiert `rel` auf NFC, damit die Spaltenbreiten stimmen; zwei
@@ -337,17 +350,19 @@ liegengebliebene Arbeit aus.
   2026-08-03). Nichts davon ist an einer Datei sichtbar, der Zielzustand lässt
   sich nur mit der Commit-Historie im Kopf benennen, und ein falsch geratener
   `reset --hard` kostet Commits statt Dateien. Bleibt Handarbeit im Einzelfall.
-- **Der zshrc-Scanner in `install.sh` kennt zwei zsh-Kurzformen nicht**
-  (Fund 2026-08-29): `for name (wörter) kommando` und `repeat n kommando`.
-  Beide haben keinen eigenen Schluss (`done`), ihr Rumpf endet am Zeilenende.
-  Sie von der langen Fassung zu unterscheiden verlangt einen Blick voraus auf
-  ein späteres `do` — also einen echten Parser statt eines
-  Schlüsselwortvergleichs. Solange das so ist, bricht der Installer bei einer
-  solchen `.zshrc` mit Exit 1 ab und schreibt nichts. Sichere Richtung, aber
-  eine Einschränkung: Die Datei ist gültig, die Meldung „Fix the file syntax"
-  trifft sie nicht. `foreach x (…) … end` ist seit demselben Tag abgedeckt,
-  weil `end` ein Schlüsselwort ist und deshalb in die gemeinsame
-  Blockgrammatik (`block_opener_kind`/`block_closer_kind`) passte.
+- **Der zshrc-Scanner in `install.sh` erkennt die Kurzform von `while` und
+  `until` nicht** — und darf es auch nicht (Fund 2026-08-29). Bei allen anderen
+  Schleifen lässt sich der Kopf lexikalisch abgrenzen und der Rumpf danach als
+  genau eine Teilliste lesen; die Bedingung von `while`/`until` ist dagegen
+  selbst eine Liste, in der ein `;` nichts beendet. `while false; print x`
+  läuft endlos, weil die Bedingung `false; print x` mit dem Status von `print`
+  endet. Wer das `;` für die Kopfgrenze hielte, erklärte eine Zeile für
+  abgeschlossen, die die Datei nie verlässt — der Installer meldete „Already
+  installed", ohne dass `gmf` je entsteht. Solche Dateien werden weiter
+  abgelehnt; das ist die sichere Richtung. Ein Blackbox-Test in
+  `tests/test_cli_blackbox.py` hält den Fall fest: Wer `while` doch in die
+  Kurzform-Erkennung aufnimmt, bekommt dort ein „Already installed" für eine
+  Datei ohne `gmf` gemeldet.
 - **Kein Bild zeigt einen abgebrochenen Dialog** (`⊘`-Zeile). Der einzige Weg
   dorthin führt über die Info-Ansicht, die der Bildnachbau nicht sauber trifft —
   siehe „Grenze des Generators" oben. Solche Ansichten gehören als

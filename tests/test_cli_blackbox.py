@@ -734,6 +734,112 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertIn("Already installed", again.stdout)
 
+    def test_a_sublist_terminator_is_always_a_command_separator(self):
+        """`ends_sublist` muss eine Teilmenge von `is_command_separator` sein.
+
+        Beide beantworten verschiedene Fragen — "beginnt hier ein neues
+        Kommando?" gegen "endet hier die Teilliste?" —, aber jeder Trenner, der
+        eine Teilliste beendet, beginnt zwangslaeufig auch ein neues Kommando.
+        Laufen die Listen auseinander, endet ein Kurzform-Rumpf an einem Wort,
+        das der Rest des Scanners noch fuer ein Argument haelt.
+        """
+        script = (
+            'source <(sed -n "/^is_assignment_word()/,/^# Nur echte, lexikalisch/p" %s'
+            ' | sed "\\$d")\n'
+            'for w in ";" ";;" ";&" ";|" "&" "&!" "&|" "&&" "||" "|" "|&" "x" "do"; do\n'
+            '  ends_sublist "$w" && e=1 || e=0\n'
+            '  is_command_separator "$w" && s=1 || s=0\n'
+            '  print -r -- "$w $e $s"\n'
+            'done\n'
+            % shlex.quote(str(self.repo / "install.sh"))
+        )
+        result = subprocess.run(["zsh", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beendend = []
+        for line in result.stdout.splitlines():
+            word, ends, sep = line.rsplit(" ", 2)
+            if ends == "1":
+                beendend.append(word)
+                self.assertEqual(sep, "1", f"{word!r} beendet, trennt aber nicht")
+        # Die verbindenden Trenner duerfen NICHT beenden, sonst risse der Rumpf
+        # von `for x (a b) print $x && print y` mitten auseinander.
+        for word in ("&&", "||", "|", "|&"):
+            self.assertNotIn(word, beendend)
+        self.assertIn(";", beendend)
+
+    def test_the_short_loop_forms_do_not_block_the_installation(self):
+        """zsh-Kurzformen: Der Rumpf endet nach EINER Teilliste, ohne `done`.
+
+        Der Blockstapel blieb bei allen diesen Formen bis zum Dateiende offen,
+        und der Installer brach mit "unclosed or unsupported shell block" ab —
+        bei Dateien, die zsh anstandslos ausfuehrt (Fund 2026-08-29).
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        formen = (
+            "for x (a b) print -r -- $x",              # Klammerliste
+            "for x (a b) { print -r -- $x }",          # Klammerrumpf
+            "for x (a b)\n  print -r -- $x",           # Rumpf auf der Folgezeile
+            "for ((i = 0; i < 2; i++)) print -r -- $i",  # arithmetischer Kopf
+            "for x in a b; print -r -- $x",            # in-Fassung mit ;
+            "repeat 2 print -r -- hi",                 # repeat mit Anzahl
+            "repeat 2\n  print -r -- hi",              # dito, Rumpf danach
+            "for x (a b) print -r -- $x && print -r -- y",   # && gehoert dazu
+            "for x (a b) {\n  print -r -- $x\n}",       # Klammerrumpf mehrzeilig
+            "for x (a b)\n{\n  print -r -- $x\n}",     # Klammer erst danach
+        )
+        for form in formen:
+            with self.subTest(form=form.replace("\n", " ⏎ ")):
+                zshrc.write_text(f"{form}\nsource -- {wrapper}\n")
+                # Erst belegen, dass zsh die Datei wirklich ausfuehrt.
+                self.assertTrue(self._loads_the_wrapper())
+
+                result = self._install()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Already installed", result.stdout)
+
+    def test_the_long_forms_of_the_same_keywords_stay_blocks(self):
+        """Die lange Fassung darf durch die Kurzform-Erkennung nicht aufgehen.
+
+        Sonst gaelte ein `source` INNERHALB einer Schleife als Registrierung —
+        obwohl es bei leerer Wortliste nie ausgefuehrt wird.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        formen = (
+            f"for x in a b\ndo\n  source -- {wrapper}\ndone",
+            f"for x (a b)\ndo\n  source -- {wrapper}\ndone",
+            f"repeat 2\ndo\n  source -- {wrapper}\ndone",
+            f"for x (a b) {{\n  source -- {wrapper}\n}}",
+        )
+        for form in formen:
+            with self.subTest(form=form.replace("\n", " ⏎ ")):
+                zshrc.write_text(form + "\n")
+                result = self._install()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                # Der Wrapper wird zwar geladen, aber nur aus dem Schleifenrumpf
+                # heraus — als Beleg fuer eine Registrierung zaehlt das nicht.
+                self.assertIn("Registered wrapper", result.stdout)
+
+    def test_a_while_condition_is_not_treated_as_a_short_loop_head(self):
+        """`while false; print x` sieht wie eine Kurzform aus und ist keine.
+
+        Die Bedingung ist eine LISTE; das `;` beendet sie nicht. Die Zeile
+        laeuft endlos, eine folgende source-Zeile wird nie erreicht. Wer das
+        `;` fuer die Kopfgrenze hielte, erklaerte die Zeile fuer abgeschlossen
+        und meldete "Already installed", ohne dass `gmf` je entsteht.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text(f"while false; print -r -- x\nsource -- {wrapper}\n")
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot prove a top-level registration", result.stderr)
+
     def test_hash_inside_quoted_clone_path_stays_idempotent(self):
         clone = self.home / "project # copy"
         clone.mkdir()

@@ -99,13 +99,175 @@ block_closer_kind() {
   esac
 }
 
-# Bewusst NICHT abgedeckt bleiben zwei weitere zsh-Kurzformen, deren Rumpf ohne
-# eigenes Schlusswort am Zeilenende aufhört: `for name (wörter) kommando` und
-# `repeat n kommando`. Sie von ihren langen Fassungen zu unterscheiden verlangt
-# einen Blick voraus auf ein späteres `do` — das wäre ein echter Parser, kein
-# Schlüsselwortvergleich. Bis dahin bricht der Installer bei solchen Dateien
-# mit Exit 1 ab und schreibt nichts; das ist die sichere Richtung, aber eine
-# Einschränkung, keine Absicht.
+# zsh kennt zu jeder Schleife eine Kurzform, deren Rumpf kein eigenes Schlusswort
+# hat, sondern nach EINER Teilliste zu Ende ist:
+#
+#   for x (a b) print $x            repeat 2 print hi
+#   for ((i=0;i<2;i++)) print $i    select x (a b) print $x
+#   for x in a b; print $x          for x (a b) { print $x }
+#
+# `while` und `until` sehen genauso aus und gehören trotzdem NICHT dazu — die
+# Begründung steht unten bei `loop_head_end`.
+#
+# Ohne sie blieb der Blockstapel bis zum Dateiende offen, und der Installer
+# lehnte eine völlig gültige .zshrc mit "unclosed or unsupported shell block" ab
+# (Fund 2026-08-29). Der Rumpf lässt sich lexikalisch abgrenzen, sobald der KOPF
+# der Schleife feststeht; danach gilt für alle Formen dieselbe Regel: führende
+# Trenner überspringen, dann entscheidet das erste Wort —
+#
+#   `do`    doch die lange Fassung, ihr `done` schließt sie
+#   `{`     der Rumpf ist ein Klammerblock, das `}` schließt ihn
+#   sonst   der Rumpf ist genau eine Teilliste und endet an ihrem Ende
+#
+# Belegt am Verhalten der Shell selbst (2026-08-29): `for x (a b) print $x; print
+# E` gibt "a b E" aus — das `;` beendet den Rumpf. `repeat 2; print hi` gibt
+# dagegen "hi hi" aus — ein Trenner VOR dem Rumpf gehört noch zum Kopf. Und `for
+# x (a b)` mit dem Rumpf erst auf der nächsten Zeile ist ebenfalls gültig;
+# dafür steht der Stapeleintrag `shortpending`.
+
+# Ein Trenner, der eine Teilliste wirklich BEENDET. `&&`, `||`, `|` und `|&`
+# verbinden dagegen weiter zu einer einzigen Teilliste: `for x (a b) print $x &&
+# print y` führt beide Befehle je Durchlauf aus, der Rumpf reicht also über das
+# `&&` hinweg.
+ends_sublist() {
+  case "$1" in
+    ';'|';;'|';&'|';|'|'&'|'&!'|'&|') return 0 ;;
+  esac
+  return 1
+}
+
+# Wo endet der KOPF einer Schleife? Setzt `loop_head` auf den Index seines
+# letzten Wortes und liefert 0, wenn der Kopf auf dieser Zeile vollständig ist.
+# Liefert 1, wenn sich das nicht belegen lässt — dann bleibt es bei der
+# konservativen langen Fassung.
+loop_head_end() {
+  local -i start="$1" i n open=0 depth=0
+  shift
+  local -a words=("$@")
+  local closer
+  n=${#words}
+  loop_head=0
+  case "${words[start]}" in
+    foreach)
+      # `foreach` hat keine Kurzform: Sein Rumpf endet an `end`.
+      return 1
+      ;;
+    while|until)
+      # Ihre Bedingung ist eine Liste ohne lexikalisch erkennbares Ende
+      # (Begründung unten beim `in`-Fall).
+      return 1
+      ;;
+    repeat)
+      # Der Kopf ist das Schlüsselwort und die Anzahl — genau ein Wort.
+      (( start + 1 <= n )) || return 1
+      ends_sublist "${words[start+1]}" && return 1
+      [[ "${words[start+1]}" == do || "${words[start+1]}" == '{' ]] && return 1
+      loop_head=$((start + 1))
+      return 0
+      ;;
+  esac
+  # `for`/`select` mit Klammerliste oder arithmetischem Kopf: Der Kopf endet an
+  # der passenden schließenden Klammer.
+  if [[ "${words[start+1]:-}" == '((' ]]; then
+    open=$((start + 1))
+    closer='))'
+  elif [[ "${words[start+2]:-}" == '(' ]]; then
+    open=$((start + 2))
+    closer=')'
+  fi
+  if (( open )); then
+    for ((i = open; i <= n; i++)); do
+      [[ "${words[i]}" == \#* ]] && return 1
+      [[ "${words[i]}" == "${words[open]}" ]] && depth=$((depth + 1))
+      if [[ "${words[i]}" == "$closer" ]]; then
+        depth=$((depth - 1))
+        if (( depth == 0 )); then
+          loop_head=$i
+          return 0
+        fi
+      fi
+    done
+    return 1                      # Die Klammer schließt auf dieser Zeile nicht.
+  fi
+  # Bleibt die `in`-Fassung: `for x in a b; print $x`. Ihre Wortliste kann kein
+  # `;` enthalten, der erste echte Trenner beendet also den Kopf. Steht davor
+  # ein `do`, ist es die lange Fassung.
+  #
+  # `while` und `until` sind hier bewusst NICHT dabei, obwohl sie gleich
+  # aussehen: Ihre Bedingung ist eine LISTE, und ein `;` darin beendet sie
+  # nicht. `while false; print x` läuft endlos — die Bedingung ist `false;
+  # print x` und endet mit dem Status von `print`, also wahr (gemessen
+  # 2026-08-29). Wer das für Kopf und Rumpf hielte, erklärte eine Zeile für
+  # abgeschlossen, die die Datei in Wahrheit nie verlässt, und der Installer
+  # meldete „Already installed", ohne dass `gmf` je entsteht.
+  [[ "${words[start+2]:-}" == in ]] || return 1
+  for ((i = start + 3; i <= n; i++)); do
+    [[ "${words[i]}" == \#* ]] && return 1
+    [[ "${words[i]}" == do ]] && return 1
+    if ends_sublist "${words[i]}"; then
+      loop_head=$((i - 1))
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Wie weit reicht der Rumpf hinter einem fertigen Kopf? Setzt `short_loop_kind`
+# auf `line` (Rumpf endet auf dieser Zeile, `short_loop_end` nennt sein letztes
+# Wort), `do`, `brace` oder `pending` (der Rumpf beginnt erst später).
+short_loop_body() {
+  local -i start="$1" i j n begun=0 brace=0
+  shift
+  local -a words=("$@")
+  local word
+  n=${#words}
+  short_loop_kind=pending
+  short_loop_end=0
+  for ((i = start; i <= n; i++)); do
+    word="${words[i]}"
+    [[ "$word" == \#* ]] && break
+    if (( ! begun )); then
+      ends_sublist "$word" && continue           # Trenner noch vor dem Rumpf
+      if [[ "$word" == do ]]; then
+        short_loop_kind=do
+        return 0
+      fi
+      if [[ "$word" == '{' ]]; then
+        # Der Rumpf ist ein Klammerblock. Schließt er auf derselben Zeile, endet
+        # der Rumpf dort; sonst trägt ihn der Blockstapel weiter. Das `}` steht
+        # in dieser Form oft ohne vorangehendes `;` und wäre dann für die
+        # Kommandoanfang-Erkennung des Stapels unsichtbar.
+        for ((j = i; j <= n; j++)); do
+          [[ "${words[j]}" == \#* ]] && break
+          [[ "${words[j]}" == '{' ]] && brace=$((brace + 1))
+          if [[ "${words[j]}" == '}' ]]; then
+            brace=$((brace - 1))
+            if (( brace == 0 )); then
+              short_loop_kind=line
+              short_loop_end=$j
+              return 0
+            fi
+          fi
+        done
+        short_loop_kind=brace
+        return 0
+      fi
+      begun=1
+      continue
+    fi
+    if ends_sublist "$word"; then
+      short_loop_kind=line
+      short_loop_end=$i
+      return 0
+    fi
+  done
+  if (( begun )); then
+    # Ohne Trenner endet der Rumpf am Zeilenende.
+    short_loop_kind=line
+    short_loop_end=$n
+  fi
+  return 0
+}
 
 # Denselben Pfad kann man verschieden schreiben: `~/git/...`, `$HOME/git/...`,
 # mit oder ohne Quotes. Ein reiner Textvergleich hielte das für ein anderes Repo
@@ -114,10 +276,11 @@ block_closer_kind() {
 # hier Datei-Inhalt, kein Code, den dieses Skript ausführen darf.
 resolve_sourced_path() {
   local line="$1" word path raw_path last_path="" modifier_mode="" block_kind=""
+  local short_loop_kind=""
   local -a words top_level
   local -i command_start=1 i paren_depth=0 assignment_depth=0 \
     in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1 \
-    block_depth=0
+    block_depth=0 loop_head=0 short_loop_end=0 short_close=0
   # zshs `(z)`-Lexer trennt wie die Shell, fuehrt den Inhalt aber nicht aus.
   # Quotes bleiben am Token und ein `#` innerhalb von Quotes wird deshalb nie
   # mit einem Kommentar verwechselt. Ebenso bleibt `source` in einem
@@ -135,6 +298,11 @@ resolve_sourced_path() {
   for ((i = 1; i <= ${#words}; i++)); do
     word="${words[i]}"
     [[ "$word" == \#* ]] && break
+    # Hinter dem Rumpf einer Kurzform steht die Zeile wieder auf oberster Ebene.
+    if (( short_close && i > short_close )); then
+      block_depth=$((block_depth - 1))
+      short_close=0
+    fi
     top_level[i]=$(( block_depth == 0 ))
     if is_command_separator "$word"; then
       scan_command_start=1
@@ -161,6 +329,13 @@ resolve_sourced_path() {
       # Art es ist, spielt hier keine Rolle — gezählt wird nur die Tiefe.
       block_depth=$((block_depth + 1))
       top_level[i]=0
+      # Bei einer Kurzform endet dieser Block schon am Ende ihrer Teilliste.
+      # Nur eine je Zeile: Verschachtelte Kurzformen bleiben konservativ offen.
+      if [[ "$block_kind" == loop ]] && (( ! short_close )) \
+          && loop_head_end "$i" "${words[@]}"; then
+        short_loop_body $((loop_head + 1)) "${words[@]}"
+        [[ "$short_loop_kind" == line ]] && short_close=$short_loop_end
+      fi
     elif block_closer_kind "$word"; then
       if (( block_depth == 0 )); then
         # Ein Blockende ohne Anfang auf dieser Zeile: Der Kontext kommt von
@@ -555,9 +730,9 @@ unclosed_substitutions() {
 # test_unclosed_shell_context_fails_without_appending_a_registration.
 zshrc_context_state() {
   local line="$1" state="$2" word previous="" opener="" context
-  local block_kind=""
+  local block_kind="" short_loop_kind=""
   local -i command_start=1 function_pending=0 nested_safe=0 \
-    open_subs=0 open_index=0
+    open_subs=0 open_index=0 wi=0 loop_head=0 short_loop_end=0 short_close=0
   local -a words stack
   [[ -n "$state" ]] && stack=("${(@s:,:)state}")
   if line_leaves_quote_open "$line"; then
@@ -565,8 +740,31 @@ zshrc_context_state() {
     return 0
   fi
   words=("${(z)line}")
-  for word in "${words[@]}"; do
+  # Steht oben ein `shortpending`, gehört die erste Teilliste DIESER Zeile noch
+  # zum Rumpf der Kurzform von vorhin. Erst jetzt lässt sich sagen, wie er
+  # weitergeht: `for x (a b)` kann auf der nächsten Zeile mit `do` in die lange
+  # Fassung übergehen, mit `{` in einen Klammerblock — oder eben die eine
+  # Teilliste sein, nach der die Schleife zu Ende ist.
+  if [[ "${stack[-1]:-}" == shortpending ]]; then
+    short_loop_body 1 "${words[@]}"
+    case "$short_loop_kind" in
+      do)    stack[-1]=loop ;;
+      # Den Eintrag hier ABRÄUMEN, nicht durch `brace` ersetzen: Das `{` steht
+      # am Anfang dieser Zeile und damit an einem Kommandoanfang — die Schleife
+      # unten legt den Klammerblock selbst an. Beides zusammen legte ihn zweimal
+      # auf den Stapel, und das eine `}` räumte nur einen davon ab.
+      brace) stack[-1]=() ;;
+      line)  stack[-1]=shortloop; short_close=$short_loop_end ;;
+    esac
+  fi
+  for ((wi = 1; wi <= ${#words}; wi++)); do
+    word="${words[wi]}"
     [[ "$word" == \#* ]] && break
+    # Hinter dem Rumpf einer Kurzform ist ihre Schleife zu Ende.
+    if (( short_close && wi > short_close )); then
+      [[ "${stack[-1]:-}" == shortloop ]] && stack[-1]=()
+      short_close=0
+    fi
     if [[ "$word" == '<<' || "$word" == '<<-' || "$word" == *'`'* ]]; then
       # Mehrere/nachgestellte Here-Docs und mehrzeilige Backtick-Ersetzungen
       # sicher nachzubauen wäre ein zweiter Shell-Parser. Solche Dateien werden
@@ -628,6 +826,17 @@ zshrc_context_state() {
         [[ "${stack[-1]:-}" == "$block_kind" ]] && stack[-1]=()
       elif block_opener_kind "$word"; then
         opener="$block_kind"
+        # Bei einer Kurzform reicht der Block nur bis zum Ende ihrer Teilliste.
+        # Nur eine je Zeile; verschachtelte bleiben konservativ offen.
+        if [[ "$opener" == loop ]] && (( ! short_close )) \
+            && loop_head_end "$wi" "${words[@]}"; then
+          short_loop_body $((loop_head + 1)) "${words[@]}"
+          case "$short_loop_kind" in
+            line)    opener=shortloop; short_close=$short_loop_end ;;
+            brace)   opener=brace ;;
+            pending) opener=shortpending ;;
+          esac
+        fi
       else
         case "$word" in
           return|exit|exec)
@@ -676,6 +885,12 @@ zshrc_context_state() {
     command_start=0
     previous="$word"
   done
+  # Endet der Rumpf am Zeilenende, wird der Eintrag nicht mehr in der Schleife
+  # oben entfernt — sonst bliebe die Kurzform als offener Block stehen und die
+  # Datei gälte wieder als unbelegbar.
+  if (( short_close )); then
+    [[ "${stack[-1]:-}" == shortloop ]] && stack[-1]=()
+  fi
   case "${words[-1]:-}" in
     '&&'|'||'|'|'|'|&') stack+=(opaque) ;;
   esac
