@@ -4,6 +4,7 @@ Die TUI selbst wird nicht getestet — die Datensammlung dafür schon:
 gegen ein echtes, temporär angelegtes Git-Repo.
 """
 
+import contextlib
 import io
 import json
 import importlib.util
@@ -7898,6 +7899,133 @@ class VersionInOutputTests(unittest.TestCase):
         self.assertTrue(d["repos"])
         for feld in ("rel", "path", "branch", "clean_and_synced", "remotes"):
             self.assertIn(feld, d["repos"][0])
+
+
+class DocumentationContractTests(unittest.TestCase):
+    """Die beiden READMEs gegen den Code — automatisch statt bei jedem Review.
+
+    Diese Abgleiche wurden bisher in jeder QA-Runde von Hand gefahren: Kommen
+    alle argparse-Schalter vor? Alle Config-Schluessel? Alle Tasten? Stimmt die
+    abgedruckte Kopfzeile noch? Von Hand heisst: nur dann, wenn jemand
+    hinschaut — dazwischen konnte die Doku beliebig auseinanderlaufen, und
+    genau das war schon zweimal ein Befund (fehlende Schalter --lang/--version/
+    --cd-file am 2026-08-19, falscher Rueckgaengig-Befehl ebenda). Als Test
+    laufen sie bei jedem Lauf mit.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.docs = {name: (cls.ROOT / name).read_text(encoding="utf-8")
+                    for name in ("README.md", "README.de.md")}
+
+    def test_every_command_line_switch_is_documented_in_both_languages(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                gmf_module.main(["--help"])
+        # `--help` erklaert sich selbst und steht bewusst in keinem README.
+        flags = set(re.findall(r"--[a-z][a-z-]+", buf.getvalue())) - {"--help"}
+        self.assertIn("--filter", flags)          # Schutz gegen leere Menge
+        for name, text in self.docs.items():
+            for flag in sorted(flags):
+                with self.subTest(datei=name, schalter=flag):
+                    self.assertIn(flag, text)
+
+    def test_every_config_key_and_setting_is_documented_in_both_languages(self):
+        keys = (list(gmf_module.DEFAULT_CONFIG)
+                + [s.key for s in gmf_module.EDITABLE_SETTINGS]
+                + list(gmf_module.READ_ONLY_SETTINGS))
+        for name, text in self.docs.items():
+            for key in keys:
+                with self.subTest(datei=name, schluessel=key):
+                    self.assertIn(key, text)
+
+    def test_every_documented_default_value_matches_the_code(self):
+        for name, text in self.docs.items():
+            for key, value in gmf_module.DEFAULT_CONFIG.items():
+                if isinstance(value, bool) or not isinstance(value, int):
+                    continue
+                with self.subTest(datei=name, schluessel=key):
+                    self.assertIn(str(value), text)
+
+    def test_every_key_the_interface_handles_is_in_the_key_table(self):
+        source = (self.ROOT / "gitmaster_flash.py").read_text(encoding="utf-8")
+        body = source.split("def dispatch_action")[1].split("def run(")[0]
+        keys = sorted(set(re.findall(r'key == "(.)"', body)))
+        self.assertIn("/", keys)                  # Schutz gegen leere Menge
+        for name, text in self.docs.items():
+            table = "\n".join(line for line in text.splitlines()
+                               if line.startswith("| "))
+            for key in keys:
+                with self.subTest(datei=name, taste=key):
+                    self.assertIn(f"| {key} |", table)
+
+    def test_the_printed_header_line_is_what_the_code_really_draws(self):
+        """Die abgedruckte Kopfzeile wird nachgebaut, nicht nur ueberflogen.
+
+        Sie traegt Version, Trefferzahl, Filtertext und die Zahl der
+        ausgeblendeten Repos — jede davon kann still veralten.
+        """
+        visible = ["api-1", "api-2", "api-3"]
+        hidden_dirty = [f"other-dirty-{i}" for i in range(7)]
+        rest = [f"other-{i}" for i in range(61 - 3 - 7)]
+        dirty = set(visible[:2]) | set(hidden_dirty)
+        for name, lang in (("README.md", "en"), ("README.de.md", "de")):
+            with self.subTest(datei=name):
+                with mock.patch.object(gmf_module, "UI_LANG", lang):
+                    ui = TUI(_HeaderScreen(), Path("~/git"),
+                             dict(DEFAULT_CONFIG), None)
+                    ui.all_statuses = [
+                        RepoStatus(path=Path("~/git") / n, rel=n,
+                                   modified=1 if n in dirty else 0)
+                        for n in visible + hidden_dirty + rest]
+                    ui.statuses = list(ui.all_statuses)
+                    ui.filter_query = "api"
+                    ui.apply_filter()
+                    with mock.patch("gitmaster_flash.curses.color_pair",
+                                    return_value=0):
+                        ui.draw()
+                drawn = ui.scr.drawn[0][1].rstrip()
+                self.assertIn(drawn, self.docs[name])
+
+    def test_both_readmes_stay_structurally_in_step(self):
+        heads = {}
+        for name, text in self.docs.items():
+            with self.subTest(datei=name):
+                self.assertEqual(text.count("```") % 2, 0,
+                                 "ungerade Zahl von Codeblock-Zaeunen")
+                for target in re.findall(r"\]\((?!https?:)([^)#]+)", text):
+                    self.assertTrue((self.ROOT / target).exists(),
+                                    f"lokaler Link zeigt ins Leere: {target}")
+            heads[name] = [l for l in text.splitlines() if l.startswith("#")]
+        # Beide Fassungen muessen inhaltlich synchron bleiben (AGENTS.md); eine
+        # zusaetzliche Ueberschrift auf einer Seite ist der erste Hinweis darauf,
+        # dass eine Aenderung nur in einer Sprache angekommen ist.
+        self.assertEqual(len(heads["README.md"]), len(heads["README.de.md"]))
+
+
+class _HeaderScreen:
+    """Minimales curses-Fenster: nur breit genug fuer die ungekuerzte Kopfzeile."""
+
+    def __init__(self):
+        self.drawn = []
+
+    def getmaxyx(self):
+        return (24, 200)
+
+    def erase(self):
+        pass
+
+    def addstr(self, y, x, text, *a):
+        self.drawn.append((y, text))
+
+    def move(self, *a):
+        pass
+
+    def refresh(self):
+        pass
 
 
 if __name__ == "__main__":
