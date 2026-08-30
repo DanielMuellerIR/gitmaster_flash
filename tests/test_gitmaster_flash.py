@@ -1484,6 +1484,21 @@ class DiffTests(unittest.TestCase):
         s = [_repo("a", remotes=[("origin", 0, 0)])]
         self.assertEqual(diff_status(_side(repos=s), _side(repos=s), "here", "there"), [])
 
+    def test_duplicate_normalized_repo_names_are_reported_as_ambiguous(self):
+        """Zwei Pfade duerfen sich nach NFC-Normalisierung nicht ueberschreiben."""
+        nfd, nfc = "cafe\u0301", "caf\u00e9"
+        left = [_repo(nfc, branch="main"), _repo(nfc, branch="feature")]
+        left[0]["path"] = f"/links/{nfd}"
+        left[1]["path"] = f"/links/{nfc}"
+        right = [_repo(nfc, branch="main")]
+
+        out = diff_status(_side(repos=left), _side(repos=right), "here", "there")
+
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("DRIFT", out[0])
+        self.assertIn(nfc, out[0])
+        self.assertIn("ambiguous", out[0])
+
     def test_missing_remote_is_drift(self):
         """The core case: git never transfers remotes, so they drift silently."""
         a = _side(repos=[_repo("x", remotes=[("origin", 0, 0), ("github", 0, 0)])])
@@ -6137,6 +6152,30 @@ class TuiFilterTests(unittest.TestCase):
         ui.apply_filter(keep_selection=True)
         self.assertEqual(ui.current().path, Path("/tmp") / nfc)
 
+    def test_expansion_follows_the_real_path_not_the_display_name(self):
+        """Gleiche NFC-Anzeigenamen duerfen nicht gemeinsam aufklappen."""
+        nfd, nfc = "cafe\u0301", "caf\u00e9"
+        first = RepoStatus(path=Path("/tmp") / nfd, rel=nfc)
+        second = RepoStatus(path=Path("/tmp") / nfc, rel=nfc)
+        ui = TUI(self.Screen(()), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = [first, second]
+        ui.statuses = list(ui.all_statuses)
+        ui.expanded.add(first.path)
+
+        rows = ui.build_rows()
+
+        self.assertEqual([row for row in rows if row[0] == "empty"],
+                         [("empty", 0)])
+        with mock.patch("gitmaster_flash.safe_addstr") as draw, \
+                mock.patch("gitmaster_flash.color_attr", return_value=0):
+            ui.draw_repo_line(0, first, False)
+            first_arrow = draw.call_args_list[0].args[3]
+        with mock.patch("gitmaster_flash.safe_addstr") as draw, \
+                mock.patch("gitmaster_flash.color_attr", return_value=0):
+            ui.draw_repo_line(0, second, False)
+            second_arrow = draw.call_args_list[0].args[3]
+        self.assertEqual((first_arrow, second_arrow), ("▼ ", "▶ "))
+
     def test_clear_filter_restores_every_repo_and_holds_the_selection(self):
         ui = self._ui(["blog", "api-gateway", "api-docs"])
         ui.filter_query = "api"
@@ -6228,6 +6267,9 @@ class FilterCliTests(unittest.TestCase):
         _, out, _ = self._run("--json", "--filter", "api")
         payload = json.loads(out)
         self.assertEqual([r["rel"] for r in payload["repos"]], ["api-gateway"])
+        self.assertEqual(payload["filter"], {
+            "query": "api", "matches": 1, "total": 2,
+        })
 
     def test_a_filter_without_hits_says_so_on_stderr_not_on_stdout(self):
         code, out, err = self._run("--json", "--filter", "gibtsnicht")
@@ -6277,6 +6319,20 @@ class FilterCliTests(unittest.TestCase):
         self.assertIn("api", out.splitlines()[0])
         # Der Hinweis ist kein Unterschied: Der Exit-Code beschreibt weiterhin
         # nur die Vergleichszeilen.
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+
+    def test_diff_json_carries_the_filter_and_both_result_counts(self):
+        code, out, err = self._diff(
+            "--json", "--filter", "api",
+            remote_repos=[self._remote_repo("api-gateway", branch="andere"),
+                          self._remote_repo("blog")])
+        payload = json.loads(out)
+        self.assertEqual(payload["filter"], {
+            "query": "api",
+            "here_matches": 1, "here_total": 2,
+            "host_matches": 1, "host_total": 2,
+        })
         self.assertEqual(code, 1)
         self.assertEqual(err, "")
 
@@ -8002,17 +8058,27 @@ class DocumentationContractTests(unittest.TestCase):
                 if isinstance(value, bool) or not isinstance(value, int):
                     continue
                 with self.subTest(datei=name, schluessel=key):
-                    self.assertIn(str(value), text)
+                    bullet = re.search(
+                        rf"(?ms)^- `[^`]*\b{re.escape(key)}\b[^`]*`[^\n]*(?:\n  .*?)*"
+                        rf"(?=\n- |\n\n|\Z)", text)
+                    self.assertIsNotNone(bullet, f"kein Abschnitt fuer {key}")
+                    self.assertIn(str(value), bullet.group(0))
 
     def test_every_key_the_interface_handles_is_in_the_key_table(self):
         source = (self.ROOT / "gitmaster_flash.py").read_text(encoding="utf-8")
         body = source.split("def dispatch_action")[1].split("def run(")[0]
-        keys = sorted(set(re.findall(r'key == "(.)"', body)))
+        keys = set(re.findall(r'key == "(.)"', body))
+        # Diese Tasten behandelt `_loop()` vor `dispatch_action()`. Die
+        # Standard-App-Tasten kommen aus der Config und erreichen den letzten
+        # Zweig von `dispatch_action()` deshalb ebenfalls ohne literalen
+        # Vergleich im Funktionsrumpf.
+        keys.update(gmf_module.DEFAULT_CONFIG["apps"])
+        keys.update(("↑ / ↓", "→ / ←", "Tab", "⏎", "Q"))
         self.assertIn("/", keys)                  # Schutz gegen leere Menge
         for name, text in self.docs.items():
             table = "\n".join(line for line in text.splitlines()
                                if line.startswith("| "))
-            for key in keys:
+            for key in sorted(keys):
                 with self.subTest(datei=name, taste=key):
                     self.assertIn(f"| {key} |", table)
 

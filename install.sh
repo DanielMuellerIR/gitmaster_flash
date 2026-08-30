@@ -58,10 +58,11 @@ is_command_separator() {
   return 1
 }
 
-# Präfixe, die zsh vor dem eigentlichen Kommandonamen erlaubt.
+# Präfixe, die zsh vor dem eigentlichen Kommandonamen erlaubt. `!` kehrt nur
+# den Status um; das folgende Kommando läuft trotzdem.
 is_command_modifier() {
   [[ "$1" == noglob || "$1" == nocorrect || "$1" == time \
-     || "$1" == command || "$1" == builtin ]]
+     || "$1" == command || "$1" == builtin || "$1" == '!' ]]
 }
 
 # Auch die Blockgrammatik gehört zu den Regeln, die beide Scanner teilen
@@ -189,6 +190,13 @@ loop_head_end() {
     done
     return 1                      # Die Klammer schließt auf dieser Zeile nicht.
   fi
+  # `for x; print $x` und `select x; print $x` lassen `in` samt Wortliste weg.
+  # Der Trenner direkt hinter dem Variablennamen beendet dann bereits den Kopf.
+  if [[ "${words[start]}" == for || "${words[start]}" == select ]] \
+      && ends_sublist "${words[start+2]:-}"; then
+    loop_head=$((start + 1))
+    return 0
+  fi
   # Bleibt die `in`-Fassung: `for x in a b; print $x`. Ihre Wortliste kann kein
   # `;` enthalten, der erste echte Trenner beendet also den Kopf. Steht davor
   # ein `do`, ist es die lange Fassung.
@@ -288,7 +296,7 @@ short_loop_body() {
 resolve_sourced_path() {
   local line="$1" word path raw_path last_path="" modifier_mode="" block_kind=""
   local short_loop_kind=""
-  local -a words top_level body_start
+  local -a words top_level body_start short_brace
   local -i command_start=1 i paren_depth=0 assignment_depth=0 \
     in_pipeline=0 in_conditional=0 command_wrapper=0 scan_command_start=1 \
     block_depth=0 loop_head=0 short_loop_end=0 short_loop_body_at=0 \
@@ -321,10 +329,15 @@ resolve_sourced_path() {
       continue
     fi
     case "$word" in
-      '()'|'{'|'}')
+      '()')
         # Funktions-/Brace-Syntax kann hinter einem Namen stehen und ist auch
         # dort ein Kontrollkontext, kein gewöhnliches Argument.
         return 1
+        ;;
+      '{'|'}')
+        # Ein vollständig belegter Klammerrumpf der Schleifen-Kurzform ist die
+        # eine Ausnahme. Beliebige Brace-/Funktionssyntax bleibt abgelehnt.
+        (( ${short_brace[i]:-0} )) || return 1
         ;;
     esac
     if (( scan_command_start )) && is_assignment_word "$word"; then
@@ -347,6 +360,11 @@ resolve_sourced_path() {
           && loop_head_end "$i" "${words[@]}"; then
         short_loop_body $((loop_head + 1)) "${words[@]}"
         [[ "$short_loop_kind" == line ]] && short_close=$short_loop_end
+        if [[ "$short_loop_kind" == line && $short_loop_body_at -gt 1 \
+              && "${words[short_loop_body_at-1]}" == '{' ]]; then
+          short_brace[$((short_loop_body_at - 1))]=1
+          short_brace[$short_loop_end]=1
+        fi
         # Hinter dem Kopf beginnt ein Kommando. Ohne diese Marke bliebe der
         # zweite Durchgang dort auf `command_start=0` stehen und uebersaehe ein
         # `return` im Rumpf — `for x (a b) return` bricht die .zshrc aber ab,
@@ -392,6 +410,11 @@ resolve_sourced_path() {
     if (( command_start )) && is_assignment_word "$word"; then
       # Zuweisungen dürfen einem Shell-Kommando vorangestellt sein. Sie ändern
       # nicht, dass ein folgendes return/exit/exec den Rest unerreichbar macht.
+      continue
+    fi
+    if (( command_start )) && [[ "$word" == '!' ]]; then
+      # Negation ändert nur den Rückgabestatus. Das nächste Wort bleibt der
+      # Kommandoname (`! return` verlässt die geladene Datei trotzdem).
       continue
     fi
     if (( command_start )) && [[ "$word" == command ]]; then
@@ -600,6 +623,20 @@ resolve_sourced_path() {
   return 1
 }
 
+# Beginnt die Zeile noch als verschobener Kurzform-Rumpf, kann nach dessen
+# erster Teilliste auf derselben Zeile wieder Top-Level folgen. Nur diesen
+# belegten Suffix an den normalen Kandidatenresolver geben.
+resolve_short_pending_suffix() {
+  local line="$1" suffix short_loop_kind=""
+  local -a words
+  local -i short_loop_end=0 short_loop_body_at=0
+  words=("${(z)line}")
+  short_loop_body 1 "${words[@]}"
+  [[ "$short_loop_kind" == line && $short_loop_end -lt ${#words} ]] || return 1
+  suffix="${(j: :)words[$((short_loop_end + 1)),-1]}"
+  resolve_sourced_path "$suffix"
+}
+
 # Mehrzeilige Quotes sind gültiges zsh, aber eine zeilenweise Kandidatensuche
 # kann ihren Inhalt nicht von echten Kommandos unterscheiden. Sobald eine Zeile
 # einen Quote-Kontext offen lässt, lehnen wir die Datei konservativ ab. Das ist
@@ -753,7 +790,7 @@ zshrc_context_state() {
   local -i command_start=1 function_pending=0 nested_safe=0 \
     open_subs=0 open_index=0 wi=0 loop_head=0 short_loop_end=0 short_close=0 \
     short_body_at=0 short_loop_body_at=0
-  local -a words stack
+  local -a words stack short_brace
   [[ -n "$state" ]] && stack=("${(@s:,:)state}")
   if line_leaves_quote_open "$line"; then
     print -r -- opaque
@@ -774,7 +811,16 @@ zshrc_context_state() {
       # unten legt den Klammerblock selbst an. Beides zusammen legte ihn zweimal
       # auf den Stapel, und das eine `}` räumte nur einen davon ab.
       brace) stack[-1]=() ;;
-      line)  stack[-1]=shortloop; short_close=$short_loop_end ;;
+      line)
+        stack[-1]=shortloop
+        short_close=$short_loop_end
+        short_body_at=$short_loop_body_at
+        if (( short_loop_body_at > 1 )) \
+            && [[ "${words[short_loop_body_at-1]}" == '{' ]]; then
+          short_brace[$((short_loop_body_at - 1))]=1
+          short_brace[$short_loop_end]=1
+        fi
+        ;;
     esac
   fi
   for ((wi = 1; wi <= ${#words}; wi++)); do
@@ -791,6 +837,13 @@ zshrc_context_state() {
     if (( short_body_at && wi == short_body_at )); then
       command_start=1
       short_body_at=0
+    fi
+    if (( ${short_brace[wi]:-0} )); then
+      # Dieser geschlossene Klammerrumpf ist bereits als die eine Teilliste der
+      # verschobenen Kurzform abgegrenzt. Nicht zusätzlich als Brace öffnen.
+      command_start=0
+      previous="$word"
+      continue
     fi
     if [[ "$word" == '<<' || "$word" == '<<-' || "$word" == *'`'* ]]; then
       # Mehrere/nachgestellte Here-Docs und mehrzeilige Backtick-Ersetzungen
@@ -938,6 +991,12 @@ if [[ -f "$zshrc" ]]; then
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -z "$zshrc_state" ]]; then
       candidate="$(resolve_sourced_path "$line")" || candidate=""
+    elif [[ "$zshrc_state" == shortpending ]]; then
+      candidate="$(resolve_short_pending_suffix "$line")" || candidate=""
+    else
+      candidate=""
+    fi
+    if [[ -z "$zshrc_state" || "$zshrc_state" == shortpending ]]; then
       if [[ -n "$candidate" && "${candidate:t}" == "gmf.zsh" ]]; then
         existing_path="$candidate"
       fi

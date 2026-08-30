@@ -215,7 +215,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.2 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -509,9 +509,10 @@ python3 gitmaster_flash.py --version       # bare version number, nothing else
 `--json` and `--diff`; started interactively it preselects the filter, which `/`
 then changes. With `--diff` it narrows **both** machines by the same terms —
 filtering only one side would report "only here" differences that do not exist.
-Every output names the active filter: the `--list` header, and a leading line
-in the `--diff` report that says how many repositories on each machine passed
-it. A filter without a single hit says so on stderr — on stdout an empty list,
+Every output names the active filter: the `--list` header, a structured `filter`
+object in JSON (query plus matching and total repository counts), and a leading
+line in the `--diff` text report that gives both machines' counts. A filter
+without a single hit says so on stderr — on stdout an empty list,
 or "no differences", together with exit code 0 would otherwise look exactly like
 "everything is fine".
 
@@ -570,7 +571,8 @@ than one you have to edit in a file.
 - `compact_from` — when the repository count exceeds this number, gmf starts in
   the compact view (default 20: up to 20 use the detail view; `M` switches at any
   time).
-- `git_timeout` / `fetch_timeout` — seconds per git call.
+- `git_timeout` — seconds per local git call (default 10).
+- `fetch_timeout` — seconds per fetch call (default 30).
 - `diff_timeout` — hard wall-clock limit for the complete SSH comparison
   (default 3600 seconds). Individual Git calls still use `git_timeout` or
   `fetch_timeout`; SSH connection setup has a separate ten-second limit.

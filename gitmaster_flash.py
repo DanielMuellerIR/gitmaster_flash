@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.1"
+__version__ = "0.22.2"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -149,6 +149,9 @@ TR = {
     # Hostnamen bekommen "auf"/"on" — deshalb steht die Praeposition NICHT im Text.
     "diff_on": {"en": "on {m}", "de": "auf {m}"},
     "diff_only_on": {"en": "only {m}: {rel}", "de": "nur {m}: {rel}"},
+    "diff_ambiguous_repo": {
+        "en": "DRIFT  {rel}: duplicate normalized repository name; comparison is ambiguous",
+        "de": "DRIFT  {rel}: normalisierter Repo-Name doppelt; Vergleich ist mehrdeutig"},
     "diff_remote_missing": {
         "en": "DRIFT  {rel}: remote '{r}' only {m} (git never transfers remotes)",
         "de": "DRIFT  {rel}: Remote '{r}' nur {m} (Git uebertraegt Remotes nie)"},
@@ -4370,8 +4373,25 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
     here_at, there_at = _loc(here_name), _loc(there_name)
     # Je Seite gezaehlt, damit die Erklaerung EINMAL erscheint und nicht je Repo.
     fetch_gescheitert: dict[str, int] = {}
-    ra = {r["rel"]: r for r in here.get("repos", [])}
-    rb = {r["rel"]: r for r in there.get("repos", [])}
+    def grouped(repos):
+        result = {}
+        for repo in repos:
+            result.setdefault(repo["rel"], []).append(repo)
+        return result
+
+    groups_a = grouped(here.get("repos", []))
+    groups_b = grouped(there.get("repos", []))
+    ambiguous = {rel for rel in set(groups_a) | set(groups_b)
+                 if len(groups_a.get(rel, ())) > 1
+                 or len(groups_b.get(rel, ())) > 1}
+    for rel in sorted(ambiguous):
+        out.append(t("diff_ambiguous_repo", rel=terminal_text(rel)))
+    # Mehrdeutige Namen nicht willkürlich paaren. Die eigene DRIFT-Zeile ist
+    # ehrlicher, als einen der kollidierenden Pfade still zu verlieren.
+    ra = {rel: repos[0] for rel, repos in groups_a.items()
+          if rel not in ambiguous}
+    rb = {rel: repos[0] for rel, repos in groups_b.items()
+          if rel not in ambiguous}
     for rel in sorted(set(ra) - set(rb)):
         out.append(t("diff_only_on", rel=rel, m=here_at))
     for rel in sorted(set(rb) - set(ra)):
@@ -4569,6 +4589,7 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
     # Der Filter greift auf BEIDEN Seiten mit demselben Suchtext. Nur hier zu
     # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
     note = ""
+    filter_info = None
     if query:
         here_all, there_all = here["repos"], there.get("repos") or []
         here["repos"] = filter_repo_dicts(here_all, query)
@@ -4577,6 +4598,11 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
         # Kommandozeile und darf im Terminal keine Steuerzeichen ausfuehren.
         # Gefiltert wird weiter mit dem Rohtext — nur die Ausgabe wird entschaerft.
         shown = terminal_text(query)
+        filter_info = {
+            "query": shown,
+            "here_matches": len(here["repos"]), "here_total": len(here_all),
+            "host_matches": len(there["repos"]), "host_total": len(there_all),
+        }
         note = t("diff_filter_note", q=shown,
                  n=len(here["repos"]), total=len(here_all),
                  m=len(there["repos"]), mt=len(there_all), h=host)
@@ -4589,8 +4615,11 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
     if as_json:
         # Die JSON-Form bleibt wie `--json` frei von Zusatztexten; der Hinweis
         # oben steht dafür auf stderr.
-        print(json.dumps({"here": here.get("version"), "host": host,
-                          "differences": lines}, indent=2, ensure_ascii=False))
+        payload = {"here": here.get("version"), "host": host,
+                   "differences": lines}
+        if filter_info is not None:
+            payload["filter"] = filter_info
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         # Der Hinweis zählt nicht als Unterschied und geht deshalb getrennt
         # heraus: Der Exit-Code beschreibt weiterhin nur die Vergleichszeilen.
@@ -4929,7 +4958,7 @@ class TUI:
         self.filter_query = canonical_filter_query(query)  # "" = kein Filter; --filter belegt ihn vor
         self.selected = 0
         self.offset = 0            # Scroll-Position
-        self.expanded: set[str] = set()   # rel-Pfade der aufgeklappten Repos
+        self.expanded: set[Path] = set()  # echte Pfade der aufgeklappten Repos
         self.message = ""          # Feedback-Zeile über dem Footer
         # "detail" = eine Zeile je Repo mit allem; "compact" = mehrspaltige
         # Kurzfassung. Der Startmodus richtet sich nach der Repo-Zahl (s. reload).
@@ -5110,7 +5139,7 @@ class TUI:
         rows = []  # (art, repo_index, ...) — art: 'repo' | 'file' | 'stash' | 'empty'
         for i, st in enumerate(self.statuses):
             rows.append(("repo", i))
-            if st.rel in self.expanded:
+            if st.path in self.expanded:
                 for entry in st.files:
                     rows.append(("file", i, entry.code, entry.path))
                 for stash in st.stashes:
@@ -5121,7 +5150,7 @@ class TUI:
 
     def draw_repo_line(self, y, st: RepoStatus, is_selected: bool):
         sel = curses.A_REVERSE if is_selected else 0
-        arrow = "▼" if st.rel in self.expanded else "▶"
+        arrow = "▼" if st.path in self.expanded else "▶"
         x = 1
         safe_addstr(self.scr, y, x, f"{arrow} ", sel)
         x += 2
@@ -6592,13 +6621,13 @@ class TUI:
                     # Kompakt: eine Spalte weiter statt aufklappen.
                     self.selected = self.compact_step(+1)
                 else:
-                    self.expanded.add(st.rel)
+                    self.expanded.add(st.path)
                 continue
             elif ch == curses.KEY_LEFT and st:
                 if self.view_mode == "compact":
                     self.selected = self.compact_step(-1)
                 else:
-                    self.expanded.discard(st.rel)
+                    self.expanded.discard(st.path)
                 continue
             elif ch in (10, 13, curses.KEY_ENTER):
                 if self.action_cd_and_quit():
@@ -7036,14 +7065,20 @@ def main(argv: list[str] | None = None) -> int:
                         query=query)
 
     if args.list or args.json or not sys.stdout.isatty():
-        statuses = filter_statuses(collect_all(root, cfg, fetch=args.fetch), query)
+        all_statuses = collect_all(root, cfg, fetch=args.fetch)
+        statuses = filter_statuses(all_statuses, query)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
             # dieselbe Fassung dahintersteht. Die Repos liegen unter "repos".
-            print(json.dumps({"version": __version__, "root": str(root),
-                              "repos": [status_dict(s) for s in statuses]},
-                             indent=2, ensure_ascii=False))
+            payload = {"version": __version__, "root": str(root),
+                       "repos": [status_dict(s) for s in statuses]}
+            if query:
+                payload["filter"] = {
+                    "query": terminal_text(query),
+                    "matches": len(statuses), "total": len(all_statuses),
+                }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print_list(statuses, root, query)
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in

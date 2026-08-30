@@ -799,6 +799,49 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Already installed", result.stdout)
 
+    def test_short_for_and_select_without_in_have_a_complete_head(self):
+        """`for x;` und `select x;` sind gueltige zsh-Kurzformen ohne `in`.
+
+        Der Trenner direkt hinter dem Variablennamen beendet ihren Kopf. Der
+        Installer hielt ihn bisher fuer offen und lehnte die wirksame
+        Registrierung auf der Folgezeile als unbelegbar ab.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        for keyword in ("for", "select"):
+            with self.subTest(keyword=keyword):
+                content = f"{keyword} x; print -r -- $x\nsource -- {wrapper}\n"
+                zshrc.write_text(content)
+                syntax = subprocess.run(
+                    ["zsh", "-n", str(zshrc)], capture_output=True, text=True)
+                self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+                result = self._install()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Already installed", result.stdout)
+                self.assertEqual(zshrc.read_text(), content)
+
+    def test_closed_short_loop_braces_do_not_hide_a_later_source(self):
+        """Ein belegter Klammerrumpf darf den Top-Level-Suffix nicht sperren."""
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        forms = (
+            f"for x (a b) {{ print -r -- $x }}; source -- {wrapper}\n",
+            f"for x (a b)\n{{ print -r -- $x }}\nsource -- {wrapper}\n",
+            f"for x (a b)\nprint -r -- $x; source -- {wrapper}\n",
+        )
+        for content in forms:
+            with self.subTest(content=content.replace("\n", " ⏎ ")):
+                zshrc.write_text(content)
+                self.assertTrue(self._loads_the_wrapper())
+
+                result = self._install()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Already installed", result.stdout)
+                self.assertEqual(zshrc.read_text(), content)
+
     def test_the_long_forms_of_the_same_keywords_stay_blocks(self):
         """Die lange Fassung darf durch die Kurzform-Erkennung nicht aufgehen.
 
@@ -836,6 +879,7 @@ class InstallScriptTests(unittest.TestCase):
         zshrc = self.home / ".zshrc"
         rumpf = (
             "for x (a b) {stopper}",              # gewoehnlicher Rumpf
+            "for x (a b) ! {stopper}",            # Negation ist nur ein Praefix
             "repeat 2; {stopper}",                # Trenner vor dem Rumpf
             "for x (a b) {{ {stopper} }}",        # Klammerrumpf
             "for x (a b)\n{stopper}",             # Rumpf auf der Folgezeile

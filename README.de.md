@@ -231,7 +231,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.2 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -535,8 +535,9 @@ python3 gitmaster_flash.py --version       # nur die Versionsnummer, sonst nicht
 den `/` dann ändert. Bei `--diff` grenzt er **beide** Rechner mit denselben
 Begriffen ein — nur eine Seite zu filtern ergäbe „nur hier"-Unterschiede, die es
 gar nicht gibt. Jede Ausgabe nennt den aktiven Filter: die `--list`-Kopfzeile,
-und beim `--diff` eine erste Zeile, die sagt, wie viele Repos je Rechner ihn
-passiert haben. Ein Filter ohne einen einzigen Treffer sagt das auf stderr — auf
+ein strukturiertes `filter`-Objekt im JSON (Suchtext, Treffer- und Gesamtzahl)
+und beim Textbericht von `--diff` eine erste Zeile mit den Zahlen beider Rechner.
+Ein Filter ohne einen einzigen Treffer sagt das auf stderr — auf
 stdout sähen leere Liste oder „keine Unterschiede" mit Exit-Code 0 sonst genau
 wie „alles in Ordnung" aus.
 
@@ -598,7 +599,8 @@ Einstellung, die man nicht findet, ist schlimmer als eine, die man in der Datei
 - `compact_from` — wird diese Repo-Anzahl überschritten, startet gmf in der
   Kompaktansicht (Standard 20: bis einschließlich 20 bleibt die Detailansicht;
   `M` schaltet jederzeit um).
-- `git_timeout` / `fetch_timeout` — Sekunden pro git-Aufruf.
+- `git_timeout` — Sekunden pro lokalem git-Aufruf (Standard 10).
+- `fetch_timeout` — Sekunden pro Fetch-Aufruf (Standard 30).
 - `diff_timeout` — harte Laufzeitgrenze für den gesamten SSH-Vergleich
   (Standard 3600 Sekunden). Einzelne Git-Aufrufe behalten `git_timeout` oder
   `fetch_timeout`; für den SSH-Verbindungsaufbau gilt zusätzlich eine eigene
