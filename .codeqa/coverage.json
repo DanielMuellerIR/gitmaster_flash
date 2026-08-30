@@ -2,12 +2,11 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260829T203952085645+0200",
-    "token_budget": 100000,
+    "id": "20260830T100309995450+0200",
+    "token_budget": 3000000,
     "status": "complete",
-    "started_at": "2026-08-29T20:39:52+02:00",
-    "tokens_spent": 54763,
-    "finished_at": "2026-08-29T20:57:49+02:00",
+    "started_at": "2026-08-30T10:03:09+02:00",
+    "finished_at": "2026-08-30T10:04:49+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -37,6 +36,15 @@
       "tokens_spent": 334952,
       "finished_at": "2026-08-29T19:52:04+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260829T203952085645+0200",
+      "token_budget": 100000,
+      "status": "complete",
+      "started_at": "2026-08-29T20:39:52+02:00",
+      "tokens_spent": 54763,
+      "finished_at": "2026-08-29T20:57:49+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -65,16 +73,17 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T180724876938+0200",
-        "completed_at": "2026-08-29T19:45:24+02:00",
-        "observed_head": "89d72887d182d8d3e55ee40e72e8fb2fb121e920",
-        "content_sha256": "b0ea9984b660296d96f53d9f25c81e9be60842ea4d9429d8990ead0b19a0c52d",
+        "campaign_id": "20260830T100309995450+0200",
+        "completed_at": "2026-08-30T10:03:31+02:00",
+        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
+        "content_sha256": "1d62d59bfaf5d2b363d4101a9d05844dc50019503642fe51a7022a183ce6eed5",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Zweiter Durchgang im selben Bereich. Delta seit dem ersten Abschluss waren die eigenen Testergaenzungen; die Tiefe ging deshalb in die Grenzen, die das Feature-Delta nicht beruehrt hatte. Fund per struktureller Duplikatsuche: Die beiden Push-Wege P und G teilten rund fuenfzig Zeilen Schutzschritte in drei Bloecken — fetchen und gegen den gezeigten Stand abgleichen, Uebertragung pruefen, direkt vor dem Push erneut fetchen und die Freigabe-Signatur vergleichen, pushen und das Ergebnis benennen. Bis auf zwei Meldungsschluessel und expected_public war der dritte Block zeichengleich. Eine spaeter nur einseitig geschaerfte Pruefung haette den anderen Weg still schwaecher gelassen; dieselbe Doppelung hatte 53850df fuer das defensive Lesen der Remote-Config schon beseitigt. Jetzt _approved_transfer, _reapproved_transfer und _push_and_report. expected_public bleibt bewusst ein Argument statt aus remote.public abgeleitet zu werden — es ist die Erwartung des Aufrufers, gegen die inspect_transfer prueft. Die Reihenfolge Tracking-Aktualisierung vor refresh_one blieb erhalten (eine erste Fassung hatte sie vertauscht und haette die Liste auf dem Stand vor der Aktualisierung gezeigt). Neuer Test fuer den zweiten Freigabe-Abgleich, den bisher keiner der beiden Wege abdeckte. Geprueft und fuer sauber befunden: die sys.exc_info()-Klammer in commit_selected (der einzige Aufrufer ruft nicht aus einem except-Block heraus) sowie die Faelle der Demo-Sandbox, die als Fixtures bewusst ausgeschrieben bleiben.",
+        "summary": "Diff-Vergleich meldet NFC/NFD-Namenskollisionen statt Repo-Zustaende zu ueberschreiben; JSON-Filtervertraege tragen bereinigten Suchtext und Trefferzahlen; TUI-Aufklappzustand folgt dem echten Pfad. Delta, JSON-Grenzen, Identitaetsverwendungen und direkte CLI-Ausgabe nachgeprueft.",
         "tests": [
-          "python3 -m unittest discover -s tests: 501 Tests OK (1 neuer); Gegenprobe: ohne den Signaturvergleich in _reapproved_transfer scheitern beide Teilfaelle des neuen Tests; python3 docs/make-screens.py --check Exit 0; python3 -m compileall -q; git diff --check; keine Demo-/Generatorprozesse uebrig"
+          "python3 -m unittest discover -s tests: 511 passed",
+          "python3 gitmaster_flash.py TEMP --json --filter api --lang en: strukturiertes Filterfeld 1/2; erwarteter Exit 1 fuer Repos ohne Sync-Remote"
         ]
       }
     },
@@ -90,16 +99,18 @@
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T203952085645+0200",
-        "completed_at": "2026-08-29T20:54:33+02:00",
-        "observed_head": "5e8836547179b535701456cb2e262aaa9e16541a",
-        "content_sha256": "da7abe63ac9ae3dfc970ae08588a136999c199f0f945e05a136b3e6dbcd12132",
+        "campaign_id": "20260830T100309995450+0200",
+        "completed_at": "2026-08-30T10:04:00+02:00",
+        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
+        "content_sha256": "e50db312abfc8f1b27aa939385a154741a132e8df12b4b76df696807684071a7",
         "file_count": 3,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Delta seit 8d78a01 geprueft: die Abdeckung der zsh-Kurzformen (baa8d9e) mit den drei gemeinsamen Funktionen ends_sublist, loop_head_end und short_loop_body sowie 4 neuen Blackbox-Tests. Der Review war kein Abnicken der eigenen Arbeit: Ein adversarialer Durchlauf ueber 13 Randfaelle gegen echtes zsh brachte einen falsch-positiven Fall ans Licht. 'for x (a b) return' meldete 'Already installed', obwohl das return die .zshrc abbricht und gmf nie entsteht. Ursache: Nach dem Schluesselwort stand command_start auf 0, und beide Scanner pruefen return/exit/exec nur an einem Kommandoanfang; solange die Kurzform den Block bis zum Dateiende offen liess, fiel das nicht auf. short_loop_body meldet jetzt zusaetzlich das erste echte Wort des Rumpfes (5e88365). Beim Klammerrumpf zeigt die Marke hinter das '{' statt darauf — darauf haette sie den schon gelesenen Block ein zweites Mal geoeffnet, woran ein erster Versuch scheiterte. Ein zweiter Fund derselben Art: 'for x (a b) { return }' war ebenfalls falsch-positiv und ist mit derselben Marke behoben. Bewusst konservativ geblieben und geprueft: zwei Kurzformen hintereinander, Kurzform mit offenem Quote, Kopf ueber das Zeilenende hinaus — alle drei werden abgelehnt statt geraten.",
+        "summary": "Beide zsh-Scanner teilen jetzt Negationspraefix und Schleifenkopf-Regeln; geschlossene Kurzform-Klammern werden genau einmal gezaehlt, und der Top-Level-Suffix eines verschobenen Rumpfs bleibt fuer die Idempotenz sichtbar. Delta, Wrapper-Grenze, shared-grammar-Aufrufer und echte zsh-Syntax nachgeprueft.",
         "tests": [
-          "python3 -m unittest discover -s tests: 506 Tests OK (1 neuer mit 8 Teilfaellen); tests.test_cli_blackbox dreimal je 53 OK; 13 adversariale Randfaelle und 5 Klammervarianten gegen echtes zsh geprueft (definiert die Datei nach dem Sourcen wirklich gmf?) — kein gefaehrlicher Fall mehr, vorher zwei; 24 Kurz- und Langform-Dateien ebenso ohne falsch-positives Urteil; Verdikte beider Scanner ueber den 138-Zeilen-Korpus und 14 mehrzeilige Dateien zeichengleich zum Stand vor der Kurzform-Arbeit; Gegenprobe: 4 der 8 Teilfaelle des neuen Tests scheitern auf baa8d9e; zsh -n install.sh gmf.zsh; git diff --check"
+          "python3 tests/test_cli_blackbox.py InstallScriptTests: 44 passed",
+          "zsh -n install.sh: passed",
+          "python3 -m unittest discover -s tests: 511 passed"
         ]
       }
     },
@@ -137,16 +148,18 @@
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T180724876938+0200",
-        "completed_at": "2026-08-29T19:35:03+02:00",
-        "observed_head": "dc36cdf31c3bd24dcab166171b5fc6216a28e985",
-        "content_sha256": "cf2ac498d767392b1e6e4ce2842702e1bfca05c4d49b504c8e5aeda0b98d2ee5",
+        "campaign_id": "20260830T100309995450+0200",
+        "completed_at": "2026-08-30T10:04:41+02:00",
+        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
+        "content_sha256": "426590e5ee420bfac7ade38af31080cc0de212aa27d02ea69a88ca3ada123191",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Delta seit 1d1c335 geprueft: Beide Fassungen haben die vier Feature-Releases vollstaendig und synchron nachgezogen (Hintergrund-Fetch, Filter samt Kopfzeile, Einstellungen mit der Begruendung fuer die nur lesenden Gruppen, Commit-Vorschlaege, J/Y-Bestaetigung, Stat-Cache-Ausnahme von git diff, Fingerprint statt Remote-URL im JSON). Inhaltlich kein Fund; die eine Luecke — die --diff-Zusagen zum Filter — war Teil des Befunds in application-core und ist dort in beiden Fassungen mitkorrigiert worden. Verbesserung stattdessen an der Pruefung selbst: Die Abgleiche, die bisher in jeder QA-Runde von Hand liefen, sind jetzt sechs Tests. Sie decken argparse-Schalter, Config-Schluessel und Einstellungen, dokumentierte Vorgabezahlen, die Tastentabelle gegen dispatch_action, die aus dem Code nachgebaute Kopfzeile und die Struktur beider Dateien ab. Genau in dieser Luecke war die Doku am 2026-08-19 zweimal weggelaufen (fehlende Schalter, unvollstaendiger Rueckgaengig-Befehl).",
+        "summary": "Beide READMEs beschreiben den strukturierten JSON-Filtervertrag, die konkreten Timeout-Defaults und die aktuelle Version synchron; Vertragstests binden Werte an ihren Schluessel und erfassen auch Hauptschleifen- sowie Standard-App-Tasten. Sprachpaar, Codegrenzen und generierte Bilder nachgeprueft.",
         "tests": [
-          "python3 -m unittest discover -s tests: 500 Tests OK (6 neue); die abgedruckten Kopfzeilen beider Sprachen aus dem Code nachgebaut und zeichengleich in den Dateien wiedergefunden; alle 9 argparse-Schalter, alle 10 DEFAULT_CONFIG-Schluessel, alle 7 editierbaren und 3 nur lesenden Einstellungen sowie alle 11 in dispatch_action behandelten Tasten in beiden Fassungen belegt; je 24 Ueberschriften, paarige Codeblock-Zaeune, alle lokalen Links vorhanden; --diff mit Filter in beiden Sprachen ausgefuehrt und gegen den beschriebenen Wortlaut geprueft; Gegenprobe mit absichtlich falscher Version, entfernter Tastenzeile und vertipptem Schalter meldet alle drei"
+          "python3 tests/test_gitmaster_flash.py DocumentationContractTests: 6 passed",
+          "python3 docs/make-screens.py --check: passed",
+          "python3 -m unittest discover -s tests: 511 passed"
         ]
       }
     },
@@ -175,13 +188,13 @@
     }
   ],
   "architecture": {
-    "campaign_id": "20260829T180724876938+0200",
-    "recorded_at": "2026-08-29T18:44:20+02:00",
-    "observed_head": "6a025fd6ac31507cb0866f36c5754d80593fd2ba",
-    "summary": "Nachgemessen am 2026-08-29, nach vier Feature-Releases (0.19-0.22, +1387 Zeilen im Modul): Die Shell ist gewachsen, die Logik ist ihr aber nicht gefolgt. Die TUI-Klasse umfasst 1707 Zeilen, davon beruehren 1412 tatsaechlich curses; nur 215 Zeilen darin sind reine Logik, und das sind kleine, headless getestete Ansichts-Helfer (settings_rows, build_rows, log_height, compact_geometry). Demgegenueber stehen 139 modulweite Funktionen mit 3748 Zeilen. Auch das Neue folgt dem Muster: Filter, Einstellungspruefung, Commit-Vorschlaege und Sortierung liegen als freie Funktionen ausserhalb der Klasse, der Hintergrund-Fetch als eigene Klasse BackgroundScan neben ihr. Das physisch grosse Einzelmodul bleibt Voraussetzung fuer den Remote-Lauf ueber stdin.",
+    "campaign_id": "20260830T100309995450+0200",
+    "recorded_at": "2026-08-30T10:03:10+02:00",
+    "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
+    "summary": "Das Einzelmodul bleibt der ueber stdin uebertragbare Programmkern; reine Status-, Diff-, Filter- und Konfigurationslogik liegt in freien Funktionen, waehrend curses-Zustand in TUI und Shell-Erkennung im Installer gekapselt sind.",
     "paradigm": "Funktionaler Kern mit imperativer Shell in einem uebertragbaren CLI-Modul",
     "fit": "passt",
-    "recommendation": "Paradigma beibehalten und lokale Grenzen bereichsweise schaerfen. Eine Dateiaufteilung braucht einen eigenen Auftrag und zuerst einen neuen Verteilungsvertrag fuer --diff: Heute wird genau diese eine Datei ueber stdin auf die Gegenseite geschoben, ein Paketbaum waere dort nicht mehr ohne Installation lauffaehig. Nutzen (kuerzere Dateien) gegen Kosten (neuer Uebertragungsweg, neue Blackbox-Tests, Bruch des Installationsversprechens) spricht derzeit gegen die Aufteilung."
+    "recommendation": "Paradigma beibehalten und lokale Grenzen bereichsweise schaerfen. Eine Dateiaufteilung braucht einen eigenen Auftrag und einen neuen Verteilungsvertrag fuer --diff; ihr Nutzen rechtfertigt diese Kosten derzeit nicht."
   },
   "themes": []
 }
