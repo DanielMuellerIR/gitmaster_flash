@@ -614,8 +614,8 @@ empty ⏎ or Esc cancels):
 ```text
  GitHub push preview · app → github/master
  …
- M	components/FND_Finden.4dbase/Contents/Info.plist
- A	components/FND_Finden.4dbase/Contents/Documentation/Methods/FND_Version.md
+ M	components/SAMPLE_Search.4dbase/Contents/Info.plist
+ A	components/SAMPLE_Search.4dbase/Contents/Documentation/Methods/SAMPLE_Version.md
 
  Publish this branch to github? Y ⏎ = yes, anything else cancels: ▮      ← bar
  ↑/↓ scroll · Esc cancel · line 41-72 / 72

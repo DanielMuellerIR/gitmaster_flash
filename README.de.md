@@ -646,8 +646,8 @@ sie mit `J` + ⏎ (jede andere Eingabe, ein leeres ⏎ oder Esc bricht ab):
 ```text
  GitHub-Push-Vorschau · app → github/master
  …
- M	components/FND_Finden.4dbase/Contents/Info.plist
- A	components/FND_Finden.4dbase/Contents/Documentation/Methods/FND_Version.md
+ M	components/BEISPIEL_Suche.4dbase/Contents/Info.plist
+ A	components/BEISPIEL_Suche.4dbase/Contents/Documentation/Methods/BSP_Version.md
 
  Diesen Branch zu github veröffentlichen? J ⏎ = ja, sonst Abbruch: ▮      ← Balken
  ↑/↓ scrollen · Esc abbrechen · Zeile 41-72 / 72
