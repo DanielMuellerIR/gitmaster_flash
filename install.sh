@@ -415,22 +415,43 @@ resolve_sourced_path() {
     if (( command_start )) && [[ "$word" == '!' ]]; then
       # Negation ändert nur den Rückgabestatus. Das nächste Wort bleibt der
       # Kommandoname (`! return` verlässt die geladene Datei trotzdem).
+      # `!` ist aber KEIN beliebig kombinierbares Präfix: zsh erkennt es nur
+      # ganz am Anfang einer Pipeline und hinter `time` (das eine ganze
+      # Pipeline nimmt). Hinter `noglob`, `nocorrect`, `builtin`, `command`
+      # oder einem zweiten `!` ist es der Kommandoname — `noglob ! source …`
+      # scheitert mit "command not found: !", der Wrapper wird nie geladen.
+      # Solche Zeilen dürfen deshalb nicht als Registrierung durchgehen.
+      if [[ -n "$modifier_mode" && "$modifier_mode" != time ]]; then
+        command_start=0
+        modifier_mode=""
+        continue
+      fi
+      # Ein `time` VOR dem `!` bleibt verbraucht: `time ! time source …`
+      # ist wie `time time source …` ein anderes Kommando und lädt nichts.
+      if [[ "$modifier_mode" == time ]]; then
+        modifier_mode=time_negation
+      else
+        modifier_mode=negation
+      fi
       continue
     fi
     if (( command_start )) && [[ "$word" == command ]]; then
       # `command source` sucht ein externes Programm und lädt den Wrapper in
       # zsh gerade nicht. Andere Builtins wie `command exit` bleiben dennoch
-      # als folgendes Kommando sichtbar.
+      # als folgendes Kommando sichtbar. Weitere Modifier folgen danach nicht
+      # mehr: `command` schlägt sie als externe Programme nach.
       command_wrapper=1
+      modifier_mode=command
       continue
     fi
     if (( command_start )); then
       case "$word" in
         time)
-          # `time` darf am Anfang stehen, aber nicht hinter einem anderen
-          # Modifier (`time time`, `noglob time`, `builtin time` sind andere
-          # oder ungültige Befehle und sourcen nicht in diese Shell).
-          if [[ -n "$modifier_mode" ]]; then
+          # `time` darf am Anfang stehen — auch hinter einem `!` —, aber
+          # nicht hinter einem anderen Modifier (`time time`, `noglob time`,
+          # `builtin time` sind andere oder ungültige Befehle und sourcen
+          # nicht in diese Shell).
+          if [[ -n "$modifier_mode" && "$modifier_mode" != negation ]]; then
             command_start=0
             modifier_mode=""
             continue
@@ -439,8 +460,10 @@ resolve_sourced_path() {
           continue
           ;;
         nocorrect)
-          # Hinter `noglob`/`builtin` ist nocorrect kein weiterer Modifier.
-          if [[ "$modifier_mode" == noglob || "$modifier_mode" == builtin ]]; then
+          # Hinter `noglob`/`builtin`/`command` ist nocorrect kein weiterer
+          # Modifier, sondern der Kommandoname.
+          if [[ "$modifier_mode" == noglob || "$modifier_mode" == builtin \
+                || "$modifier_mode" == command ]]; then
             command_start=0
             modifier_mode=""
             continue

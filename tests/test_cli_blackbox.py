@@ -499,6 +499,46 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("Already installed", installed.stdout)
         self.assertEqual(zshrc.read_text(), combined)
 
+    def test_negation_is_only_a_modifier_where_zsh_accepts_it(self):
+        """`!` ist kein beliebig kombinierbares Präfix.
+
+        zsh erkennt die Negation nur ganz am Anfang einer Pipeline und hinter
+        `time`, das eine ganze Pipeline nimmt. Hinter `noglob`, `nocorrect`,
+        `builtin`, `command` oder einem zweiten `!` ist `!` dagegen der
+        Kommandoname: `noglob ! source -- …` scheitert mit "command not
+        found: !", und `gmf` bleibt undefiniert. Der Installer hielt `!` für
+        frei kombinierbar, meldete für solche Zeilen "Already installed" und
+        liess den Nutzer ohne Wrapper und ohne Fehlermeldung zurück (Fund
+        2026-09-02). Jede Reihenfolge hier wird gegen ein echtes `zsh`
+        gegengeprüft — der Erwartungswert ist nicht abgeschrieben, sondern
+        gemessen.
+        """
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        wirksam = ("!", "! time", "! noglob", "! nocorrect", "! builtin",
+                   "time !", "time ! noglob")
+        unwirksam = ("! !", "! command", "noglob !", "nocorrect !",
+                     "builtin !", "command !", "time ! time", "! noglob time")
+        for prefix in wirksam + unwirksam:
+            with self.subTest(prefix=prefix):
+                zeile = f"{prefix} source -- {wrapper}\n"
+                zshrc.write_text(zeile)
+                geladen = self._loads_the_wrapper()
+                self.assertEqual(geladen, prefix in wirksam,
+                                 f"zsh selbst widerspricht der Erwartung fuer {prefix!r}")
+                self.assertEqual(self._is_active_line(zeile), geladen)
+                if not geladen:
+                    # Der Installer darf sich hier nicht auf die kaputte Zeile
+                    # verlassen, sondern muss eine wirksame Registrierung
+                    # ergaenzen.
+                    installiert = self._install()
+                    self.assertEqual(installiert.returncode, 0, installiert.stderr)
+                    self.assertIn("Registered wrapper", installiert.stdout)
+                    # Ob die ergaenzte Zeile dann auch greift, haengt an der
+                    # kaputten Zeile davor: `! !` und `nocorrect !` sind ein
+                    # zsh-Parse-Fehler und brechen die ganze .zshrc ab. Das
+                    # liegt ausserhalb dessen, was der Installer heilen kann.
+
     def test_last_effective_source_candidate_on_a_line_wins(self):
         wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
         zshrc = self.home / ".zshrc"
