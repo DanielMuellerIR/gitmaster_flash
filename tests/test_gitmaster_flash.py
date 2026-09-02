@@ -147,13 +147,18 @@ class ConfirmDialogTests(unittest.TestCase):
                 self.keys = iter(keys)
 
             def getmaxyx(self): return (24, 80)
-            def addstr(self, y, x, text, *a): drawn.append(text)
+            def addstr(self, y, x, text, *a): drawn.append((y, text))
+            def move(self, *_args): pass
             def refresh(self): pass
             def getch(self): return next(self.keys)
 
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
-        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
-            return ui.confirm("Wirklich?", extra_key), drawn
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set") as curs_set:
+            result = ui.confirm("Wirklich?", extra_key)
+        # Cursor sichtbar während der Frage, danach wieder aus.
+        self.assertEqual([c.args for c in curs_set.call_args_list], [(1,), (0,)])
+        return result, drawn
 
     def test_yes_and_no_are_unchanged(self):
         self.assertIs(self.ask([ord("j")])[0], True)
@@ -172,7 +177,25 @@ class ConfirmDialogTests(unittest.TestCase):
 
     def test_the_offered_key_appears_in_the_question(self):
         _, drawn = self.ask([ord("n")], extra_key="A")
-        self.assertIn("A)", drawn[0])
+        self.assertTrue(any("A)" in text for y, text in drawn if y == 20))
+
+    def test_question_is_a_bar_with_a_blank_line_above(self):
+        # 24 Zeilen: Fußzeile 21-23, Frage-Balken in 20, Leerzeile in 19.
+        # Der Balken beginnt in Spalte 0 mit einem Leerzeichen und füllt die
+        # Breite; ohne Leerzeile ging die Frage unter einer langen Liste unter.
+        _, drawn = self.ask([ord("n")])
+        self.assertEqual(drawn[0], (19, " " * 79))
+        self.assertEqual(drawn[1],
+                         (20, (" Wirklich?" + gmf_module.t("yesno")).ljust(79)))
+        # Die Ja-Taste wird danach rot nachgezeichnet.
+        self.assertEqual(drawn[2], (20, gmf_module.t("yes_key")))
+
+    def test_the_accent_is_part_of_the_hint_in_both_languages(self):
+        # Sonst zeichnet draw_question() nichts rot nach — oder das Falsche.
+        for lang in ("en", "de"):
+            self.assertIn(gmf_module.TR["yes_key"][lang], gmf_module.TR["yesno"][lang])
+            self.assertIn(gmf_module.TR["yes_accent"][lang],
+                          gmf_module.TR["github_confirm"][lang])
 
 
 class PagerConfirmTests(unittest.TestCase):
@@ -198,8 +221,12 @@ class PagerConfirmTests(unittest.TestCase):
             def get_wch(self): return next(self.keys)
 
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
-        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set") as curs_set:
             result = ui.confirm_in_pager("Preview", self.LINES, "Publish? ")
+        # Der Cursor ist nur während der Frage sichtbar, am Ende wieder aus.
+        self.assertEqual(curs_set.call_args_list[-1].args, (0,))
+        self.assertIn((1,), [c.args for c in curs_set.call_args_list])
         return result, drawn
 
     def test_yes_needs_return_in_both_languages(self):
@@ -226,19 +253,24 @@ class PagerConfirmTests(unittest.TestCase):
         self.assertIs(self.run_dialog(["j", curses.KEY_BACKSPACE, "\n"])[0], False)
 
     def test_scrolling_keeps_the_answer_and_the_list_visible(self):
-        # 12 Zeilen hoch: Titel, 9 Textzeilen, Rückfrage, Fußzeile.
+        # 12 Zeilen hoch: Titel, 8 Textzeilen, Leerzeile, Rückfrage, Fußzeile.
         result, drawn = self.run_dialog(
             [curses.KEY_DOWN, curses.KEY_NPAGE, "j", curses.KEY_UP, "\n"])
         self.assertIs(result, True)
         footers = [text for y, text in drawn if y == 11]
-        self.assertIn(gmf_module.t("pager_footer_confirm", a=11, b=19, n=30).ljust(59),
+        self.assertIn(gmf_module.t("pager_footer_confirm", a=10, b=17, n=30).ljust(59),
                       footers)
-        self.assertIn(gmf_module.t("pager_footer_confirm", a=10, b=18, n=30).ljust(59),
+        self.assertIn(gmf_module.t("pager_footer_confirm", a=9, b=16, n=30).ljust(59),
                       footers)
-        # Die Antwort bleibt beim Scrollen stehen und steht in der vorletzten Zeile.
-        self.assertIn("Publish? j".ljust(58), [text for y, text in drawn if y == 10])
-        body_rows = {y for y, text in drawn if y is not None and 1 <= y <= 9}
-        self.assertEqual(body_rows, set(range(1, 10)))
+        # Die Antwort bleibt beim Scrollen stehen und steht als Balken in der
+        # vorletzten Zeile; die Zeile darüber ist leer (Abgrenzung zur Liste).
+        self.assertIn(" Publish? j".ljust(59), [text for y, text in drawn if y == 10])
+        # Die Frage der GitHub-Vorschau hebt „Y ⏎ = yes" rot hervor; die
+        # Testfrage enthält das nicht, also wird hier nichts nachgezeichnet.
+        self.assertNotIn(gmf_module.t("yes_accent"), [text for y, text in drawn if y == 10])
+        self.assertEqual({text for y, text in drawn if y == 9}, {" " * 59})
+        body_rows = {y for y, text in drawn if y is not None and 1 <= y <= 8}
+        self.assertEqual(body_rows, set(range(1, 9)))
 
 
 class TestRemoteBadges(unittest.TestCase):

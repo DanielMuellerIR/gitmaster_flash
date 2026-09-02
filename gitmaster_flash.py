@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.2"
+__version__ = "0.22.3"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -320,6 +320,10 @@ TR = {
                        "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     "yesno_extra": {"en": "  (Y/N/{k})", "de": "  (J/N/{k})"},
+    # Rot hervorgehobene Ja-Taste in den beiden Rückfragen (draw_question);
+    # muss wörtlich in "yesno" bzw. "github_confirm" vorkommen.
+    "yes_key": {"en": "Y", "de": "J"},
+    "yes_accent": {"en": "Y ⏎ = yes", "de": "J ⏎ = ja"},
     "cancelled": {"en": "Cancelled.", "de": "Abgebrochen."},
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
@@ -4787,7 +4791,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
 
 # Farb-Paar-Nummern. C_SEL ist kein eigener Farbton, sondern die Notlösung für
 # Rot in der markierten Zeile — siehe selected_pair().
-C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN = 1, 2, 3, 4, 5, 6
+C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN, C_ASK, C_ASK_KEY = 1, 2, 3, 4, 5, 6, 7, 8
 
 
 def selected_pair(pair: int) -> tuple[int, bool]:
@@ -4925,6 +4929,15 @@ def wrap_cells(text: str, limit: int) -> list[str]:
 def pad_cells(text: str, width: int) -> str:
     text = truncate_cells(terminal_text(text), max(0, width))
     return text + " " * max(0, width - cell_width(text))
+
+
+def set_cursor_visible(visible: bool) -> None:
+    """Terminal-Cursor ein- oder ausblenden, ohne auf Terminals ohne
+    Cursor-Steuerung zu stürzen — curses meldet das als `curses.error`."""
+    try:
+        curses.curs_set(1 if visible else 0)
+    except curses.error:
+        pass
 
 
 def safe_addstr(win, y, x, text, attr=0):
@@ -5414,8 +5427,38 @@ class TUI:
 
     # -- Dialog-Helfer ------------------------------------------------------
 
+    def draw_question(self, y: int, text: str, accent: str = "") -> None:
+        """Eine Rückfrage als Balken in Zeile ``y`` zeichnen und den Cursor
+        ans Ende des Textes setzen.
+
+        Der Balken ist weiß auf Schwarz über die volle Breite, die Zeile
+        darüber bleibt leer; das letzte Vorkommen von ``accent`` (die
+        Ja-Taste, etwa „J ⏎ = ja") wird rot nachgezeichnet. Beides trennt die
+        Frage von der Liste darüber: Nach einer langen Dateiliste
+        (GitHub-Vorschau) ging die Frage sonst als eine weitere farbige Zeile
+        unter (Daniel, 2026-09-02). Der Cursor
+        wird sichtbar geschaltet, damit das Terminal ihn — je nach dessen
+        Einstellung blinkend — hinter der Frage zeigt; ein per Attribut
+        blinkender Text (A_BLINK) wird von vielen Terminals ignoriert und
+        wäre bei Menschen mit Lichtempfindlichkeit ohnehin unerwünscht.
+        """
+        h, w = self.scr.getmaxyx()
+        safe_addstr(self.scr, y - 1, 0, " " * (w - 1))
+        safe_addstr(self.scr, y, 0, (" " + text).ljust(w - 1),
+                    curses.color_pair(C_ASK) | curses.A_BOLD)
+        start = text.rfind(accent) if accent else -1
+        if start >= 0:
+            safe_addstr(self.scr, y, 1 + cell_width(terminal_text(text[:start])),
+                        accent, curses.color_pair(C_ASK_KEY) | curses.A_BOLD)
+        cursor_x = 1 + cell_width(terminal_text(text))
+        set_cursor_visible(True)
+        try:
+            self.scr.move(max(0, min(y, h - 1)), min(cursor_x, max(0, w - 2)))
+        except curses.error:
+            pass
+
     def confirm(self, question: str, extra_key: str = "") -> bool | str:
-        """Rückfrage in der vorletzten Zeile: J/Y bestätigt, N/Esc bricht ab.
+        """Rückfrage als Balken über der Fußzeile: J/Y bestätigt, N/Esc bricht ab.
 
         Mit ``extra_key`` bekommt der Dialog eine dritte Antwort — für den Fall,
         dass er neben Ja und Nein noch einen anderen Weg anbietet (etwa
@@ -5423,19 +5466,24 @@ class TUI:
         Rückgabewert. Aufrufer müssen deshalb auf ``is True`` prüfen: Ein
         Buchstabe ist in Python wahr und würde sonst als Zustimmung durchgehen.
         """
-        h, w = self.scr.getmaxyx()
+        h, _ = self.scr.getmaxyx()
         hint = t("yesno_extra", k=extra_key.upper()) if extra_key else t("yesno")
-        safe_addstr(self.scr, h - 4, 1, (question + hint).ljust(w - 2),
-                    curses.color_pair(C_YELLOW) | curses.A_BOLD)
+        # Zeile h-4 ist sonst die Meldungszeile; die Leerzeile darüber deckt
+        # kurz die letzte Protokollzeile ab und kommt mit dem nächsten
+        # Neuzeichnen zurück.
+        self.draw_question(h - 4, question + hint, t("yes_key"))
         self.scr.refresh()
-        while True:
-            ch = self.scr.getch()
-            if ch in (ord("j"), ord("J"), ord("y"), ord("Y")):
-                return True
-            if ch in (ord("n"), ord("N"), 27):
-                return False
-            if extra_key and ch in (ord(extra_key.lower()), ord(extra_key.upper())):
-                return extra_key.upper()
+        try:
+            while True:
+                ch = self.scr.getch()
+                if ch in (ord("j"), ord("J"), ord("y"), ord("Y")):
+                    return True
+                if ch in (ord("n"), ord("N"), 27):
+                    return False
+                if extra_key and ch in (ord(extra_key.lower()), ord(extra_key.upper())):
+                    return extra_key.upper()
+        finally:
+            set_cursor_visible(False)
 
     def show_busy(self, text: str) -> None:
         """Eine Zwischenmeldung sofort auf den Schirm bringen.
@@ -5715,7 +5763,7 @@ class TUI:
         """Eine Pager-Seite zeichnen: Titelzeile, Textkörper, Fußzeile.
 
         ``reserved`` Zeilen direkt über der Fußzeile bleiben frei — dort stellt
-        `confirm_in_pager()` seine Rückfrage. Liefert den an die Textlänge
+        `confirm_in_pager()` seine Rückfrage samt Leerzeile darüber. Liefert den an die Textlänge
         angepassten ``top``, die Höhe des Textkörpers und die Zahl der
         umgebrochenen Zeilen; die Tastenschleifen brauchen alle drei zum Scrollen.
         Der Aufrufer ruft `refresh()` selbst, damit er vorher noch seine eigene
@@ -5785,37 +5833,41 @@ class TUI:
         Nur J oder Y (Groß/Klein, beide Sprachen; auch ausgeschrieben „ja"
         oder „yes") bestätigen; jede andere Eingabe, ein leeres ⏎ und Esc
         brechen ab. ↑/↓/PgUp/PgDn scrollen weiter durch den Text, damit
-        Commit- und Dateiliste beim Antworten sichtbar bleiben. Eine
-        Einzeltaste ohne ⏎ genügt absichtlich nicht:
+        Commit- und Dateiliste beim Antworten sichtbar bleiben. Die Frage
+        steht als weißer Balken auf Schwarz mit roter Ja-Taste, Leerzeile
+        darüber und sichtbarem Cursor (`draw_question()`), sonst geht sie
+        unter einer langen
+        Dateiliste unter. Eine Einzeltaste ohne ⏎ genügt absichtlich nicht:
         Wer aus Gewohnheit „J ⏎" tippt, dessen ⏎ träfe sonst schon die Liste
         darunter — und dort bedeutet ⏎ „beenden und ins Repo wechseln".
         """
         top = 0
         buf: list[str] = []
-        while True:
-            top, body_h, total = self._draw_pager_page(
-                title, lines, top, 1, "pager_footer_confirm")
-            h, w = self.scr.getmaxyx()
-            answer = "".join(buf)
-            safe_addstr(self.scr, h - 2, 1, (question + answer).ljust(w - 2),
-                        curses.color_pair(C_YELLOW) | curses.A_BOLD)
-            cursor_x = 1 + cell_width(terminal_text(question + answer))
-            self.scr.move(max(0, h - 2), min(cursor_x, max(0, w - 2)))
-            self.scr.refresh()
-            ch = self.scr.get_wch()
-            if ch in ("\n", "\r"):
-                return answer.strip().lower() in ("j", "y", "ja", "yes")
-            if ch == "\x1b":  # Esc
-                return False
-            if ch in ("\x7f", "\b") or ch == curses.KEY_BACKSPACE:
-                if buf:
-                    buf.pop()
-                continue
-            scrolled = self._scroll_pager(ch, top, body_h, total)
-            if scrolled is not None:
-                top = scrolled
-            elif isinstance(ch, str) and ch.isprintable():
-                buf.append(ch)
+        try:
+            while True:
+                # Zwei reservierte Zeilen: Leerzeile und Frage-Balken.
+                top, body_h, total = self._draw_pager_page(
+                    title, lines, top, 2, "pager_footer_confirm")
+                h, _ = self.scr.getmaxyx()
+                answer = "".join(buf)
+                self.draw_question(h - 2, question + answer, t("yes_accent"))
+                self.scr.refresh()
+                ch = self.scr.get_wch()
+                if ch in ("\n", "\r"):
+                    return answer.strip().lower() in ("j", "y", "ja", "yes")
+                if ch == "\x1b":  # Esc
+                    return False
+                if ch in ("\x7f", "\b") or ch == curses.KEY_BACKSPACE:
+                    if buf:
+                        buf.pop()
+                    continue
+                scrolled = self._scroll_pager(ch, top, body_h, total)
+                if scrolled is not None:
+                    top = scrolled
+                elif isinstance(ch, str) and ch.isprintable():
+                    buf.append(ch)
+        finally:
+            set_cursor_visible(False)
 
     # -- Sichere Push-Aktionen ---------------------------------------------
 
@@ -6686,6 +6738,13 @@ def init_colors():
     # Rot in der markierten Zeile: heller Text AUF Rot statt Rot als Hintergrund
     # mit schwarzem Text (siehe selected_pair).
     curses.init_pair(C_SEL, curses.COLOR_WHITE, curses.COLOR_RED)
+    # Rückfrage-Balken: weiß AUF Schwarz, die Ja-Taste rot AUF Schwarz. Feste
+    # Farben in beide Richtungen, damit der Balken auch in hellen Terminals ein
+    # Balken bleibt. Schwarz auf Gelb war der erste Versuch: ANSI-Gelb ist in
+    # den meisten Farbschemata ein dunkles Oliv und ANSI-Schwarz ein Dunkelgrau,
+    # der Kontrast war zu flau (Daniel, 2026-09-02).
+    curses.init_pair(C_ASK, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(C_ASK_KEY, curses.COLOR_RED, curses.COLOR_BLACK)
 
 
 # ---------------------------------------------------------------------------

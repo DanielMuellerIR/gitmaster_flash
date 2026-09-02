@@ -118,7 +118,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   bedeutet ⏎ „beenden und ins Repo wechseln“ (Entscheidung 2026-08-22). Seit
   derselben Version zeigt `_fetch_remote()` während des Fetches eine Busy-Zeile
   (`fetch_busy`), weil ein Fetch zu GitHub bei großen Repos lange dauern kann
-  und die TUI sonst eingefroren wirkt.
+  und die TUI sonst eingefroren wirkt. Seit 0.22.3 zeichnen beide Rückfragen
+  (`confirm()` und `confirm_in_pager()`) ihre Frage über `draw_question()`:
+  weiß auf Schwarz (`C_ASK`), die Ja-Taste (`yes_key`/`yes_accent`, muss wörtlich
+  im Fragetext stehen) rot auf Schwarz (`C_ASK_KEY`), eine Leerzeile darüber und
+  sichtbarer Terminal-Cursor (`set_cursor_visible()`). Grund: Nach einer langen
+  Dateiliste war die gelbe Frage nur eine weitere farbige Zeile (Daniel,
+  2026-09-02). Schwarz auf Gelb war der erste Wurf und zu flau: ANSI-Gelb und
+  ANSI-Schwarz sind Palettenfarben des Terminals (meist Oliv und Dunkelgrau),
+  hellere Töne gäbe es nur über 256-Farben-Indizes, die nicht jedes Terminal
+  hat. Feste Vorder- UND Hintergrundfarbe statt `A_REVERSE`, damit der Balken
+  in hellen Terminals ein Balken bleibt. Kein `A_BLINK`: Viele Terminals
+  ignorieren es, der blinkende Terminal-Cursor genügt.
 - Remote-Identität (`canonical_remote_target()`): Übertragungen (P/G) laufen
   nur, wenn Fetch- und Push-Ziel identisch sind (`transfer_safe`). SCP-Pfade
   ohne führenden `/` hängen am Home des SSH-Benutzers (`alice@host:repo` ≠

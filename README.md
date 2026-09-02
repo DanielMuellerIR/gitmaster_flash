@@ -215,7 +215,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.2 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.3 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -605,9 +605,24 @@ the race window.
 
 GitHub uses the separate `G` path. It works only when the same branch already
 exists on exactly one GitHub remote and the histories are related. Before
-publishing it shows every outgoing commit and changed file name; the question is
-asked right below that list and is answered with `Y` + ⏎ (any other input, an
-empty ⏎ or Esc cancels). The final command still sends only the current
+publishing it shows every outgoing commit and changed file name. The question
+sits below that list as a white-on-black bar with the `Y ⏎ = yes` part in red, a
+blank line above it and the terminal cursor visible behind it, so it still stands
+out after a hundred file names; it is answered with `Y` + ⏎ (any other input, an
+empty ⏎ or Esc cancels):
+
+```text
+ GitHub push preview · app → github/master
+ …
+ M	components/FND_Finden.4dbase/Contents/Info.plist
+ A	components/FND_Finden.4dbase/Contents/Documentation/Methods/FND_Version.md
+
+ Publish this branch to github? Y ⏎ = yes, anything else cancels: ▮      ← bar
+ ↑/↓ scroll · Esc cancel · line 41-72 / 72
+```
+
+The `P` question for the private sync remote uses the same bar, one line above
+the footer of the repo list. The final command still sends only the current
 branch: approved source OID, exact target lease, no tags, no new branch. A remote
 with multiple or differing fetch/push targets is blocked entirely, even if both
 targets are on GitHub. Complex cases stay terminal-only.

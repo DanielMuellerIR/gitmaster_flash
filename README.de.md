@@ -231,7 +231,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.2 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.3 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -638,8 +638,23 @@ Race-Fenster ausgecheckt wurde.
 Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
 Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
 sind. Vor der Veröffentlichung zeigt er alle ausgehenden Commits und geänderten
-Dateinamen; die Rückfrage steht direkt unter dieser Liste und wird mit `J` + ⏎
-beantwortet (jede andere Eingabe, ein leeres ⏎ oder Esc bricht ab). Auch der letzte
+Dateinamen. Die Rückfrage steht unter dieser Liste als weißer Balken auf Schwarz
+mit rotem `J ⏎ = ja`, einer Leerzeile darüber und sichtbarem Terminal-Cursor
+dahinter, damit sie auch nach hundert Dateinamen noch auffällt; beantwortet wird
+sie mit `J` + ⏎ (jede andere Eingabe, ein leeres ⏎ oder Esc bricht ab):
+
+```text
+ GitHub-Push-Vorschau · app → github/master
+ …
+ M	components/FND_Finden.4dbase/Contents/Info.plist
+ A	components/FND_Finden.4dbase/Contents/Documentation/Methods/FND_Version.md
+
+ Diesen Branch zu github veröffentlichen? J ⏎ = ja, sonst Abbruch: ▮      ← Balken
+ ↑/↓ scrollen · Esc abbrechen · Zeile 41-72 / 72
+```
+
+Die `P`-Rückfrage für das private Sync-Remote nutzt denselben Balken, eine Zeile
+über der Fußzeile der Repo-Liste. Auch der letzte
 Befehl überträgt nur den aktuellen Branch: freigegebene Quell-OID, exakte
 Ziel-Lease, keine Tags, kein neuer Branch. Ein Remote mit mehreren oder
 abweichenden Fetch-/Push-Zielen wird vollständig gesperrt, selbst wenn beide
