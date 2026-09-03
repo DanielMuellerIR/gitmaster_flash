@@ -351,18 +351,25 @@ Lokale Branches:
 ## Commit-Hilfe (`C`)
 
 ```
- Commit-Hilfe · api-gateway — 4/4 gewählt, prüfen, dann ⏎
- M  README.md                                                  ✔ committen
- U  notes.txt                                                  ✔ committen
- U  server.py                                                  ✔ committen
- U  build/out.o                                                ✔ committen
+ Commit-Hilfe · api-gateway — 4/5 gewählt, prüfen, dann ⏎
+ M  README.md                                  ✔ committen
+ U  notes.txt                                  ✔ committen
+ U  server.py                                  ✔ committen
+ U  build/out.o                                ✔ committen
+ D  old-draft.md                               — gestaget und gelöscht: nichts zu committen
 
  ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter · Esc abbrechen
 ```
 
 1. Alle geänderten und neuen Dateien werden gelistet. `␣` wählt sie an oder ab;
    die Hilfe ändert vor dem Commit weder `.gitignore` noch eine andere Datei im
-   Arbeitsbaum. `A` wählt alle, `N` keine.
+   Arbeitsbaum. `A` wählt alle, `N` keine. Eine Art Eintrag lässt sich gar nicht
+   anwählen: eine Datei, die gestaget und danach gelöscht wurde
+   (`git add x && rm x`). Die Hilfe committet die freigegebenen Pfade gegenüber
+   `HEAD`, und so ein Pfad steht weder in `HEAD` noch im Arbeitsbaum — es gibt
+   nichts zu committen. Sichtbar bleibt er trotzdem, denn der Unterschied
+   zwischen Index und Arbeitsbaum ist echt; er sagt es nur, statt den ganzen
+   Commit scheitern zu lassen.
 2. `G` bietet fertige Teilmengen an — denn bei dreißig geänderten Dateien will
    man meist mehrere zusammenhängende Commits statt eines großen. Drei Sichten:
    nach Art der Änderung (geändert / neu / gelöscht), nach oberstem Ordner und

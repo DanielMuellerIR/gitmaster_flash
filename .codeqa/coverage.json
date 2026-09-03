@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 75156
+    "tokens_spent": 109187
   },
   "campaign_history": [
     {
@@ -105,28 +105,21 @@
       "risk": "high",
       "priority": 2,
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T100309995450+0200",
-        "completed_at": "2026-08-30T10:04:00+02:00",
-        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
-        "content_sha256": "e50db312abfc8f1b27aa939385a154741a132e8df12b4b76df696807684071a7",
+        "campaign_id": "20260903T095958732950+0200",
+        "completed_at": "2026-09-03T10:37:57+02:00",
+        "observed_head": "4b00cada39802944a5dd87997236d7ace9342294",
+        "content_sha256": "76964967f5456a488592e8778cbc8622f9e12fc0291824b1af709d0a57c2d9fe",
         "file_count": 3,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Beide zsh-Scanner teilen jetzt Negationspraefix und Schleifenkopf-Regeln; geschlossene Kurzform-Klammern werden genau einmal gezaehlt, und der Top-Level-Suffix eines verschobenen Rumpfs bleibt fuer die Idempotenz sichtbar. Delta, Wrapper-Grenze, shared-grammar-Aufrufer und echte zsh-Syntax nachgeprueft.",
+        "summary": "Zeilenfortsetzungen werden vor jedem Scanner zu einer logischen Zeile zusammengefuegt; scan_line_end trennt jetzt offenen Quote-Kontext von der Fortsetzung, und der Auswerteteil der Leseschleife steht als scan_zshrc_line an einer Stelle (auch fuer eine Datei, die mitten in einer Fortsetzung endet). Vorher lehnte der Installer jede .zshrc mit einer gewoehnlichen Fortsetzung dauerhaft ab. Delta (!-Modifier-Grammatik), gmf.zsh-Grenze und die zsh-Syntax nachgeprueft.",
         "tests": [
-          "python3 tests/test_cli_blackbox.py InstallScriptTests: 44 passed",
+          "python3 tests/test_cli_blackbox.py: 58 passed (3 neu)",
           "zsh -n install.sh: passed",
-          "python3 -m unittest discover -s tests: 511 passed"
+          "python3 -m unittest discover -s tests: 532 passed"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "started_at": "2026-09-03T10:31:04+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
@@ -139,16 +132,18 @@
       "reason": "PTY-Steuerung und reproduzierbare Dokumentbilder koennen Prozesse hinterlassen oder UI-Drift verdecken",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T180724876938+0200",
-        "completed_at": "2026-08-29T19:28:51+02:00",
-        "observed_head": "e22ae0999ca8b122638862eeef95fc70e0bca1c4",
-        "content_sha256": "61d80debaa606c5604b8fdd21f72e87dcaa70b629ad098c5974567cd24d08d83",
+        "campaign_id": "20260903T095958732950+0200",
+        "completed_at": "2026-09-03T10:46:06+02:00",
+        "observed_head": "e6561768a8935064ab937bb7a92be34e9dfadfa6",
+        "content_sha256": "5517a5ff6912d192601747d10befce0d1bae722e23f8a63456a5aab636797a9b",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Delta seit 0.18.9 geprueft (Nachfahren-Einsammeln per ps-Kette vor dem Schliessen des PTY, Scrollbereich DECSTBM mit ESC[S/T/L/M im Bildnachbau). Beides trifft zu und ist sinnvoll begrenzt; das Notieren der Nachfahren VOR os.close(fd) ist die entscheidende Reihenfolge, weil das Kind danach per SIGHUP stirbt und die Eltern-Kind-Kette verschwindet. Korrektheitsluecke gefunden: Die Ergaenzung vom 2026-08-23 bildete ESC[S/T/L/M nach, nicht aber den einfachen Zeilenvorschub — die haeufigste Scroll-Ursache und terminfo-Faehigkeit 'ind'. Am unteren Rand des Bereichs setzte der Nachbau den Cursor nur wieder auf dieselbe Zeile: oberste Zeile blieb stehen, alles Folgende eine Zeile zu hoch. Ein Mitschnitt der sechs aufgezeichneten Stroeme zeigt diesen Fall achtmal (Commit-Hilfe, Sandbox-Hinweise). Dazu ESC M (reverse index, 'ri') als Gegenstueck am oberen Rand, das der Zweig fuer unbekannte Escapes lautlos verschluckte. Die sechs Bilder bleiben byteweise gleich — die Aenderung korrigiert das Modell, nicht das Ergebnis. Gepruefte, aber verworfene Kandidaten: _terminate_pty_child und _terminate_descendants sehen aehnlich aus, sind aber fachlich verschieden (waitpid auf eigene Kinder gegen kill(pid,0) auf von init uebernommene Prozesse) — kein Zusammenziehen wegen aehnlicher Syntax.",
+        "summary": "Die Fortsetzungszelle eines breiten Zeichens traegt im Nachbau jetzt auch die Hintergrundfarbe; ohne sie haette to_svg() den roten Balken der markierten Zeile mitten im Namen aufgebrochen. PTY-Klammer, Nachbau der Scroll-Sequenzen und to_svg-Laufbildung mitgeprueft.",
         "tests": [
-          "python3 -m unittest discover -s tests: 494 Tests OK (2 neue); python3 docs/make-screens.py --check dreimal Exit 0, alle sechs SVG byteweise unveraendert; Gegenprobe: beide neuen Tests scheitern auf dem alten Nachbau; Mitschnitt des rohen PTY-Stroms ausgewertet (nur h/r/m/l/H/J/G/C/X/d/K kommen vor; acht LF genau an der unteren Bereichskante, kein ESC M/D/E); python3 -m compileall -q; git diff --check; keine Demo-/Generatorprozesse uebrig"
+          "python3 -m unittest discover -s tests: 533 passed (1 neu, ohne Korrektur rot)",
+          "python3 docs/make-screens.py --check: passed (Bilder byteweise gleich)",
+          "pgrep gitmaster_flash.py --demo nach dem Lauf: keine Reste"
         ]
       }
     },
@@ -161,7 +156,7 @@
       "risk": "low",
       "priority": 4,
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260830T100309995450+0200",
         "completed_at": "2026-08-30T10:04:41+02:00",
@@ -176,6 +171,13 @@
           "python3 docs/make-screens.py --check: passed",
           "python3 -m unittest discover -s tests: 511 passed"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260903T095958732950+0200",
+        "started_at": "2026-09-03T10:46:16+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {

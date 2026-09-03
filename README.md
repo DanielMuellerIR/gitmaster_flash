@@ -331,18 +331,24 @@ Local branches:
 ## Commit helper (`C`)
 
 ```
- Commit helper · api-gateway — 4/4 selected, review then ⏎
- M  README.md                                                    ✔ commit
- U  notes.txt                                                    ✔ commit
- U  server.py                                                    ✔ commit
- U  build/out.o                                                  ✔ commit
+ Commit helper · api-gateway — 4/5 selected, review then ⏎
+ M  README.md                                      ✔ commit
+ U  notes.txt                                      ✔ commit
+ U  server.py                                      ✔ commit
+ U  build/out.o                                    ✔ commit
+ D  old-draft.md                                   — staged then deleted: nothing to commit
 
  ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel
 ```
 
 1. Every changed and new file is listed. `␣` selects or excludes it; the helper
    never edits `.gitignore` or any other working-tree file before the commit.
-   `A` takes all of them, `N` none.
+   `A` takes all of them, `N` none. One kind of entry cannot be selected at all:
+   a file you staged and then deleted (`git add x && rm x`). The helper commits
+   the approved paths against `HEAD`, and such a path is in neither `HEAD` nor
+   the working tree — there is nothing to commit for it. It stays visible,
+   because the difference between index and working tree is real; it just says
+   so instead of letting the whole commit fail.
 2. `G` offers ready-made subsets — because with thirty changed files you usually
    want several coherent commits rather than one large one. Three views:
    by kind of change (changed / new / deleted), by top-level folder, and by file

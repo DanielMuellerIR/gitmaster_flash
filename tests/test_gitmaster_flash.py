@@ -8408,6 +8408,52 @@ class DocumentationContractTests(unittest.TestCase):
                 drawn = ui.scr.drawn[0][1].rstrip()
                 self.assertIn(drawn, self.docs[name])
 
+    def test_the_printed_commit_helper_block_is_what_the_code_really_draws(self):
+        """Auch der Textblock der Commit-Hilfe wird nachgebaut, nicht abgeschrieben.
+
+        Seine Spalten richten sich nach der laengsten Beschriftung. Genau das
+        liess ihn schon einmal still veralten: Eine dritte Beschriftung
+        verschob die Pfadspalte, und im README stand weiter die alte Breite.
+        """
+        files = [
+            ChangedFile("M", "README.md", " M"),
+            ChangedFile("U", "notes.txt", "??"),
+            ChangedFile("U", "server.py", "??"),
+            ChangedFile("U", "build/out.o", "??"),
+            # Gestaget und geloescht: gegenueber HEAD gibt es nichts zu committen.
+            ChangedFile("D", "old-draft.md", "AD"),
+        ]
+
+        class Screen(_HeaderScreen):
+            def __init__(self):
+                super().__init__()
+                self.keys = iter([27])          # Esc schliesst die Hilfe sofort
+
+            def getmaxyx(self):
+                return (14, 92)
+
+            def addstr(self, y, x, text, *a):
+                self.drawn.append((y, (" " * x) + text.rstrip()))
+
+            def getch(self):
+                return next(self.keys)
+
+        for name, lang in (("README.md", "en"), ("README.de.md", "de")):
+            with self.subTest(datei=name):
+                with mock.patch.object(gmf_module, "UI_LANG", lang):
+                    st = RepoStatus(path=Path("/tmp/api-gateway"), rel="api-gateway")
+                    st.files = files
+                    ui = TUI(Screen(), Path("/tmp"), dict(DEFAULT_CONFIG), None)
+                    ui.all_statuses = [st]
+                    ui.statuses = [st]
+                    with mock.patch("gitmaster_flash.curses.color_pair",
+                                    return_value=0):
+                        ui.action_commit_wizard()
+                    lines = [text for y, text in ui.scr.drawn if text.strip()]
+                for line in lines:
+                    with self.subTest(zeile=line):
+                        self.assertIn(line, self.docs[name])
+
     def test_both_readmes_stay_structurally_in_step(self):
         heads = {}
         for name, text in self.docs.items():
