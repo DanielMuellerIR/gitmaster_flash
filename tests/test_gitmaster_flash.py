@@ -7963,6 +7963,28 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertIsNone(grid[0][4].bg)                 # nach ESC[0m wieder normal
         self.assertIn(f'fill="{module.ANSI_BG[41]}"', module.to_svg(grid, "t"))
 
+    def test_screen_replay_paints_the_area_under_a_wide_character(self):
+        """Auch die Fortsetzungszelle eines breiten Zeichens trägt die Fläche.
+
+        `to_svg()` fasst nur Zellen mit gleichem `bg` zu einem Lauf zusammen.
+        Blieb dort der Wert des vorigen Bildaufbaus stehen, brach der rote
+        Balken der markierten Zeile mitten in einem ostasiatischen Repo-Namen
+        auf (Review-Fund 2026-09-03).
+        """
+        module, _ = self._make_screens_module()
+        # Erst eine Fläche malen, dann darüber ein breites Zeichen in einer
+        # anderen: Nur so wird ein zurückgelassener alter Wert sichtbar.
+        grid = module.replay(
+            "\x1b[H\x1b[2J\x1b[37;42mxxxx\x1b[H\x1b[37;41m日本\x1b[0m",
+            cols=8, rows=2)
+        self.assertEqual(grid[0][0].ch, "日")
+        self.assertEqual(grid[0][1].ch, " ")             # Fortsetzungszelle
+        for x in range(4):
+            self.assertEqual(grid[0][x].bg, module.ANSI_BG[41])
+        svg = module.to_svg(grid, "t")
+        self.assertEqual(svg.count(f'fill="{module.ANSI_BG[41]}"'), 1)
+        self.assertNotIn(f'fill="{module.ANSI_BG[42]}"', svg)
+
     def test_screenshot_settle_and_owned_tmpdir_are_wired(self):
         module, source = self._make_screens_module()
         owned = []

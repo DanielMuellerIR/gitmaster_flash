@@ -511,10 +511,14 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 c = grid[cy][cx]
                 c.ch, c.fg, c.bold, c.rev, c.bg = ch, cur_fg, cur_bold, cur_rev, cur_bg
                 # Breite Zeichen brauchen im SVG eine explizite Fortsetzungszelle;
-                # sonst driftet der Nachbau gegenüber dem curses-Raster.
+                # sonst driftet der Nachbau gegenüber dem curses-Raster. Die
+                # Fläche gehört mit dazu: to_svg() gruppiert Läufe auch nach
+                # `bg`, ein zurückgelassener alter Wert risse den roten Balken
+                # der markierten Zeile mitten im Namen auf.
                 for extra in range(1, min(width, cols - cx)):
                     c = grid[cy][cx + extra]
-                    c.ch, c.fg, c.bold, c.rev = " ", cur_fg, cur_bold, cur_rev
+                    c.ch, c.fg, c.bold, c.rev, c.bg = (
+                        " ", cur_fg, cur_bold, cur_rev, cur_bg)
                 cx += width
         i += 1
     return grid
