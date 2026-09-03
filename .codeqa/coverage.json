@@ -2,12 +2,12 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260903T181933798021+0200",
-    "token_budget": 3401566,
+    "id": "20260903T193711372060+0200",
+    "token_budget": 3315070,
     "status": "complete",
-    "started_at": "2026-09-03T18:19:33+02:00",
-    "tokens_spent": 66387,
-    "finished_at": "2026-09-03T18:19:34+02:00",
+    "started_at": "2026-09-03T19:37:11+02:00",
+    "tokens_spent": 86496,
+    "finished_at": "2026-09-03T19:37:12+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -72,6 +72,15 @@
       "tokens_spent": 532047,
       "finished_at": "2026-09-03T15:50:16+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260903T181933798021+0200",
+      "token_budget": 3401566,
+      "status": "complete",
+      "started_at": "2026-09-03T18:19:33+02:00",
+      "tokens_spent": 66387,
+      "finished_at": "2026-09-03T18:19:34+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -100,16 +109,16 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T181933798021+0200",
-        "completed_at": "2026-09-03T18:19:33+02:00",
-        "observed_head": "598037a9e746e23c14cd28ccb607ebff36a014a6",
-        "content_sha256": "af38dbc9d867a9bd4a1d0c39c624641f0db045bc01f0ed83b0c30b7492cccc6f",
+        "campaign_id": "20260903T193711372060+0200",
+        "completed_at": "2026-09-03T19:37:11+02:00",
+        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
+        "content_sha256": "fd68c4da1c1a4a61ee18bc300b4f60bf99074cbd403e636476c8e5e092748fb6",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Nachtrag zum Kern-Review auf Daniels Entscheidung: core.gitProxy aus der Config DES REPOS sperrt die Uebertragung, statt eine wirkungslose Gegenmassnahme vorzutaeuschen (der Schluessel ist mehrwertig, ein -c-Wert stellt sich nur daneben). repo_transport_override() vergleicht die wirksame Werteliste mit der aus System und Global allein, faengt damit auch einen include.path aus .git/config und laesst einen global gesetzten Wert erlaubt. Neue Ablehnungsgruende unsafe_transport (Fetch, T-Pruefung) und unsafe-transport (Push-Preflight) mit eigenem Satz in beiden Sprachen.",
+        "summary": "Zweiter Nachtrag auf Daniels Entscheidung: http.proxy (samt der adressgebundenen Form http.<url>.proxy) und http.sslVerify=false werden wie core.gitProxy abgelehnt, sobald die Config DES REPOS sie setzt. Bei sslVerify ist nur der Wert false ein Grund; gelesen wird er als Wahrheitswert, damit Git die Schreibweisen selbst aufloest, und ein unlesbarer Wert gilt als nicht belegbar. Bei den Proxy-Eintraegen vergleicht repo_transport_override() nur die Schluesselnamen, weil eine Proxy-Adresse Zugangsdaten tragen kann; ein Test prueft, dass nichts davon in Meldung, Protokoll oder JSON landet. fetch_remote_block_reason() liefert jetzt (Grund, Beleg), damit die Meldung die eine gesetzte Einstellung nennt statt alle drei.",
         "tests": [
-          "python3 -m unittest discover -s tests: 603 Tests gruen; neue RepoTransportOverrideTests (8 Tests) mit Gegenproben fuer global gesetzten Wert, include.path und unlesbare Config; ohne die Sperre 3 davon rot; zsh -n install.sh; docs/make-screens.py --check"
+          "python3 -m unittest discover -s tests: 609 Tests gruen; RepoTransportOverrideTests auf 14 Tests erweitert, fuenf Mutationen (Muster entfernt, adressgebundene Form entfernt, sslVerify-Wert ignoriert, sslVerify blockt auch bei true) toeten sie; zsh -n install.sh; docs/make-screens.py --check"
         ]
       }
     },
@@ -175,16 +184,16 @@
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T181933798021+0200",
-        "completed_at": "2026-09-03T18:19:34+02:00",
-        "observed_head": "598037a9e746e23c14cd28ccb607ebff36a014a6",
-        "content_sha256": "b5d4d75ec5d94255b57813baddc2ad9c10247b69f7bbe0f6d496370ce7051301",
+        "campaign_id": "20260903T193711372060+0200",
+        "completed_at": "2026-09-03T19:37:11+02:00",
+        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
+        "content_sha256": "ab7b5e220c2309c70bda9bf8973fa65e3ba7dc2aebaceb89e61dd04aa811b590",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Beide READMEs: Der Abschnitt zum sicheren Push nennt jetzt auch den Weg zur Adresse — SSH-Wrapper bleiben fuer den einen Aufruf aussen vor, ein core.gitProxy in der Repo-Config sperrt die Uebertragung, global gesetzt bleibt er erlaubt. Versionszeile auf 0.22.6.",
+        "summary": "Beide READMEs nennen im Abschnitt zum sicheren Push jetzt alle drei gesperrten Einstellungen und den Grund, warum keine per Aufruf abschaltbar ist. Versionszeile auf 0.22.7.",
         "tests": [
-          "DocumentationContractTests baut Kopfzeile und Commit-Hilfe-Block aus dem Code nach; volle Suite 603 gruen"
+          "DocumentationContractTests; volle Suite 609 gruen"
         ]
       }
     },
@@ -198,14 +207,14 @@
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T181933798021+0200",
-        "completed_at": "2026-09-03T18:19:34+02:00",
-        "observed_head": "598037a9e746e23c14cd28ccb607ebff36a014a6",
-        "content_sha256": "a7209459b6b1eaaf30656afc9f514237f3763ed39e5304a2fc7aee18f8a23c0a",
+        "campaign_id": "20260903T193711372060+0200",
+        "completed_at": "2026-09-03T19:37:11+02:00",
+        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
+        "content_sha256": "fd40e56640c9a6956ea97987c8b5b7aa0d0f110673c379dfaf1bc0247b022cdc",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Regel zu core.gitProxy festgehalten (warum Ablehnen statt Ueberschreiben, warum der Scope-Vergleich statt git config --local, TRANSPORT_CONFIG_KEYS als Erweiterungspunkt). Der offene Punkt ist auf http.proxy und http.sslVerify eingegrenzt und traegt jetzt einen konkreten Vorschlag samt Preis.",
+        "summary": "Regel auf alle drei Einstellungen erweitert, samt der Begruendung fuer den Scope-Vergleich, der adressgebundenen Formen und der Datenschutzgrenze (nur Schluesselnamen bei Proxys, Wahrheitswert bei sslVerify). Der offene Punkt ist entschieden und aufgeloest.",
         "tests": [
           "keine ausfuehrbaren Tests fuer Prosa; die Regel ist durch RepoTransportOverrideTests belegt"
         ]
