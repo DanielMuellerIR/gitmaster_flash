@@ -416,6 +416,42 @@ class CursorVisibilityTests(unittest.TestCase):
             ui.action_filter()
 
 
+class FileRowTests(unittest.TestCase):
+    """Dieselbe Datei sieht in beiden Ansichten gleich aus."""
+
+    def test_every_code_parse_porcelain_emits_has_a_colour(self):
+        codes = {"M", "D", "U", "C"}
+        self.assertEqual(set(gmf_module.FILE_CODE_COLORS), codes)
+        for code in sorted(codes):
+            with self.subTest(code=code):
+                text, pair = gmf_module.file_row(code, "src/app.py")
+                self.assertTrue(text.startswith(f"{code}  "))
+                self.assertIn("src/app.py", text)
+                self.assertEqual(pair, gmf_module.FILE_CODE_COLORS[code])
+
+    def test_a_conflict_is_named_in_the_row(self):
+        text, pair = gmf_module.file_row("C", "a.txt")
+        self.assertIn(gmf_module.t("conflict_label"), text)
+        self.assertEqual(pair, gmf_module.C_RED)
+        self.assertNotIn(gmf_module.t("conflict_label"),
+                         gmf_module.file_row("M", "a.txt")[0])
+
+    def test_an_unknown_code_dims_instead_of_raising(self):
+        """Vorher stand die Zuordnung zweimal als Dict-Zugriff im Zeichencode.
+
+        Ein Code, den `parse_porcelain()` heute nicht liefert, hätte die
+        jeweilige Ansicht mit einem KeyError beendet.
+        """
+        text, pair = gmf_module.file_row("X", "a.txt")
+        self.assertEqual(pair, gmf_module.C_DIM)
+        self.assertIn("a.txt", text)
+
+    def test_no_view_builds_the_row_on_its_own_any_more(self):
+        source = Path(gmf_module.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count('"M": C_RED'), 1)   # nur die Konstante
+        self.assertEqual(source.count("file_row("), 3)   # Definition + zwei Ansichten
+
+
 class ScrollWindowTests(unittest.TestCase):
     """Die eine Regel, nach der vier Listen ihren Ausschnitt verschieben."""
 

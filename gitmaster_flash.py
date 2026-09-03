@@ -4855,6 +4855,23 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
 # Rot in der markierten Zeile — siehe selected_pair().
 C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN, C_ASK, C_ASK_KEY = 1, 2, 3, 4, 5, 6, 7, 8
 
+# Farbe je Anzeigecode aus parse_porcelain(). Untracked ist gelb: eine Datei,
+# die Git noch gar nicht kennt, ist eine Entscheidung und kein Schaden.
+FILE_CODE_COLORS = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}
+
+
+def file_row(code: str, path: str) -> tuple[str, int]:
+    """Eine Datei-Zeile als (Text, Farbpaar) — für beide Ansichten dieselbe.
+
+    Die aufgeklappte Repo-Liste und die Änderungsansicht (`A`) zeigen dieselben
+    Einträge. Zuordnung und Zeilenaufbau standen zweimal im Code; dieselbe Datei
+    hätte dort nach der nächsten Ergänzung verschieden aussehen können. Ein
+    unbekannter Code fällt auf die gedämpfte Farbe zurück, statt die Ansicht mit
+    einem KeyError zu beenden.
+    """
+    label = t("conflict_label") if code == "C" else ""
+    return f"{code}  {label}{path}", FILE_CODE_COLORS.get(code, C_DIM)
+
 
 def selected_pair(pair: int) -> tuple[int, bool]:
     """Wie ein farbiges Element in der markierten Zeile dargestellt wird.
@@ -5411,11 +5428,8 @@ class TUI:
                 self.draw_repo_line(y, self.statuses[row[1]],
                                     row[1] == self.selected and self.focus == "repos")
             elif kind == "file":
-                code, path = row[2], row[3]
-                pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[code]
-                label = t("conflict_label") if code == "C" else ""
-                safe_addstr(self.scr, y, 5, f"{code}  {label}{path}",
-                            curses.color_pair(pair))
+                text, pair = file_row(row[2], row[3])
+                safe_addstr(self.scr, y, 5, text, curses.color_pair(pair))
             elif kind == "stash":
                 safe_addstr(self.scr, y, 5, f"⚑  {row[2]}   {t('stash_row_hint')}",
                             curses.color_pair(C_YELLOW))
@@ -6262,9 +6276,8 @@ class TUI:
             for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
                                       start=1):
                 entry = st.files[index]
-                pair = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}[entry.code]
-                label = t("conflict_label") if entry.code == "C" else ""
-                safe_addstr(self.scr, y, 1, f"{entry.code}  {label}{entry.path}",
+                text, pair = file_row(entry.code, entry.path)
+                safe_addstr(self.scr, y, 1, text,
                             color_attr(pair, index == sel))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)

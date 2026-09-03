@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 148813
+    "tokens_spent": 154501
   },
   "campaign_history": [
     {
@@ -81,15 +81,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T10:57:15+02:00",
-        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb",
-        "content_sha256": "3a1ff111833bfa4b04805158c0ffd6a72a5acf5369fb1f8a683b1b4a29648baf",
+        "completed_at": "2026-09-03T11:18:42+02:00",
+        "observed_head": "266bc60d69d928c709ec2c6eba3316c9f765dc84",
+        "content_sha256": "40070419d2fb197168eb3fc2ce8855a3aa7c6f41f6bf09a4af4738dab7160ce3",
         "file_count": 2,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Nachbuchung: Seit dem Abschluss kamen nur zwei Tests hinzu, die zu den Bereichen screen-generator und documentation-contract gehoeren und dort bereits verifiziert wurden (Nachbau der Fortsetzungszelle, Nachbau des Commit-Hilfe-Blocks). Am Produktionscode hat sich nichts geaendert.",
+        "outcome": "improved",
+        "summary": "Nachbuchung des Querschnitts selection-window: scroll_window() ersetzt die vier handgerechneten Ausschnitt-Verschiebungen; Delta ist genau der bereits verifizierte Theme-Diff.",
         "tests": [
-          "python3 -m unittest discover -s tests: 534 passed"
+          "python3 -m unittest discover -s tests: 538 passed"
         ]
       }
     },
@@ -131,17 +131,16 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T10:46:06+02:00",
-        "observed_head": "e6561768a8935064ab937bb7a92be34e9dfadfa6",
-        "content_sha256": "5517a5ff6912d192601747d10befce0d1bae722e23f8a63456a5aab636797a9b",
+        "completed_at": "2026-09-03T11:18:42+02:00",
+        "observed_head": "266bc60d69d928c709ec2c6eba3316c9f765dc84",
+        "content_sha256": "ca8a2415e9720e0333b4336973a311e8e77adb8694f4f1bc012f47f640e3a5d5",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Die Fortsetzungszelle eines breiten Zeichens traegt im Nachbau jetzt auch die Hintergrundfarbe; ohne sie haette to_svg() den roten Balken der markierten Zeile mitten im Namen aufgebrochen. PTY-Klammer, Nachbau der Scroll-Sequenzen und to_svg-Laufbildung mitgeprueft.",
+        "summary": "Nachbuchung des Querschnitts cell-width-duplicate: der Generator importiert cell_width() aus dem Programm; Delta ist genau der bereits verifizierte Theme-Diff.",
         "tests": [
-          "python3 -m unittest discover -s tests: 533 passed (1 neu, ohne Korrektur rot)",
-          "python3 docs/make-screens.py --check: passed (Bilder byteweise gleich)",
-          "pgrep gitmaster_flash.py --demo nach dem Lauf: keine Reste"
+          "python3 -m unittest discover -s tests: 538 passed",
+          "python3 docs/make-screens.py --check: passed"
         ]
       }
     },
@@ -234,14 +233,19 @@
         "docs/make-screens.py"
       ],
       "priority": 3,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-09-03T10:57:49+02:00",
       "campaign_id": "20260903T095958732950+0200",
       "started_at": "2026-09-03T11:06:27+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260903T095958732950+0200",
-        "started_at": "2026-09-03T11:06:27+02:00",
-        "observed_head": "303be53fd12cc365f87a32edd87838dbeff4cc38"
+        "completed_at": "2026-09-03T11:18:25+02:00",
+        "observed_head": "266bc60d69d928c709ec2c6eba3316c9f765dc84",
+        "summary": "Der Bildgenerator importiert cell_width() aus gitmaster_flash statt eine zweite Fassung zu fuehren; ueber den gesamten Unicode-Bereich nachgerechnet waren beide identisch, aber ein Drift haette das Bild plausibel falsch gemacht. Ein Test haelt fest, dass beide Namen dasselbe Objekt sind.",
+        "tests": [
+          "python3 -m unittest discover -s tests: 538 passed",
+          "python3 docs/make-screens.py --check: passed (Bilder byteweise gleich)"
+        ]
       }
     }
   ]
