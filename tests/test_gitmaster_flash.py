@@ -416,6 +416,41 @@ class CursorVisibilityTests(unittest.TestCase):
             ui.action_filter()
 
 
+class ScrollWindowTests(unittest.TestCase):
+    """Die eine Regel, nach der vier Listen ihren Ausschnitt verschieben."""
+
+    def test_the_selection_stays_inside_the_window(self):
+        for selection in range(0, 12):
+            offset = 0
+            for _ in range(3):                   # mehrfach zeichnen ändert nichts
+                offset = gmf_module.scroll_window(selection, offset, 5)
+            with self.subTest(auswahl=selection):
+                self.assertLessEqual(offset, selection)
+                self.assertLess(selection, offset + 5)
+
+    def test_the_window_moves_by_the_smallest_step(self):
+        self.assertEqual(gmf_module.scroll_window(7, 0, 5), 3)   # nach unten
+        self.assertEqual(gmf_module.scroll_window(2, 5, 5), 2)   # nach oben
+        self.assertEqual(gmf_module.scroll_window(4, 3, 5), 3)   # schon sichtbar
+
+    def test_a_degenerate_height_never_produces_a_negative_offset(self):
+        """Die Commit-Hilfe rechnete früher mit `h - 4` ohne untere Schranke.
+
+        In einem sehr kleinen Fenster sprang ihr Ausschnitt dann bei jedem
+        Neuzeichnen zwischen 0 und 1 hin und her.
+        """
+        for height in (0, -3):
+            with self.subTest(hoehe=height):
+                self.assertEqual(gmf_module.scroll_window(0, 0, height), 0)
+                self.assertEqual(gmf_module.scroll_window(0, 1, height), 0)
+
+    def test_no_call_site_hand_rolls_the_rule_any_more(self):
+        source = Path(gmf_module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("off = sel - body_h + 1", source)
+        self.assertNotIn("self.offset = sel_row - body_h + 1", source)
+        self.assertEqual(source.count("scroll_window("), 5)   # Definition + vier Listen
+
+
 class TestSeveritySort(unittest.TestCase):
     def test_dirty_before_clean(self):
         dirty = RepoStatus(path=Path("/x"), rel="x", modified=1)

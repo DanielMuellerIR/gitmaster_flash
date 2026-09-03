@@ -4993,6 +4993,25 @@ def pad_cells(text: str, width: int) -> str:
     return text + " " * max(0, width - cell_width(text))
 
 
+def scroll_window(selection: int, offset: int, height: int) -> int:
+    """Den sichtbaren Ausschnitt so verschieben, dass `selection` darin liegt.
+
+    Vier Listen der Oberfläche brauchen genau diese Regel: die Repo-Liste, die
+    Änderungsansicht, die Commit-Hilfe und deren Vorschlagsliste. Sie stand
+    viermal im Code, in drei Schreibweisen — und eine Fassung rechnete ohne
+    untere Schranke für die Höhe. In einem sehr kleinen Fenster sprang ihr
+    Ausschnitt dann bei jedem Neuzeichnen zwischen zwei Werten hin und her,
+    statt einfach nichts zu zeigen.
+
+    Reine Rechnung ohne curses, deshalb headless prüfbar.
+    """
+    height = max(1, height)
+    offset = min(offset, selection)
+    if selection >= offset + height:
+        offset = selection - height + 1
+    return max(0, offset)
+
+
 def set_cursor_visible(visible: bool) -> None:
     """Terminal-Cursor ein- oder ausblenden, ohne auf Terminals ohne
     Cursor-Steuerung zu stürzen — curses meldet das als `curses.error`.
@@ -5384,10 +5403,7 @@ class TUI:
         # Zeile des ausgewählten Repos finden, damit sie sichtbar bleibt
         sel_row = next((i for i, r in enumerate(rows)
                         if r[0] == "repo" and r[1] == self.selected), 0)
-        if sel_row < self.offset:
-            self.offset = sel_row
-        if sel_row >= self.offset + body_h:
-            self.offset = sel_row - body_h + 1
+        self.offset = scroll_window(sel_row, self.offset, body_h)
         y = top
         for row in rows[self.offset:self.offset + body_h]:
             kind = row[0]
@@ -6242,10 +6258,7 @@ class TUI:
                         (" " + t("changes_title", rel=terminal_text(st.rel))).ljust(w - 1),
                         curses.A_BOLD)
             body_h = max(1, h - 3)
-            if sel < off:
-                off = sel
-            if sel >= off + body_h:
-                off = sel - body_h + 1
+            off = scroll_window(sel, off, body_h)
             for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
                                       start=1):
                 entry = st.files[index]
@@ -6395,11 +6408,8 @@ class TUI:
             chosen = sum(1 for it in items if it["include"])
             head = t("commit_title", rel=st.rel, n=chosen, total=len(items))
             safe_addstr(self.scr, 0, 0, (" " + head).ljust(w - 1), curses.A_BOLD)
-            body_h = h - 4
-            if sel < off:
-                off = sel
-            if sel >= off + body_h:
-                off = sel - body_h + 1
+            body_h = max(1, h - 4)
+            off = scroll_window(sel, off, body_h)
             # Die Breite der Pfadspalte richtet sich nach der LÄNGSTEN
             # Beschriftung. Eine feste Zahl schnitt die längste still ab —
             # sichtbar wurde das erst, als eine dritte dazukam.
@@ -6498,9 +6508,7 @@ class TUI:
             safe_addstr(self.scr, 0, 0, (" " + t("group_title")).ljust(w - 1),
                         curses.A_BOLD)
             body_h = max(1, h - 4)
-            off = min(off, sel)
-            if sel >= off + body_h:
-                off = sel - body_h + 1
+            off = scroll_window(sel, off, body_h)
             for y, i in enumerate(range(off, min(len(groups), off + body_h)),
                                   start=2):
                 safe_addstr(self.scr, y, 2, self.commit_group_label(groups[i]),

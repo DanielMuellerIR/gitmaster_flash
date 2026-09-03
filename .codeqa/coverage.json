@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 126470
+    "tokens_spent": 135030
   },
   "campaign_history": [
     {
@@ -81,17 +81,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T10:30:51+02:00",
-        "observed_head": "36c4f5206f1e4cf2ef6792992a86009cd9d43b2a",
-        "content_sha256": "89ce26d9ed0c0aa01b4bb6a16bc428e01172beb18d8c8c102cec39adb233033a",
+        "completed_at": "2026-09-03T10:57:15+02:00",
+        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb",
+        "content_sha256": "3a1ff111833bfa4b04805158c0ffd6a72a5acf5369fb1f8a683b1b4a29648baf",
         "file_count": 2,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Drei nachgestellte Fehler behoben: ungeborener HEAD mit Tracking-Ref meldete das Repo als kaputt (branch_delta), ein apps-Eintrag ohne name/path beendete die TUI mit KeyError (app_label/app_path), und ein AD-Pfad liess den ganzen Commit der Commit-Hilfe scheitern (committable_against_head). Zusammengefuehrt: curses.curs_set nur noch in set_cursor_visible; Pfadspaltenbreite der Commit-Hilfe leitet sich aus der laengsten Beschriftung ab.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung: Seit dem Abschluss kamen nur zwei Tests hinzu, die zu den Bereichen screen-generator und documentation-contract gehoeren und dort bereits verifiziert wurden (Nachbau der Fortsetzungszelle, Nachbau des Commit-Hilfe-Blocks). Am Produktionscode hat sich nichts geaendert.",
         "tests": [
-          "python3 -m unittest discover -s tests: 530 passed (16 neu)",
-          "python3 docs/make-screens.py --check: passed",
-          "gitmaster_flash.py --list gegen leeren Klon mit gefetchtem Tracking-Ref: zeigt ↓2 origin statt ERROR"
+          "python3 -m unittest discover -s tests: 534 passed"
         ]
       }
     },
@@ -180,26 +178,19 @@
       "risk": "medium",
       "priority": 5,
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T203952085645+0200",
-        "completed_at": "2026-08-29T20:57:34+02:00",
-        "observed_head": "7577339d48da176e9ec4dd796b6d52d1653e9944",
-        "content_sha256": "df686c339de0a4c81ed7adf20036a120964780b77503d2f31e91609163eefc50",
+        "campaign_id": "20260903T095958732950+0200",
+        "completed_at": "2026-09-03T10:56:37+02:00",
+        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb",
+        "content_sha256": "5cd76f416eab3f7ceca3f98005d0491bf2b4e858eff8076d4612afcbf2910486",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Delta seit 8d78a01 geprueft: AGENTS.md hat die Kurzform-Regel aufgenommen und den Eintrag unter 'Bewusst nicht umgesetzt' von den zwei erledigten Formen auf die verbliebene Grenze umgestellt (while/until). Alle inhaltlichen Behauptungen des Deltas gegen die Shell nachgeprueft und zutreffend: 'repeat 2; print hi' gibt hi hi, 'for x (a b) print $x; print E' gibt a b E, '&&'/'||'/'|' beenden den Rumpf nicht, 'while false; print x' laeuft endlos. Eine Luecke geschlossen: Der beim Nachbuchen des Nachbarbereichs gefundene Kommandoanfang im Kurzform-Rumpf (short_loop_body_at) stand nur als Kommentar in install.sh. Genau so war die NFC-Regel am 2026-08-25 schon einmal an einer Stelle notiert und an der naechsten wieder verletzt worden; deshalb steht sie jetzt samt der Klammer-Feinheit im Regelwerk.",
+        "summary": "Die vier Regeln der 0.22.4-Korrekturen samt Begruendung festgehalten: unborn HEAD ist ein gewoehnlicher Zustand (branch_delta), fehlende config.json-Werte bekommen Platzhalter, curses.curs_set nur in set_cursor_visible, AD-Eintraege sind sichtbar aber nicht anwaehlbar. Dazu die Installer-Regel zur Zeilenfortsetzung. Delta (Rueckfrage-Balken 0.22.3) mitgeprueft; keine privaten Remotes oder Hosts im oeffentlichen Text.",
         "tests": [
-          "Alle 43 in AGENTS.md genannten Bezeichner im Code belegt (Skript ueber gitmaster_flash.py, docs/make-screens.py, install.sh, gmf.zsh und beide Testdateien); alle Markdown-Links auf vorhandene Dateien; die vier zitierten Shell-Ausgaben einzeln nachgemessen; python3 -m unittest discover -s tests: 506 Tests OK; git diff --check"
+          "python3 -m unittest discover -s tests: 534 passed (Doku-Vertrag inklusive)"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "started_at": "2026-09-03T10:52:04+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     }
   ],
@@ -212,5 +203,35 @@
     "fit": "passt",
     "recommendation": "Paradigma beibehalten und lokale Grenzen bereichsweise schaerfen. Eine Dateiaufteilung braucht einen eigenen Auftrag und einen neuen Verteilungsvertrag fuer --diff; ihr Nutzen rechtfertigt diese Kosten derzeit nicht."
   },
-  "themes": []
+  "themes": [
+    {
+      "id": "selection-window",
+      "summary": "Drei Auswahllisten der TUI (Aenderungsansicht, Commit-Hilfe, Vorschlagsliste) rechnen das sichtbare Fenster jeweils selbst aus — dreimal dieselbe Regel in drei Schreibweisen, eine davon ohne max(1, ...)",
+      "evidence": [
+        "gitmaster_flash.py"
+      ],
+      "priority": 2,
+      "state": "in_progress",
+      "noted_at": "2026-09-03T10:57:49+02:00",
+      "campaign_id": "20260903T095958732950+0200",
+      "started_at": "2026-09-03T10:57:54+02:00",
+      "active_run": {
+        "campaign_id": "20260903T095958732950+0200",
+        "started_at": "2026-09-03T10:57:54+02:00",
+        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb"
+      }
+    },
+    {
+      "id": "cell-width-duplicate",
+      "summary": "Die Zellbreite eines Zeichens ist zweimal implementiert: cell_width() im Programm und _cell_width() im Bildgenerator. Beide Fassungen sind heute identisch; driften sie, zeigt das erzeugte Bild etwas anderes als das Programm zeichnet",
+      "evidence": [
+        "gitmaster_flash.py",
+        "docs/make-screens.py"
+      ],
+      "priority": 3,
+      "state": "pending",
+      "noted_at": "2026-09-03T10:57:49+02:00",
+      "campaign_id": "20260903T095958732950+0200"
+    }
+  ]
 }
