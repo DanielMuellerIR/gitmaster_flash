@@ -36,11 +36,18 @@ import sys
 import tempfile
 import termios
 import time
-import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GMF = HERE.parent / "gitmaster_flash.py"
+
+# Die Zellbreite eines Zeichens kommt aus dem Programm selbst, nicht aus einer
+# zweiten Fassung hier. Das Bild soll zeigen, was gmf zeichnet — driften die
+# beiden Regeln auseinander (ein neues nullbreites Zeichen etwa), zeigte es
+# etwas anderes, und zwar plausibel genug, um unbemerkt zu bleiben. Der Import
+# hat keine Nebenwirkungen: `gitmaster_flash` liest seine Config erst in main().
+sys.path.insert(0, str(HERE.parent))
+from gitmaster_flash import cell_width  # noqa: E402
 
 # Default terminal for a capture. Every screen may ask for its own size (see SCREENS):
 # the window height decides how the TUI divides list, command log and footer, so a
@@ -111,12 +118,6 @@ class Cell:
     def __init__(self):
         self.ch, self.fg, self.bold, self.rev = " ", FG, False, False
         self.bg = None                                   # None = window background
-
-
-def _cell_width(ch: str) -> int:
-    if unicodedata.combining(ch) or ch in ("\ufe0e", "\ufe0f"):
-        return 0
-    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
 def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
@@ -504,7 +505,7 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
         elif ch == "\x1b":
             i += 1                                  # unknown escape: skip the byte
         elif ch >= " " and 0 <= cy < rows and 0 <= cx < cols:
-            width = _cell_width(ch)
+            width = cell_width(ch)
             if width == 0 and cx > 0:
                 grid[cy][cx - 1].ch += ch
             else:

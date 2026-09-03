@@ -7866,8 +7866,12 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertNotIn("25l", "".join(lines))
         # Diese Symbole sind für macOS-curses einzellig. Würde der Nachbau sie
         # breiter zählen, wanderten spätere ↑n-/↓n-Zeilen im SVG seitlich.
-        self.assertEqual(module._cell_width("✔"), 1)
-        self.assertEqual(module._cell_width("⚑"), 1)
+        self.assertEqual(module.cell_width("✔"), 1)
+        self.assertEqual(module.cell_width("⚑"), 1)
+        # Der Nachbau misst mit derselben Funktion wie das Programm — eine
+        # zweite Fassung hier könnte still auseinanderlaufen und das Bild
+        # zeigte plausibel etwas anderes, als gmf zeichnet.
+        self.assertIs(module.cell_width, gmf_module.cell_width)
 
     def test_screen_replay_scrolls_the_region_curses_asks_it_to(self):
         """ncurses schiebt Zeilen, statt sie neu zu malen — das muss nachgebildet sein.

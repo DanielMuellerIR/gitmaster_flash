@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 135030
+    "tokens_spent": 148813
   },
   "campaign_history": [
     {
@@ -211,14 +211,19 @@
         "gitmaster_flash.py"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-09-03T10:57:49+02:00",
       "campaign_id": "20260903T095958732950+0200",
       "started_at": "2026-09-03T10:57:54+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260903T095958732950+0200",
-        "started_at": "2026-09-03T10:57:54+02:00",
-        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb"
+        "completed_at": "2026-09-03T11:06:23+02:00",
+        "observed_head": "303be53fd12cc365f87a32edd87838dbeff4cc38",
+        "summary": "scroll_window() ist die eine Regel, nach der Repo-Liste, Aenderungsansicht, Commit-Hilfe und Vorschlagsliste ihren Ausschnitt verschieben; vorher stand sie viermal im Code, in drei Schreibweisen und einmal ohne untere Schranke fuer die Hoehe. Reine Rechnung ohne curses, headless geprueft.",
+        "tests": [
+          "python3 -m unittest discover -s tests: 538 passed (4 neu)",
+          "python3 docs/make-screens.py --check: passed"
+        ]
       }
     },
     {
@@ -229,9 +234,15 @@
         "docs/make-screens.py"
       ],
       "priority": 3,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-09-03T10:57:49+02:00",
-      "campaign_id": "20260903T095958732950+0200"
+      "campaign_id": "20260903T095958732950+0200",
+      "started_at": "2026-09-03T11:06:27+02:00",
+      "active_run": {
+        "campaign_id": "20260903T095958732950+0200",
+        "started_at": "2026-09-03T11:06:27+02:00",
+        "observed_head": "303be53fd12cc365f87a32edd87838dbeff4cc38"
+      }
     }
   ]
 }
