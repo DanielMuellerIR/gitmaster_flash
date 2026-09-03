@@ -708,19 +708,50 @@ def resolve_lang(cfg: dict, override: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
-    """Config laden; fehlt sie, mit Defaults anlegen (selbsterklärender Start)."""
+    """Config laden; fehlt sie, mit Defaults anlegen (selbsterklärender Start).
+
+    Geprüft wird nur die FORM, nie der Wert: Ein Eintrag, dessen Typ nicht zum
+    Default passt, fällt auf den Default zurück und wird auf stderr genannt.
+    Die Datei trägt man von Hand ein, und ein `"skip_dirs": null` oder eine in
+    `[…]` gepackte Config ist gültiges JSON — `dict.update()` und die
+    Grossschreibung der App-Tasten endeten dort mit einem Traceback statt mit
+    der zugesagten Rückfallebene (Review-Fund 2026-09-03). Die Werte selbst
+    prüft weiterhin `parse_setting()` an der Eingabegrenze der
+    Einstellungsansicht.
+    """
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # tiefe Kopie
+
+    def warn(text: str) -> None:
+        print(f"Warning: {CONFIG_PATH}: {text} — using the default.",
+              file=sys.stderr)
+
+    loaded: dict = {}
     if CONFIG_PATH.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text()))
+            parsed = json.loads(CONFIG_PATH.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             print(f"Warning: cannot read {CONFIG_PATH} ({exc}) — using defaults.",
                   file=sys.stderr)
+        else:
+            if isinstance(parsed, dict):
+                loaded = parsed
+            else:
+                warn("not a JSON object")
     else:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n")
+    for key, value in loaded.items():
+        default = DEFAULT_CONFIG.get(key)
+        # `lang` hat den Default None und darf deshalb alles tragen;
+        # `resolve_lang()` nimmt ohnehin nur "en"/"de" an.
+        if (key in DEFAULT_CONFIG and default is not None
+                and not isinstance(value, type(default))):
+            warn(f'entry "{key}" is a {type(value).__name__}, '
+                 f"not a {type(default).__name__}")
+            continue
+        cfg[key] = value
     # App-Tasten intern immer groß (Tastendruck wird ebenfalls großgezogen).
-    cfg["apps"] = {k.upper(): v for k, v in cfg.get("apps", {}).items()}
+    cfg["apps"] = {str(k).upper(): v for k, v in cfg["apps"].items()}
     return cfg
 
 
@@ -808,12 +839,12 @@ def app_label(app: dict | None) -> str:
     KeyError beenden. Die Fußzeile schreibt dann `? `, und die Einstellungsseite
     zeigt denselben Platzhalter.
     """
-    return (app or {}).get("name") or "?"
+    return (app if isinstance(app, dict) else {}).get("name") or "?"
 
 
 def app_path(app: dict | None) -> str:
     """Programmpfad eines `apps`-Eintrags; fehlt er, bleibt der Text leer."""
-    return (app or {}).get("path") or ""
+    return (app if isinstance(app, dict) else {}).get("path") or ""
 
 
 def setting_display(cfg: dict, key: str) -> str:

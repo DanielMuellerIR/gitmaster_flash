@@ -381,6 +381,104 @@ class AppEntryTests(unittest.TestCase):
         cfg = {**DEFAULT_CONFIG, "apps": {"Z": {"path": "/A.app"}}}
         self.assertEqual(gmf_module.setting_display(cfg, "apps"), "Z ?")
 
+    def test_an_entry_that_is_not_an_object_at_all_stays_a_placeholder(self):
+        """`"Z": 5` statt `"Z": {…}` ist derselbe Tippfehler eine Stufe hoeher."""
+        self.assertEqual(gmf_module.app_label(5), "?")
+        self.assertEqual(gmf_module.app_path(5), "")
+        self.assertEqual(gmf_module.app_label("Zed"), "?")
+        cfg = {**DEFAULT_CONFIG, "apps": {"Z": 5}}
+        ui = TUI(self.Screen(), Path("/tmp"), cfg, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp/x"), rel="x")]
+        ui.statuses = list(ui.all_statuses)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        self.assertTrue(any("Z ?" in text for _, text in ui.scr.drawn))
+        ui.action_open_app("Z")
+        self.assertEqual(ui.message, gmf_module.t("app_not_found", p="?"))
+        self.assertEqual(gmf_module.setting_display(cfg, "apps"), "Z ?")
+
+
+class LoadConfigShapeTests(unittest.TestCase):
+    """Eine von Hand geschriebene config.json kann gueltiges JSON und trotzdem
+    krumm sein. `load_config()` versprach dafuer die Rueckfallebene auf die
+    Defaults, endete aber mit einem Traceback: `dict.update(None)` bei einer
+    Datei aus `null`, `[…]` oder `"text"`, und `.items()` bei einem
+    `"apps": null`. Ein `"skip_dirs": null` riss spaeter den ganzen Scan mit
+    (`find_repos` -> `set(None)`), ein `"sync_remote_names": null` jedes
+    einzelne Repo. Geprueft wird nur die FORM, nie der Wert.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.json"
+        self._real = gmf_module.CONFIG_PATH
+        gmf_module.CONFIG_PATH = self.path
+
+    def tearDown(self):
+        gmf_module.CONFIG_PATH = self._real
+        self.tmp.cleanup()
+
+    def _load(self, content: str) -> tuple[dict, str]:
+        self.path.write_text(content)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = gmf_module.load_config()
+        return cfg, err.getvalue()
+
+    def test_a_file_that_is_no_object_falls_back_and_says_so(self):
+        for content in ("null", "[]", "[1, 2]", '"text"', "42"):
+            with self.subTest(inhalt=content):
+                cfg, err = self._load(content)
+                self.assertEqual(cfg["apps"], DEFAULT_CONFIG["apps"])
+                self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
+                self.assertIn("not a JSON object", err)
+
+    def test_a_single_entry_of_the_wrong_type_falls_back_and_names_itself(self):
+        for content, key in (('{"apps": null}', "apps"),
+                             ('{"apps": [1]}', "apps"),
+                             ('{"skip_dirs": null}', "skip_dirs"),
+                             ('{"sync_remote_names": null}', "sync_remote_names"),
+                             ('{"git_timeout": "20"}', "git_timeout")):
+            with self.subTest(inhalt=content):
+                cfg, err = self._load(content)
+                self.assertEqual(cfg[key], DEFAULT_CONFIG[key])
+                self.assertIn(f'"{key}"', err)
+
+    def test_a_correct_entry_still_wins_over_the_default(self):
+        """Gegenprobe: Die Formpruefung darf keine gueltige Config verwerfen."""
+        cfg, err = self._load(
+            '{"lang": "de", "git_timeout": 42, "skip_dirs": ["x"],'
+            ' "apps": {"z": {"name": "Zed", "path": "/Z.app"}},'
+            ' "eigener_schluessel": 1}')
+        self.assertEqual(err, "")
+        self.assertEqual(cfg["lang"], "de")
+        self.assertEqual(cfg["git_timeout"], 42)
+        self.assertEqual(cfg["skip_dirs"], ["x"])
+        # App-Tasten intern immer gross.
+        self.assertEqual(cfg["apps"], {"Z": {"name": "Zed", "path": "/Z.app"}})
+        self.assertEqual(cfg["eigener_schluessel"], 1)
+
+    def test_lang_may_carry_null_because_that_means_auto(self):
+        cfg, err = self._load('{"lang": null}')
+        self.assertEqual(err, "")
+        self.assertIsNone(cfg["lang"])
+        self.assertIn(gmf_module.resolve_lang(cfg), ("en", "de"))
+
+    def test_a_broken_json_file_still_reports_the_read_error(self):
+        cfg, err = self._load("{nope")
+        self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
+        self.assertIn("cannot read", err)
+
+    def test_a_missing_file_is_created_with_the_defaults(self):
+        self.assertFalse(self.path.exists())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = gmf_module.load_config()
+        self.assertEqual(err.getvalue(), "")
+        self.assertTrue(self.path.exists())
+        self.assertEqual(json.loads(self.path.read_text()), DEFAULT_CONFIG)
+        self.assertEqual(cfg["apps"], DEFAULT_CONFIG["apps"])
+
 
 class CursorVisibilityTests(unittest.TestCase):
     """Genau eine Stelle spricht mit `curses.curs_set()`.

@@ -465,7 +465,17 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   dann nach `EDITABLE_SETTINGS`, wenn ein Vertipper darin nichts startet und
   nichts umleitet.
 - Jede Eingabe läuft durch `parse_setting()`, bevor sie in die Config kommt;
-  `load_config()` prüft nichts. Die Zahlenprüfung nutzt bewusst eine Regex und
+  `load_config()` prüft nur die FORM, nie den Wert: Ein Eintrag, dessen Typ
+  nicht zum Default passt, fällt auf den Default zurück und wird auf stderr
+  genannt. Die Datei trägt man von Hand ein, und `null`, `[…]` oder `"text"`
+  auf oberster Ebene sind gültiges JSON — `dict.update()` und die
+  Großschreibung der App-Tasten endeten dort mit einem Traceback statt mit der
+  zugesagten Rückfallebene, ein `"skip_dirs": null` riss später den ganzen
+  Scan mit (`find_repos` → `set(None)`), ein `"sync_remote_names": null` jedes
+  einzelne Repo (Review-Fund 2026-09-03). `lang` darf `null` tragen, das heißt
+  „automatisch“. Aus demselben Grund verlangen `app_label()`/`app_path()` ein
+  Objekt: `"Z": 5` ist derselbe Tippfehler eine Stufe höher.
+  Die Zahlenprüfung nutzt bewusst eine Regex und
   nicht `str.isdigit()` — letzteres hält auch „²" für eine Ziffer, `int()` aber
   nicht, und der Wert fiele erst beim nächsten Git-Aufruf auf.
 - `save_config()` schreibt atomar (Nachbardatei + `os.replace`). Schlägt das
