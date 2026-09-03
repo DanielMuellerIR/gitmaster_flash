@@ -228,6 +228,9 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Adresse wäre Dekoration. Ein eigener Schlüssel oder Port gehört deshalb in
   `~/.ssh/config`, nicht in einen Wrapper; das Befehlsprotokoll zeigt das
   `env -u …` mit an. Reine Lesebefehle des Scans behalten die Benutzerumgebung.
+  Seit 2026-09-03 gehört `GIT_PROXY_COMMAND` dazu: Für `git://` ruft Git dieses
+  Programm mit Host und Port auf, und es entscheidet dieselbe Frage. Belegt an
+  einem gepinnten Fetch — der Wrapper lief und bekam „127.0.0.1 9418“.
 - Die Zahlen, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der
   Historie, „gemergt" —, lesen den Commit-Graph mit `NO_REPLACE_ENV`
   (`branch_delta`, `upstream_delta`, `read_branches`, die beiden `rev-list`-Zeilen
@@ -498,6 +501,21 @@ liegengebliebene Arbeit aus.
 
 ## Offene Punkte / Ideen
 
-- (derzeit keine; die vier Feature-Punkte Suche/Filter, Einstellungen in der
-  Oberfläche, Hintergrund-Fetch und Commit-Vorschläge sind am 2026-08-23
-  umgesetzt worden)
+- **Proxy-Einstellungen aus der REPO-Config umgehen die URL-Bindung.** Belegt
+  am 2026-09-03 an temporären Repos, jeweils mit einem gepinnten Fetch:
+  `core.gitProxy` (für `git://`) startete das repo-eigene Skript und übergab ihm
+  Host und Port; `http.proxy` (für HTTPS) lenkte die Verbindung auf
+  `127.0.0.1:9` statt auf die geprüfte Adresse. Das ist dieselbe Klasse wie der
+  2026-08-29 behobene `core.sshCommand`, aber ohne saubere Gegenmaßnahme:
+  `core.gitproxy` ist ein MEHRWERTIGER Schlüssel — ein `-c core.gitProxy=none`
+  überschreibt den Eintrag des Repos nicht, sondern stellt sich daneben
+  (geprüft: der Wrapper lief trotzdem). Und ein erzwungenes leeres `http.proxy`
+  bräche jeden Rechner hinter einem echten Firmen-Proxy, denn die
+  `GIT_CONFIG_*`-Werte schlagen auch die globale Config.
+  Zwei denkbare Wege, beide mit Preis: (a) einen gebundenen Transfer ablehnen,
+  sobald `git config --local` einen dieser Schlüssel führt — trifft nur die
+  Repo-Config, kostet aber eine neue Ablehnungsart; (b) `git://` aus
+  `_argv_safe_remote_url()` streichen, dann entfällt `core.gitProxy` ganz —
+  `git://` authentifiziert die Gegenstelle ohnehin nicht, die „geprüfte
+  Adresse“ ist dort also von vornherein nur so gut wie das Netz. `http.proxy`
+  bliebe in beiden Fällen offen. Entscheidung steht aus.

@@ -2372,7 +2372,12 @@ REPOSITORY_GIT_ENV = {
 # `core.sshCommand` auf das gewöhnliche `ssh`, damit auch die Repo-Konfiguration
 # den Transportweg nicht mehr austauschen kann. Ein eigener Schlüssel oder Port
 # gehört in ~/.ssh/config; von dort liest `ssh` ihn unverändert.
-TRANSPORT_GIT_ENV = {"GIT_SSH", "GIT_SSH_COMMAND"}
+# GIT_PROXY_COMMAND ist dasselbe fuer das git://-Protokoll: Git ruft das
+# Programm mit Host und Port auf, und es entscheidet, wohin die Verbindung
+# wirklich geht (belegt 2026-09-03 an einem gepinnten Fetch — der Wrapper lief
+# und bekam "127.0.0.1 9418"). Das repo-eigene `core.gitProxy` bleibt davon
+# unberuehrt; siehe "Offene Punkte" in AGENTS.md.
+TRANSPORT_GIT_ENV = {"GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"}
 
 # Ein `refs/replace/*` im Repo deutet den Commit-Graph um. Wer daraus Zahlen
 # liest, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der

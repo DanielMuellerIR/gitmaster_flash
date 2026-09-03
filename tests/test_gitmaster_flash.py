@@ -5021,6 +5021,47 @@ class NonInteractiveGitTests(unittest.TestCase):
             self.assertTrue(marker.exists())
 
 
+    def test_a_pinned_transfer_ignores_an_inherited_git_proxy_command(self):
+        """Dasselbe fuer das git://-Protokoll.
+
+        GIT_PROXY_COMMAND ist das Gegenstueck zu GIT_SSH_COMMAND: Git ruft das
+        Programm mit Host und Port auf, und es entscheidet, wohin die
+        Verbindung wirklich geht. Es fehlte in TRANSPORT_GIT_ENV, und der
+        Wrapper lief auch bei einem gebundenen Fetch (Review-Fund 2026-09-03).
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            marker = root / "proxy-ran"
+            wrapper = root / "fake-proxy"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"printf ran >> {shlex.quote(str(marker))}\n"
+                "exit 7\n")
+            wrapper.chmod(0o755)
+            url = "git://127.0.0.1/x.git"
+            environment = {"GIT_PROXY_COMMAND": str(wrapper)}
+
+            pin_config, pinned = gmf_module._pinned_url_config(url)
+            with mock.patch.dict(os.environ, environment):
+                bound = gmf_module.run_git(
+                    repo, *pin_config, "ls-remote", "--heads", "--", pinned,
+                    timeout=30)
+            self.assertNotEqual(bound.returncode, 0)
+            self.assertFalse(
+                marker.exists(),
+                "ein Proxy-Wrapper entschied über das Ziel eines gebundenen Transfers")
+
+            # Gegenprobe: Ohne Bindung behalten die Lesebefehle des Scans die
+            # Benutzerumgebung — sonst belegt der Test oben nichts.
+            with mock.patch.dict(os.environ, environment):
+                gmf_module.run_git(
+                    repo, "ls-remote", "--heads", "--", url, timeout=30)
+            self.assertTrue(marker.exists())
+
+
 class ErrorRedactionTests(unittest.TestCase):
     """Git zitiert in Fehlermeldungen die komplette URL — inklusive Login/Query.
 
