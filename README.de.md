@@ -231,7 +231,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.5 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.6 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -643,8 +643,14 @@ macht; Tags und Submodul-Commits werden nie gesendet. Für diesen einen Push sin
 außerdem Repo-Hooks abgeschaltet, damit ein pre-push-Hook keine ungeprüften Tags
 oder weiteren Refs veröffentlicht. Die Übertragung verwendet die
 exakt geprüfte URL statt eines Remote-Namens, den eine parallele Konfigurationsänderung
-umleiten könnte. Die Fetch-Refspec muss `refs/heads/<Branch>` auf den passenden
-Tracking-Ref dieses Remotes abbilden.
+umleiten könnte. Der Weg zu dieser Adresse gehört dazu: Für diesen einen Aufruf
+bleibt ein SSH-Wrapper aus der Umgebung oder der Repo-Config außen vor, und ein
+`core.gitProxy` in der Config des Repos sperrt die Übertragung ganz — er
+entscheidet, wohin eine `git://`-Verbindung wirklich geht, und lässt sich als
+mehrwertiger Schlüssel für einen einzelnen Aufruf nicht überschreiben. In der
+globalen Git-Config bleibt er erlaubt: Dort hat man ihn selbst hingeschrieben,
+und ein Repo kann ihn nicht einschleusen. Die Fetch-Refspec muss
+`refs/heads/<Branch>` auf den passenden Tracking-Ref dieses Remotes abbilden.
 
 Pull bleibt eine Terminal-Aktion. Branch, Index und Arbeitsbaum lassen sich
 gegenüber parallelen Git-Prozessen nicht atomar an den in dieser TUI freigegebenen

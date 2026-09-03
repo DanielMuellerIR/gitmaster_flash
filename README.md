@@ -215,7 +215,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.5 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.6 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -610,7 +610,13 @@ Push sends the approved commit OID through an explicit refspec. An exact target-
 remote deletion or concurrent move from turning it into an unreviewed update;
 tags and submodule commits are never sent. The one push also disables repository
 hooks, so a pre-push hook cannot publish unreviewed tags or additional refs. The transfer uses the exact URL that was
-checked, not a remote name that concurrent configuration could redirect. Its fetch
+checked, not a remote name that concurrent configuration could redirect. The way
+to that address counts as well: for that one call an SSH wrapper from the
+environment or from the repository's config is ignored, and a `core.gitProxy` in
+the repository's own config blocks the transfer outright — it decides where a
+`git://` connection really goes and, being a multi-valued key, cannot be
+overridden for a single call. In your global Git config it stays allowed: there
+you wrote it yourself, and a repository cannot slip it in. Its fetch
 refspec must map `refs/heads/<branch>` to that remote's matching tracking ref.
 
 Pull remains a terminal operation. Moving a branch, index and working tree cannot

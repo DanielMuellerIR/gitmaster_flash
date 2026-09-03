@@ -6470,6 +6470,139 @@ class DisplayNameNormalisationTests(unittest.TestCase):
             self.assertEqual(st.path, repo)
 
 
+class RepoTransportOverrideTests(unittest.TestCase):
+    """`core.gitProxy` aus der Config DES REPOS sperrt die Übertragung.
+
+    Der Schlüssel bestimmt für `git://`, WELCHES Programm die Verbindung
+    aufbaut — dieselbe Frage wie `core.sshCommand`. Anders als dort lässt er
+    sich nicht per `-c` neutralisieren: `core.gitproxy` ist MEHRWERTIG, ein
+    zusätzlicher Wert stellt sich nur daneben, und das Skript des Repos lief
+    trotzdem. Deshalb wird abgelehnt statt gegengesteuert. Global gesetzt
+    bleibt er erlaubt: Dort hat ihn der Mensch selbst hingeschrieben.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.global_config = self.root / "gitconfig"
+        self.global_config.write_text("")
+        self.included = self.root / "extra.cfg"
+        self.marker = self.root / "proxy-ran"
+        self.proxy = self.root / "proxy.sh"
+        self.proxy.write_text(
+            "#!/bin/sh\n"
+            f"printf ran >> {shlex.quote(str(self.marker))}\n"
+            "exit 7\n")
+        self.proxy.chmod(0o755)
+        self.bare = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(self.bare))
+        self.repo = self.root / "work"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.txt").write_text("a\n")
+        git(self.repo, "add", "a.txt")
+        git(self.repo, "commit", "-qm", "eins")
+        git(self.repo, "remote", "add", "origin", str(self.bare))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        git(self.repo, "fetch", "-q", "origin")
+        (self.repo / "a.txt").write_text("b\n")
+        git(self.repo, "commit", "-qam", "zwei")
+        self.env = mock.patch.dict(
+            os.environ, {"GIT_CONFIG_GLOBAL": str(self.global_config),
+                         "GIT_CONFIG_NOSYSTEM": "1"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _remote(self):
+        return gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+
+    def _reasons(self) -> tuple:
+        return (gmf_module.repo_transport_override(self.repo, 10),
+                gmf_module.fetch_remote_block_reason(
+                    self.repo, self._remote(), "main", 10),
+                inspect_transfer(self.repo, "origin", "main", "push", 10).reason,
+                check_remote(self.repo, "origin", 10)[0])
+
+    def test_an_untouched_repository_transfers_normally(self):
+        self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
+
+    def test_the_repo_config_blocks_fetch_push_and_check(self):
+        git(self.repo, "config", "core.gitProxy", str(self.proxy))
+        self.assertEqual(
+            self._reasons(),
+            ("core.gitProxy", "unsafe_transport", "unsafe-transport",
+             "unsafe_transport"))
+
+    def test_the_same_value_from_the_global_config_stays_allowed(self):
+        """Gegenprobe: Global hat der Mensch ihn selbst hingeschrieben.
+
+        Ohne diese Grenze wäre die Regel keine Aussage über das Repo, sondern
+        ein Verbot des Schlüssels — und jeder Rechner hinter einem echten Proxy
+        könnte nichts mehr übertragen.
+        """
+        self.global_config.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
+        self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
+
+    def test_a_value_reached_through_an_include_is_caught_too(self):
+        """`include.path` aus `.git/config` ist genauso repo-seitig.
+
+        Eine Prüfung nur auf `git config --local` übersieht diesen Weg: Der
+        Wert steht dann in einer anderen Datei, und die Entscheidung, sie
+        einzubinden, traf die Repo-Config.
+        """
+        self.included.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
+        with (self.repo / ".git" / "config").open("a") as handle:
+            handle.write(f"[include]\n\tpath = {self.included}\n")
+        self.assertEqual(
+            self._reasons(),
+            ("core.gitProxy", "unsafe_transport", "unsafe-transport",
+             "unsafe_transport"))
+
+    def test_a_global_value_plus_a_repo_value_is_still_blocked(self):
+        self.global_config.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
+        git(self.repo, "config", "core.gitProxy", str(self.proxy))
+        self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                         "core.gitProxy")
+
+    def test_the_scan_says_so_and_never_starts_the_proxy(self):
+        git(self.repo, "remote", "set-url", "origin", "git://127.0.0.1/repo.git")
+        git(self.repo, "config", "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*")
+        git(self.repo, "config", "core.gitProxy", str(self.proxy))
+
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+
+        self.assertEqual([(r.name, r.fetch_outcome) for r in st.remotes],
+                         [("origin", "unsafe_transport")])
+        self.assertEqual(st.error,
+                         "origin: " + gmf_module.TR["short_unsafe_transport"]["en"])
+        self.assertFalse(self.marker.exists(),
+                         "das Proxy-Skript des Repos entschied über das Ziel")
+
+    def test_the_message_names_the_key_and_the_way_out_in_both_languages(self):
+        for lang in ("en", "de"):
+            with self.subTest(lang=lang):
+                with mock.patch.object(gmf_module, "UI_LANG", lang):
+                    message = remote_check_message(
+                        "origin", "unsafe_transport", 0, "", 30)
+                self.assertIn("core.gitProxy", message)
+                self.assertIn("origin", message)
+                self.assertNotEqual(
+                    message,
+                    remote_check_message("origin", "unsafe_url", 0, "", 30))
+
+    def test_an_unreadable_config_counts_as_not_provable(self):
+        """Fail closed: Ohne lesbare Config lässt sich nichts belegen."""
+        broken = subprocess.CompletedProcess(["git", "config"], 128, "", "boom")
+        with mock.patch.object(gmf_module, "run_git", return_value=broken):
+            self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                             "core.gitProxy")
+
+
 class DetachedHeadFetchTests(unittest.TestCase):
     """Ein detached HEAD ist ein gewöhnlicher Zustand, kein Sicherheitsproblem.
 
@@ -6514,9 +6647,11 @@ class DetachedHeadFetchTests(unittest.TestCase):
         # Die Refspec selbst ist einwandfrei — nur der Branch fehlt.
         self.assertTrue(gmf_module.fetch_refspecs_safe(remote))
         self.assertEqual(
-            gmf_module.fetch_remote_block_reason(remote, "(detached)"), "detached")
+            gmf_module.fetch_remote_block_reason(
+                self.repo, remote, "(detached)", 10), "detached")
         self.assertEqual(
-            gmf_module.fetch_remote_block_reason(remote, "?"), "detached")
+            gmf_module.fetch_remote_block_reason(
+                self.repo, remote, "?", 10), "detached")
 
     def test_message_for_the_detached_case_does_not_accuse_the_refspec(self):
         message = remote_check_message("origin", "detached", 0, "", 30)
@@ -6541,7 +6676,8 @@ class DetachedHeadFetchTests(unittest.TestCase):
             "+refs/heads/*:refs/heads/fremd/*")
         remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
         self.assertEqual(
-            gmf_module.fetch_remote_block_reason(remote, "main"), "unsafe_refspec")
+            gmf_module.fetch_remote_block_reason(
+                self.repo, remote, "main", 10), "unsafe_refspec")
         git(self.repo, "checkout", "-q", "main")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
         self.assertTrue(st.fetch_error)
@@ -7097,7 +7233,8 @@ class TransferMessageTests(unittest.TestCase):
     """
 
     REASONS = ("dirty", "detached", "inspect-failed", "remote-unsafe",
-               "missing-branch", "divergent", "behind", "nothing-push")
+               "unsafe-transport", "missing-branch", "divergent", "behind",
+               "nothing-push")
 
     def test_every_reason_becomes_a_sentence(self):
         ui = TUI(None, Path("/tmp"), DEFAULT_CONFIG, None)
