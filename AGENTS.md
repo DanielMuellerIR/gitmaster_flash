@@ -161,6 +161,17 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `fetch_error` — eine Falschaussage über eine völlig gewöhnliche Konfiguration,
   die im Rechnervergleich zusätzlich `error` und `remote_state` aus dem
   Vergleich nahm (Review-Fund 2026-09-03).
+- Ein Pfad-Remote hat keinen Host, und das steht in `RemoteTarget.is_local` —
+  nicht als Wort „local" im Feld `host`. `local` IST ein gültiger Hostname, etwa
+  als ssh-Alias in `~/.ssh/config`. Solange der Merkwert im Hostnamensraum
+  stand, galt `ssh://local/srv/repo.git` als lokaler Ordner: gmf holte und
+  pushte in das Verzeichnis `/srv/repo.git` DIESES Rechners, während Git selbst
+  den Server angesprochen hätte — ein als zielgebunden bestätigter Push landete
+  woanders (Review-Fund 2026-09-03). `remote_fetch_url()`, `remote_push_url()`
+  und `inspect_transfer()` ersetzen die konfigurierte Adresse deshalb nur noch
+  bei `is_local` durch den aufgelösten Pfad. Aus demselben Grund lässt
+  `detect_sync_remote()` leere Einträge in `sync_remote_hosts` fallen: Ein
+  hostloses Ziel darf nicht auf einen versehentlich leeren Eintrag passen.
 - Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,

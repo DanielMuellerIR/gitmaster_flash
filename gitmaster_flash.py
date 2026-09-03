@@ -1001,6 +1001,16 @@ class RemoteTarget:
     host: str
     repo_id: str
     fingerprint: str
+    # Ein Pfad-Remote (`/pfad/repo.git`, `file://…`) hat gar keinen Host.
+    # Diese Frage stand bis 2026-09-03 im Feld `host` als das Wort "local" —
+    # und "local" IST ein gültiger Hostname, etwa als ssh-Alias in
+    # ~/.ssh/config. Ein Remote `ssh://local/srv/repo.git` galt dadurch als
+    # lokaler Ordner: gmf holte und pushte in das Verzeichnis `/srv/repo.git`
+    # dieses Rechners, während Git selbst den Server `local` angesprochen
+    # hätte. Ein als zielgebunden bestätigter Push landete also woanders
+    # (Review-Fund 2026-09-03). `host` nennt seither nur noch echte Hosts und
+    # bleibt bei Pfad-Remotes leer.
+    is_local: bool = False
 
     @property
     def is_github(self) -> bool:
@@ -1009,7 +1019,7 @@ class RemoteTarget:
         Zentrale Stelle für diese Entscheidung: Produktionscode (Badges,
         Web-URLs) und der Helfer is_github_url() laufen beide hierüber.
         """
-        return self.host == "github.com"
+        return not self.is_local and self.host == "github.com"
 
 
 @dataclass
@@ -1162,7 +1172,7 @@ def remote_fetch_url(remote: RemoteConfig) -> str | None:
             or not remote.fetch_targets):
         return None
     return (remote.fetch_targets[0].repo_id
-            if remote.fetch_targets[0].host == "local"
+            if remote.fetch_targets[0].is_local
             else remote.fetch_urls[0])
 
 
@@ -1172,7 +1182,7 @@ def remote_push_url(remote: RemoteConfig) -> str | None:
             or len(remote.push_targets) != 1):
         return None
     return (remote.push_targets[0].repo_id
-            if remote.push_targets[0].host == "local"
+            if remote.push_targets[0].is_local
             else remote.push_urls[0])
 
 
@@ -3054,7 +3064,9 @@ def _canonical_network_path(path: str) -> str:
 def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     """Credential-free host/repository identity for URL, SCP, and local syntax."""
     raw = url.strip()
-    host = "local"
+    host = ""
+    # Solange kein Netzschema mit Host erkannt wurde, bleibt es ein Pfad.
+    is_local = True
     port = None
     path = raw
     user = ""
@@ -3065,6 +3077,7 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
         if "/" not in hostpart:
             scheme = "scp"
             host = _normal_host(hostpart.rsplit("@", 1)[-1])
+            is_local = False
             path = rest
             user = hostpart.rsplit("@", 1)[0] if "@" in hostpart else ""
             # SCP-Syntax: ein Pfad ohne führenden "/" liegt im Home des
@@ -3088,10 +3101,11 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             path = urllib.parse.unquote(parsed.path)
         else:
             host = _normal_host(parsed.hostname or "")
+            is_local = False
             port = parsed.port
             path = _canonical_network_path(parsed.path)
             user = parsed.username or ""
-    if host == "local":
+    if is_local:
         local = Path(path).expanduser()
         if not local.is_absolute() and repo is not None:
             local = repo / local
@@ -3121,7 +3135,7 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             ["network", host, None if default_port else port, qualifier, repo_id],
             separators=(",", ":"))
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
-    return RemoteTarget(host, repo_id, fingerprint)
+    return RemoteTarget(host, repo_id, fingerprint, is_local)
 
 
 def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
@@ -3205,9 +3219,12 @@ def detect_sync_remote(repo: Path, cfg: dict,
     for name in cfg["sync_remote_names"]:
         if name in configs:
             return name
-    wanted = {_normal_host(host) for host in cfg["sync_remote_hosts"]}
+    # Leere Einträge fallen weg: Ein Pfad-Remote trägt gar keinen Host, und ein
+    # versehentlich leerer Eintrag in der Config träfe sonst jedes von ihnen.
+    wanted = {host for host in map(_normal_host, cfg["sync_remote_hosts"]) if host}
     for name, remote in configs.items():
-        if any(target.host in wanted for target in remote.fetch_targets + remote.push_targets):
+        if any(not target.is_local and target.host in wanted
+               for target in remote.fetch_targets + remote.push_targets):
             return name
     return None
 
@@ -3747,7 +3764,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         if len(urls) != 1 or not _argv_safe_remote_url(urls[0]):
             return TransferCheck("remote-unsafe")
         transfer_url = (remote_cfg.push_targets[0].repo_id
-                        if remote_cfg.push_targets[0].host == "local"
+                        if remote_cfg.push_targets[0].is_local
                         else urls[0])
         if not _argv_safe_remote_url(transfer_url):
             return TransferCheck("remote-unsafe")

@@ -2087,6 +2087,88 @@ class RemoteSecurityTests(unittest.TestCase):
                              "remote-unsafe")
 
 
+class HostNamedLocalTests(unittest.TestCase):
+    """Ein Remote-Host, der `local` heißt, ist kein lokaler Ordner.
+
+    `local` war bis 2026-09-03 der Merkwert für Pfad-Remotes und stand dafür im
+    Feld `host` — dabei ist `local` ein völlig gültiger Hostname, etwa als
+    ssh-Alias in ~/.ssh/config. Ein Remote `ssh://local/srv/repo.git` galt
+    dadurch als lokaler Ordner: gmf holte und pushte in das Verzeichnis
+    `/srv/repo.git` DIESES Rechners, während Git selbst den Server angesprochen
+    hätte. Ein als zielgebunden bestätigter Push landete also woanders.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.bare = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(self.bare))
+        self.repo = self.root / "work"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.txt").write_text("a\n")
+        git(self.repo, "add", "a.txt")
+        git(self.repo, "commit", "-qm", "eins")
+        git(self.repo, "remote", "add", "origin", str(self.bare))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        git(self.repo, "fetch", "-q", "origin")
+        # Erst jetzt auf den Netz-Host umstellen: Der Tracking-Ref steht, der
+        # Vergleich unten kommt daher ohne Netz aus.
+        self.url = "https://local" + str(self.bare)
+        git(self.repo, "remote", "set-url", "origin", self.url)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "zwei")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_network_host_named_local_is_not_a_path(self):
+        target = canonical_remote_target("ssh://local/srv/repo.git")
+        self.assertFalse(target.is_local)
+        self.assertEqual(target.host, "local")
+        # Und es ist ein ANDERES Ziel als der gleichnamige Ordner hier.
+        self.assertNotEqual(target.fingerprint,
+                            canonical_remote_target("/srv/repo").fingerprint)
+
+    def test_a_path_remote_carries_no_host_at_all(self):
+        for spelling in (str(self.bare), "file://" + str(self.bare)):
+            target = canonical_remote_target(spelling)
+            self.assertTrue(target.is_local, spelling)
+            self.assertEqual(target.host, "", spelling)
+            self.assertFalse(target.is_github, spelling)
+
+    def test_transfer_addresses_stay_the_configured_url(self):
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        self.assertEqual(gmf_module.remote_fetch_url(remote), self.url)
+        self.assertEqual(gmf_module.remote_push_url(remote), self.url)
+        check = inspect_transfer(self.repo, "origin", "main", "push")
+        self.assertEqual(check.reason, "ready")
+        # Der entscheidende Punkt: kein Dateipfad. Vorher stand hier
+        # str(self.bare) — der Push wäre in diesen Ordner gelaufen.
+        self.assertEqual(check.transfer_url, self.url)
+        self.assertNotEqual(check.transfer_url, str(self.bare))
+
+    def test_a_real_path_remote_still_uses_its_resolved_path(self):
+        """Gegenprobe: Pfad-Remotes müssen weiterhin absolut aufgelöst werden."""
+        git(self.repo, "remote", "set-url", "origin", "../origin.git")
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        self.assertTrue(remote.fetch_targets[0].is_local)
+        self.assertEqual(gmf_module.remote_fetch_url(remote), str(self.bare))
+        self.assertEqual(
+            inspect_transfer(self.repo, "origin", "main", "push").transfer_url,
+            str(self.bare))
+
+    def test_an_empty_configured_sync_host_matches_nothing(self):
+        """Ein leerer Eintrag darf nicht jedes hostlose Pfad-Remote treffen."""
+        git(self.repo, "remote", "set-url", "origin", str(self.bare))
+        cfg = {**DEFAULT_CONFIG, "sync_remote_names": [], "sync_remote_hosts": [""]}
+        self.assertIsNone(detect_sync_remote(self.repo, cfg))
+        cfg = {**DEFAULT_CONFIG, "sync_remote_names": [], "sync_remote_hosts": ["local"]}
+        self.assertIsNone(detect_sync_remote(self.repo, cfg))
+        git(self.repo, "remote", "set-url", "origin", self.url)
+        self.assertEqual(detect_sync_remote(self.repo, cfg), "origin")
+
+
 class CommitSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
