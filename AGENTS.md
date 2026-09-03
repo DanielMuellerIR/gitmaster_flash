@@ -69,6 +69,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `selected_pair()` entscheidet das zentral; der Bildgenerator kann echte
   Hintergrundfarben (`ANSI_BG`), sonst zeigen die README-Bilder etwas anderes als
   das Programm.
+- Zwei Regeln, die mehrere Ansichten teilen, stehen je genau einmal im Code, und
+  ein Test hält das fest. `scroll_window()` verschiebt den sichtbaren Ausschnitt
+  von Repo-Liste, Änderungsansicht, Commit-Hilfe und Vorschlagsliste — vorher
+  viermal von Hand gerechnet, einmal ohne untere Schranke für die Höhe.
+  `file_row()` baut die Datei-Zeile für die aufgeklappte Liste UND die
+  Änderungsansicht; beide zeigen dieselben Einträge, und `FILE_CODE_COLORS` ist
+  die einzige Zuordnung von Anzeigecode zu Farbe. Auch die Zellbreite kommt aus
+  einer Quelle: Der Bildgenerator importiert `cell_width()` aus dem Programm,
+  statt eine zweite Fassung zu führen.
 - Der Commit läuft über einen temporären Index, damit fremdes Staging überlebt.
   Danach muss der echte Index die committeten Pfade übernehmen
   (`adopt_commit_in_real_index`), sonst zeigt `git status` sie weiter als `MM` und

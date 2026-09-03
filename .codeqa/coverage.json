@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 154501
+    "tokens_spent": 165395
   },
   "campaign_history": [
     {
@@ -81,15 +81,16 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T11:18:42+02:00",
-        "observed_head": "266bc60d69d928c709ec2c6eba3316c9f765dc84",
-        "content_sha256": "40070419d2fb197168eb3fc2ce8855a3aa7c6f41f6bf09a4af4738dab7160ce3",
+        "completed_at": "2026-09-03T11:28:09+02:00",
+        "observed_head": "3f9ed77ef7f12978d7add04e29f5c28d6db5b162",
+        "content_sha256": "5a6e8722af29570e31390e40aa1e61b29514f1ade7207f9805cf33038d588d9c",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Nachbuchung des Querschnitts selection-window: scroll_window() ersetzt die vier handgerechneten Ausschnitt-Verschiebungen; Delta ist genau der bereits verifizierte Theme-Diff.",
+        "summary": "Datei-Zeile beider Ansichten (aufgeklappte Repo-Liste und Aenderungsansicht) an einer Stelle: file_row() liefert Text und Farbpaar, FILE_CODE_COLORS ist die einzige Zuordnung, ein unbekannter Code daempft statt zu werfen. Delta seit dem letzten Abschluss ist genau dieser Diff.",
         "tests": [
-          "python3 -m unittest discover -s tests: 538 passed"
+          "python3 -m unittest discover -s tests: 542 passed (4 neu)",
+          "python3 docs/make-screens.py --check: passed"
         ]
       }
     },
