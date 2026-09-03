@@ -660,11 +660,29 @@ resolve_short_pending_suffix() {
   resolve_sourced_path "$suffix"
 }
 
+# Was lässt eine Zeile an ihrem Ende offen? Setzt `line_open_state` auf
+#
+#   quote         ein Anführungszeichen oder eine ${…}-Klammer ist noch offen
+#   continuation  die Zeile endet auf einem ungequoteten Backslash
+#   ""            die Zeile steht für sich
+#
+# Wie bei `block_kind` über eine Variable statt über die Ausgabe — die
+# Aufrufer deklarieren `line_open_state` selbst als `local`.
+#
+# Beides sieht am Zeilenende gleich aus und verlangt doch Gegenteiliges.
 # Mehrzeilige Quotes sind gültiges zsh, aber eine zeilenweise Kandidatensuche
-# kann ihren Inhalt nicht von echten Kommandos unterscheiden. Sobald eine Zeile
-# einen Quote-Kontext offen lässt, lehnen wir die Datei konservativ ab. Das ist
-# ehrlicher als Text innerhalb von `print '…'` als Registrierung zu zählen.
-line_leaves_quote_open() {
+# kann ihren Inhalt nicht von echten Kommandos unterscheiden; solche Dateien
+# lehnen wir konservativ ab. Das ist ehrlicher als Text innerhalb von
+# `print '…'` als Registrierung zu zählen.
+#
+# Ein Backslash am Zeilenende ist dagegen gar keine Zeilengrenze: zsh entfernt
+# ihn samt Zeilenumbruch, bevor es überhaupt zu lesen beginnt. Bis 2026-09-03
+# galt auch er als offener Quote-Kontext — und eine völlig gewöhnliche .zshrc
+# mit `export PATH=/a:\` in einer Zeile und `/b` in der nächsten wurde mit
+# „unclosed or unsupported shell block“ abgelehnt, obwohl `zsh -n` sie
+# klaglos akzeptiert. Der Lesedurchgang unten fügt solche Zeilen jetzt
+# zusammen, bevor irgendein Scanner sie sieht.
+scan_line_end() {
   local line="$1" char state=""
   local -i i escaped=0 token_start=1 parameter_depth=0
   for ((i = 1; i <= ${#line}; i++)); do
@@ -729,7 +747,26 @@ line_leaves_quote_open() {
       *) token_start=0 ;;
     esac
   done
-  [[ -n "$state" || $escaped -ne 0 || $parameter_depth -ne 0 ]]
+  line_open_state=""
+  if [[ -n "$state" || $parameter_depth -ne 0 ]]; then
+    line_open_state=quote
+  elif (( escaped )); then
+    line_open_state=continuation
+  fi
+}
+
+# Bleibt ein Quote-Kontext offen? (Eine Fortsetzungszeile zählt nicht mehr dazu.)
+line_leaves_quote_open() {
+  local line_open_state=""
+  scan_line_end "$1"
+  [[ "$line_open_state" == quote ]]
+}
+
+# Endet die Zeile auf einem ungequoteten Backslash, gehört die nächste noch dazu.
+line_continues() {
+  local line_open_state=""
+  scan_line_end "$1"
+  [[ "$line_open_state" == continuation ]]
 }
 
 # Wie viele Kommando- oder Prozessersetzungen ein Lexer-Wort offen lässt.
@@ -1010,22 +1047,46 @@ zshrc_context_state() {
 # .zshrc wird dabei nie ausgeführt.
 existing_path=""
 zshrc_state=""
+
+# Eine fertige logische Zeile auswerten: Kandidat suchen, Blockkontext fortschreiben.
+scan_zshrc_line() {
+  local line="$1" candidate=""
+  if [[ -z "$zshrc_state" ]]; then
+    candidate="$(resolve_sourced_path "$line")" || candidate=""
+  elif [[ "$zshrc_state" == shortpending ]]; then
+    candidate="$(resolve_short_pending_suffix "$line")" || candidate=""
+  fi
+  if [[ -z "$zshrc_state" || "$zshrc_state" == shortpending ]]; then
+    if [[ -n "$candidate" && "${candidate:t}" == "gmf.zsh" ]]; then
+      existing_path="$candidate"
+    fi
+  fi
+  zshrc_state="$(zshrc_context_state "$line" "$zshrc_state")"
+}
+
 if [[ -f "$zshrc" ]]; then
+  pending_line=""
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ -z "$zshrc_state" ]]; then
-      candidate="$(resolve_sourced_path "$line")" || candidate=""
-    elif [[ "$zshrc_state" == shortpending ]]; then
-      candidate="$(resolve_short_pending_suffix "$line")" || candidate=""
-    else
-      candidate=""
+    # Fortsetzungszeilen zuerst zu der EINEN logischen Zeile zusammenfügen, die
+    # zsh selbst sieht. Der Backslash verschwindet dabei ersatzlos — genau wie
+    # bei der Shell; ein eingefügtes Leerzeichen zerrisse `PATH=/a:\` + `/b`.
+    if [[ -n "$pending_line" ]]; then
+      line="$pending_line$line"
+      pending_line=""
     fi
-    if [[ -z "$zshrc_state" || "$zshrc_state" == shortpending ]]; then
-      if [[ -n "$candidate" && "${candidate:t}" == "gmf.zsh" ]]; then
-        existing_path="$candidate"
-      fi
+    if line_continues "$line"; then
+      pending_line="${line%\\}"
+      continue
     fi
-    zshrc_state="$(zshrc_context_state "$line" "$zshrc_state")"
+    scan_zshrc_line "$line"
   done < "$zshrc"
+  # Endet die Datei mitten in einer Fortsetzung, hat zsh diese Zeile trotzdem —
+  # nur eben ohne den Backslash. Sie darf nicht ungeprüft verfallen.
+  # Ausgeschriebenes `if` statt `[[ … ]] && …`: Unter `set -e` beendete die
+  # fehlschlagende Bedingung als letztes Kommando des Blocks das Skript.
+  if [[ -n "$pending_line" ]]; then
+    scan_zshrc_line "$pending_line"
+  fi
 fi
 if [[ -n "$zshrc_state" ]]; then
   print -u2 "error: cannot prove a top-level registration in .zshrc (unclosed or unsupported shell block)."

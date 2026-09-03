@@ -2,12 +2,11 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260830T100309995450+0200",
-    "token_budget": 3000000,
-    "status": "complete",
-    "started_at": "2026-08-30T10:03:09+02:00",
-    "finished_at": "2026-08-30T10:04:49+02:00",
-    "finish_reason": "all-current"
+    "id": "20260903T095958732950+0200",
+    "token_budget": 1000000,
+    "status": "active",
+    "started_at": "2026-09-03T09:59:58+02:00",
+    "tokens_spent": 75156
   },
   "campaign_history": [
     {
@@ -45,6 +44,14 @@
       "tokens_spent": 54763,
       "finished_at": "2026-08-29T20:57:49+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260830T100309995450+0200",
+      "token_budget": 3000000,
+      "status": "complete",
+      "started_at": "2026-08-30T10:03:09+02:00",
+      "finished_at": "2026-08-30T10:04:49+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -73,17 +80,18 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T100309995450+0200",
-        "completed_at": "2026-08-30T10:03:31+02:00",
-        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
-        "content_sha256": "1d62d59bfaf5d2b363d4101a9d05844dc50019503642fe51a7022a183ce6eed5",
+        "campaign_id": "20260903T095958732950+0200",
+        "completed_at": "2026-09-03T10:30:51+02:00",
+        "observed_head": "36c4f5206f1e4cf2ef6792992a86009cd9d43b2a",
+        "content_sha256": "89ce26d9ed0c0aa01b4bb6a16bc428e01172beb18d8c8c102cec39adb233033a",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Diff-Vergleich meldet NFC/NFD-Namenskollisionen statt Repo-Zustaende zu ueberschreiben; JSON-Filtervertraege tragen bereinigten Suchtext und Trefferzahlen; TUI-Aufklappzustand folgt dem echten Pfad. Delta, JSON-Grenzen, Identitaetsverwendungen und direkte CLI-Ausgabe nachgeprueft.",
+        "summary": "Drei nachgestellte Fehler behoben: ungeborener HEAD mit Tracking-Ref meldete das Repo als kaputt (branch_delta), ein apps-Eintrag ohne name/path beendete die TUI mit KeyError (app_label/app_path), und ein AD-Pfad liess den ganzen Commit der Commit-Hilfe scheitern (committable_against_head). Zusammengefuehrt: curses.curs_set nur noch in set_cursor_visible; Pfadspaltenbreite der Commit-Hilfe leitet sich aus der laengsten Beschriftung ab.",
         "tests": [
-          "python3 -m unittest discover -s tests: 511 passed",
-          "python3 gitmaster_flash.py TEMP --json --filter api --lang en: strukturiertes Filterfeld 1/2; erwarteter Exit 1 fuer Repos ohne Sync-Remote"
+          "python3 -m unittest discover -s tests: 530 passed (16 neu)",
+          "python3 docs/make-screens.py --check: passed",
+          "gitmaster_flash.py --list gegen leeren Klon mit gefetchtem Tracking-Ref: zeigt ↓2 origin statt ERROR"
         ]
       }
     },
@@ -97,7 +105,7 @@
       "risk": "high",
       "priority": 2,
       "reason": "Installations- und Remote-CLI-Vertrag an Shell-, Prozess- und Rechnergrenzen",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260830T100309995450+0200",
         "completed_at": "2026-08-30T10:04:00+02:00",
@@ -112,6 +120,13 @@
           "zsh -n install.sh: passed",
           "python3 -m unittest discover -s tests: 511 passed"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260903T095958732950+0200",
+        "started_at": "2026-09-03T10:31:04+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {

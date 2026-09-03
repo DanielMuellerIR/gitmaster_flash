@@ -1295,6 +1295,13 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("gmf: function", loaded.stdout)
 
     def test_backslash_continuation_is_not_parsed_as_a_new_command(self):
+        """`source` hinter einer Fortsetzung ist ein Argument, kein Kommando.
+
+        Die beiden Zeilen sind für zsh EINE: `print ignored source -- …`. Das
+        `source` gehört dort zu `print` und lädt nichts. Der Installer darf es
+        deshalb nicht als vorhandene Registrierung zählen — und trägt seine
+        eigene an.
+        """
         wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
         zshrc = self.home / ".zshrc"
         content = f"print ignored \\\nsource -- {wrapper}\n"
@@ -1302,10 +1309,50 @@ class InstallScriptTests(unittest.TestCase):
 
         result = self._install()
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Already installed", result.stdout)
-        self.assertIn("cannot prove", result.stderr)
-        self.assertEqual(zshrc.read_text(), content)
+        self.assertTrue(zshrc.read_text().startswith(content))
+        appended = zshrc.read_text()[len(content):]
+        self.assertIn("source -- ", appended)
+        self.assertIn(str(self.repo / "gmf.zsh"), appended)
+        # Der zweite Lauf erkennt genau diese Zeile wieder.
+        self.assertIn("Already installed", self._install().stdout)
+
+    def test_a_plain_continuation_line_never_blocks_the_installation(self):
+        """Eine Zeilenfortsetzung ist keine unklare Syntax.
+
+        Bis 2026-09-03 galt der Backslash am Zeilenende wie ein offener Quote:
+        Der Kontextscanner meldete dauerhaft `opaque`, und der Installer lehnte
+        eine völlig gewöhnliche .zshrc mit „cannot prove a top-level
+        registration" ab — `zsh -n` akzeptiert sie klaglos.
+        """
+        zshrc = self.home / ".zshrc"
+        content = "export GMF_TEST_PATH=/a:\\\n/b\n"
+        zshrc.write_text(content)
+
+        result = self._install()
+        loaded = subprocess.run(
+            ["zsh", "-c", 'source "$ZDOTDIR/.zshrc"; whence -w gmf;'
+             ' print -r -- "$GMF_TEST_PATH"'],
+            capture_output=True, text=True,
+            env=dict(os.environ, HOME=str(self.home), ZDOTDIR=str(self.home)))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gmf: function", loaded.stdout)
+        # Die Fortsetzung wird wie von zsh ohne Trennzeichen zusammengesetzt.
+        self.assertIn("/a:/b", loaded.stdout)
+        self.assertTrue(zshrc.read_text().startswith(content))
+
+    def test_a_file_ending_in_a_continuation_is_still_scanned(self):
+        """Die letzte Zeile verfällt nicht, nur weil ihr Backslash ins Leere zeigt."""
+        wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
+        zshrc = self.home / ".zshrc"
+        zshrc.write_text(f"source -- {wrapper} \\")
+
+        result = self._install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Already installed", result.stdout)
 
     def test_source_inside_a_multiline_array_is_only_data(self):
         wrapper = shlex.quote(str(self.repo / "gmf.zsh"))
