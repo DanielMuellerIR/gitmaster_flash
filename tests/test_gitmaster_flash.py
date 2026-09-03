@@ -332,6 +332,90 @@ class SelectedLineColourTests(unittest.TestCase):
             self.assertEqual(gmf_module.selected_pair(pair), (pair, True))
 
 
+class AppEntryTests(unittest.TestCase):
+    """Ein von Hand ergänzter `apps`-Eintrag darf die TUI nie beenden.
+
+    Die App-Tasten trägt man selbst in die config.json ein. Ein vergessenes
+    `name` warf bis 2026-09-03 schon im ersten `draw()` einen KeyError — und
+    den fängt niemand ab: `_loop()` kennt nur Timeouts. gmf endete mit einem
+    Traceback, bevor überhaupt eine Repo-Zeile stand.
+    """
+
+    class Screen:
+        def __init__(self):
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 100)
+        def erase(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+
+    def test_a_missing_name_becomes_a_visible_placeholder(self):
+        self.assertEqual(gmf_module.app_label({"path": "/A.app"}), "?")
+        self.assertEqual(gmf_module.app_label({"name": "Editor"}), "Editor")
+        self.assertEqual(gmf_module.app_label(None), "?")
+        self.assertEqual(gmf_module.app_path({"name": "Editor"}), "")
+        self.assertEqual(gmf_module.app_path({"path": "/A.app"}), "/A.app")
+
+    def test_the_footer_draws_instead_of_raising(self):
+        cfg = {**DEFAULT_CONFIG, "apps": {"Z": {"path": "/A.app"}}}
+        ui = TUI(self.Screen(), Path("/tmp"), cfg, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp/x"), rel="x")]
+        ui.statuses = list(ui.all_statuses)
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw()
+        self.assertTrue(any("Z ?" in text for _, text in ui.scr.drawn))
+
+    def test_an_entry_without_a_path_reports_it_instead_of_raising(self):
+        cfg = {**DEFAULT_CONFIG, "apps": {"Z": {"name": "Zed"}}}
+        ui = TUI(self.Screen(), Path("/tmp"), cfg, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp/x"), rel="x")]
+        ui.statuses = list(ui.all_statuses)
+
+        ui.action_open_app("Z")
+
+        self.assertEqual(ui.message, gmf_module.t("app_not_found", p="?"))
+
+    def test_the_settings_page_shows_the_same_placeholder(self):
+        cfg = {**DEFAULT_CONFIG, "apps": {"Z": {"path": "/A.app"}}}
+        self.assertEqual(gmf_module.setting_display(cfg, "apps"), "Z ?")
+
+
+class CursorVisibilityTests(unittest.TestCase):
+    """Genau eine Stelle spricht mit `curses.curs_set()`.
+
+    Auf einem Terminal ohne Cursor-Steuerung wirft curses dort `curses.error`.
+    Filter (`/`), Einstellungen (`,`) und der Programmstart riefen bis
+    2026-09-03 direkt auf und beendeten die Oberfläche mit einem Traceback.
+    """
+
+    def test_the_helper_swallows_terminals_without_cursor_control(self):
+        with mock.patch("gitmaster_flash.curses.curs_set",
+                        side_effect=curses.error):
+            gmf_module.set_cursor_visible(True)      # darf nicht werfen
+            gmf_module.set_cursor_visible(False)
+
+    def test_no_call_site_talks_to_curses_directly(self):
+        source = Path(gmf_module.__file__).read_text(encoding="utf-8")
+        # Der eine erlaubte Aufruf steht in set_cursor_visible() selbst.
+        self.assertEqual(source.count("curses.curs_set("), 1)
+
+    def test_the_filter_prompt_survives_such_a_terminal(self):
+        class Screen:
+            def getmaxyx(self): return (24, 100)
+            def erase(self): pass
+            def addstr(self, *_a): pass
+            def move(self, *_a): pass
+            def refresh(self): pass
+
+        ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
+        with mock.patch("gitmaster_flash.curses.curs_set",
+                        side_effect=curses.error), \
+                mock.patch.object(ui, "prompt_line", return_value=None):
+            ui.action_filter()
+
+
 class TestSeveritySort(unittest.TestCase):
     def test_dirty_before_clean(self):
         dirty = RepoStatus(path=Path("/x"), rel="x", modified=1)
@@ -2600,11 +2684,13 @@ class CommitSafetyTests(unittest.TestCase):
 
 class CommitWizardSafetyTests(unittest.TestCase):
     class Screen:
-        def __init__(self, keys=()): self.keys = iter(keys)
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
         def getmaxyx(self): return (30, 120)
         def erase(self): pass
         def refresh(self): pass
-        def addstr(self, *_args): pass
+        def addstr(self, y, x, text, *_a): self.drawn.append(text)
         def move(self, *_args): pass
         def clrtoeol(self): pass
         def getch(self): return next(self.keys)
@@ -2623,6 +2709,93 @@ class CommitWizardSafetyTests(unittest.TestCase):
         git(self.repo, "commit", "-qm", "base")
 
     def tearDown(self): self.tmp.cleanup()
+
+    def _staged_then_deleted(self) -> RepoStatus:
+        """`git add neu.txt && rm neu.txt` neben einer gewöhnlichen Änderung."""
+        (self.repo / "neu.txt").write_text("neu\n")
+        git(self.repo, "add", "neu.txt")
+        (self.repo / "neu.txt").unlink()
+        (self.repo / "one.txt").write_text("geändert\n")
+        return collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+    def test_a_staged_then_deleted_path_is_nothing_against_head(self):
+        st = self._staged_then_deleted()
+        entries = {f.path: f for f in st.files}
+        self.assertEqual(entries["neu.txt"].xy, "AD")
+        self.assertFalse(gmf_module.committable_against_head(entries["neu.txt"]))
+        self.assertTrue(gmf_module.committable_against_head(entries["one.txt"]))
+
+    def test_committing_such_a_path_would_fail_the_whole_commit(self):
+        """Der Grund für die Ausnahme — hier ausdrücklich festgehalten.
+
+        Der temporäre Index startet aus HEAD; den Pfad gibt es dort nicht, im
+        Arbeitsbaum auch nicht. Die Freigabeprüfung schlägt an und nimmt die
+        völlig gewöhnliche Änderung an one.txt mit ins Verderben.
+        """
+        self._staged_then_deleted()
+        with self.assertRaises(CommitSafetyError):
+            commit_selected(self.repo, ["neu.txt", "one.txt"], "test", 10, 20)
+
+    def test_the_wizard_leaves_it_unselected_and_says_why(self):
+        st = self._staged_then_deleted()
+        # ⏎ committet die Vorauswahl; prompt_line liefert die Message.
+        ui = TUI(self.Screen([10]), self.root, DEFAULT_CONFIG, None)
+        ui.all_statuses = [st]
+        ui.statuses = [st]
+        with mock.patch.object(ui, "prompt_line", return_value="nur one.txt"), \
+                mock.patch.object(ui, "refresh_one", return_value=st), \
+                mock.patch.object(ui, "show_busy"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.flushinp"):
+            ui.action_commit_wizard()
+
+        self.assertIn(gmf_module.t("committed_in", rel=st.rel, undo="").split(" ")[0],
+                      ui.message)
+        # Nur one.txt ist committet; neu.txt bleibt als AD im Arbeitsbaum-Zustand.
+        committed = git_output(self.repo, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(committed.split(), ["one.txt"])
+        # Die Zeile sagt auch, WARUM nichts angehakt ist.
+        rows = [text for text in ui.scr.drawn if "neu.txt" in text]
+        self.assertTrue(rows)
+        self.assertIn(gmf_module.t("do_nothing_vs_head"), rows[0])
+
+    def test_the_labels_stay_complete_in_both_languages(self):
+        """Die Pfadspalte richtet sich nach der längsten Beschriftung.
+
+        Mit der früheren festen Breite schnitt schon ein 120 Zeichen breites
+        Fenster die neue, längere Beschriftung ab.
+        """
+        class Narrow(CommitWizardSafetyTests.Screen):
+            def getmaxyx(self): return (30, 80)
+
+        st = self._staged_then_deleted()
+        for lang in ("en", "de"):
+            with self.subTest(lang=lang):
+                gmf_module.set_ui_lang(lang)
+                try:
+                    ui = TUI(Narrow([27]), self.root, DEFAULT_CONFIG, None)
+                    ui.all_statuses = [st]
+                    ui.statuses = [st]
+                    with mock.patch("gitmaster_flash.curses.color_pair",
+                                    return_value=0):
+                        ui.action_commit_wizard()
+                    rows = [text for text in ui.scr.drawn if "neu.txt" in text]
+                    self.assertIn(gmf_module.t("do_nothing_vs_head"), rows[0])
+                    rows = [text for text in ui.scr.drawn if "one.txt" in text]
+                    self.assertIn(gmf_module.t("do_commit"), rows[0])
+                finally:
+                    gmf_module.set_ui_lang("en")
+
+    def test_select_all_skips_what_cannot_be_committed(self):
+        st = self._staged_then_deleted()
+        items = [{"code": f.code, "path": f.path,
+                  "include": False,
+                  "committable": gmf_module.committable_against_head(f),
+                  "rename_group": f.rename_group}
+                 for f in st.files]
+        for it in items:
+            it["include"] = it["committable"]
+        self.assertEqual([it["path"] for it in items if it["include"]], ["one.txt"])
 
     def test_commit_helper_never_changes_gitignore_implicitly(self):
         before = (self.repo / ".gitignore").read_text()
@@ -5508,6 +5681,77 @@ class RemoteAndCommandLogTests(unittest.TestCase):
                                 for line in view.lines[first:last + 1]))
         # Der Textmodus bleibt unveraendert nutzbar (CLI/Tests).
         self.assertEqual(repo_info_lines(st, DEFAULT_CONFIG), view.lines)
+
+
+class UnbornBranchTests(unittest.TestCase):
+    """Ein geklontes LEERES Repo, dessen Remote inzwischen Commits hat.
+
+    HEAD zeigt dort auf einen Branch, den es noch nicht gibt; nach einem Fetch
+    existiert der Tracking-Ref aber sehr wohl. `git rev-list HEAD...<ref>`
+    bricht in dieser Lage mit Exit 128 ab. Bis 2026-09-03 meldete gmf das Repo
+    deshalb als kaputt ("ERROR: git rev-list failed (exit 128)"), statt die
+    einzig richtige Zahl zu zeigen: null voraus, n zurück.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        bare = self.root / "up.git"
+        git(self.root, "init", "-q", "--bare", str(bare))
+        self.repo = self.root / "work"
+        git(self.root, "clone", "-q", str(bare), str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        # Zweiter Klon schiebt die ersten beiden Commits hoch; danach fetcht
+        # der leere Klon nur den Tracking-Ref, sein HEAD bleibt ungeboren.
+        other = self.root / "other"
+        git(self.root, "clone", "-q", str(bare), str(other))
+        git(other, "config", "user.email", "t@example.invalid")
+        git(other, "config", "user.name", "T")
+        self.branch = git_output(other, "symbolic-ref", "--short", "HEAD")
+        git(other, "commit", "-q", "--allow-empty", "-m", "eins")
+        git(other, "commit", "-q", "--allow-empty", "-m", "zwei")
+        git(other, "push", "-q", "origin", f"HEAD:refs/heads/{self.branch}")
+        git(self.repo, "fetch", "-q")
+        shutil.rmtree(other)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_head_is_really_unborn_while_the_tracking_ref_exists(self):
+        self.assertEqual(
+            git_output(self.repo, "symbolic-ref", "--short", "HEAD"), self.branch)
+        self.assertEqual(
+            subprocess.run(["git", "-C", str(self.repo), "rev-parse", "--verify",
+                            "-q", "HEAD"], capture_output=True).returncode, 1)
+        self.assertIn(f"refs/remotes/origin/{self.branch}",
+                      git_output(self.repo, "show-ref"))
+
+    def test_unborn_head_counts_the_remote_commits_as_behind(self):
+        ahead, behind = gmf_module.branch_delta(
+            self.repo, f"refs/remotes/origin/{self.branch}", 10)
+        self.assertEqual((ahead, behind), (0, 2))
+
+    def test_the_repo_is_reported_as_behind_instead_of_broken(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.error, "")
+        self.assertEqual(st.remote_state, "ok")
+        self.assertEqual((st.ahead, st.behind), (0, 2))
+        self.assertFalse(st.clean_and_synced)
+
+    def test_a_real_read_error_still_counts_as_one(self):
+        """Der neue Zweig darf keinen echten Git-Fehler verschlucken.
+
+        Nur ein ungeborener HEAD rechtfertigt die Ersatzzählung. Existiert HEAD,
+        bleibt ein fehlgeschlagenes `rev-list` ein Lesefehler.
+        """
+        failed = subprocess.CompletedProcess(["git", "rev-list"], 128, "", "boom")
+        with mock.patch.object(gmf_module, "run_git", return_value=failed), \
+                mock.patch.object(gmf_module, "repo_has_head", return_value=True):
+            with self.assertRaises(gmf_module.GitReadError) as raised:
+                gmf_module.branch_delta(
+                    self.repo, f"refs/remotes/origin/{self.branch}", 10)
+        self.assertIn("rev-list", str(raised.exception))
 
 
 class BranchAndDiffTests(unittest.TestCase):

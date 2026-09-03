@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.3"
+__version__ = "0.22.4"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -358,6 +358,9 @@ TR = {
         "de": "Commit-Hilfe · {rel} — {n}/{total} gewählt, prüfen, dann ⏎"},
     "do_commit": {"en": "✔ commit", "de": "✔ committen"},
     "do_skip": {"en": "✘ skip", "de": "✘ auslassen"},
+    "do_nothing_vs_head": {
+        "en": "— staged then deleted: nothing to commit",
+        "de": "— gestaget und gelöscht: nichts zu committen"},
     "commit_footer": {
         "en": " ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel",
         "de": (" ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter ·"
@@ -784,13 +787,30 @@ def parse_setting(setting: Setting, raw: str) -> tuple:
     return names, None
 
 
+def app_label(app: dict | None) -> str:
+    """Anzeigename eines `apps`-Eintrags; ein fehlender Name bleibt sichtbar.
+
+    Die App-Tasten trägt man von Hand in die config.json ein (siehe
+    DEFAULT_CONFIG). Ein vergessenes `name` oder `path` ist deshalb ein
+    naheliegender Tippfehler — und er darf die Oberfläche nicht mit einem
+    KeyError beenden. Die Fußzeile schreibt dann `? `, und die Einstellungsseite
+    zeigt denselben Platzhalter.
+    """
+    return (app or {}).get("name") or "?"
+
+
+def app_path(app: dict | None) -> str:
+    """Programmpfad eines `apps`-Eintrags; fehlt er, bleibt der Text leer."""
+    return (app or {}).get("path") or ""
+
+
 def setting_display(cfg: dict, key: str) -> str:
     """Aktueller Wert einer Einstellung als Text für Anzeige und Eingabefeld."""
     value = cfg.get(key)
     if key == "lang":
         return "auto" if value is None else str(value)
     if key == "apps":
-        parts = [f"{k} {(v or {}).get('name', '?')}" for k, v in (value or {}).items()]
+        parts = [f"{k} {app_label(v)}" for k, v in (value or {}).items()]
         return ", ".join(parts) if parts else t("set_value_none")
     if isinstance(value, list):
         return ", ".join(str(item) for item in value) if value else t("set_value_none")
@@ -1374,6 +1394,24 @@ class ChangedFile(NamedTuple):
     # Commit-Wizard darf sie dadurch nur gemeinsam an- oder abwaehlen; das rohe
     # xy allein reicht bei mehreren gleichzeitigen Renames nicht zur Zuordnung.
     rename_group: str = ""
+
+
+def committable_against_head(entry: ChangedFile) -> bool:
+    """Kann die Commit-Hilfe für diesen Eintrag überhaupt etwas committen?
+
+    Sie baut ihren temporären Index aus HEAD und stagt dort genau die
+    freigegebenen Pfade. Beim Porcelain-Status ``AD`` — im echten Index neu
+    hinzugefügt, im Arbeitsbaum wieder gelöscht — gibt es den Pfad weder in HEAD
+    noch im Arbeitsbaum. Gegenüber HEAD ist das gar keine Änderung: Es bliebe
+    nichts zu committen.
+
+    Ohne diese Ausnahme scheiterte der GESAMTE Commit. Die Hilfe startet mit
+    allen Dateien angehakt; ein einziges ``AD`` ließ die Freigabeprüfung in
+    `commit_selected()` anschlagen („temporary index differs from approved
+    paths“), und auch alle übrigen, völlig gewöhnlichen Änderungen blieben
+    liegen (Review-Fund 2026-09-03).
+    """
+    return entry.xy != "AD"
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -3188,6 +3226,34 @@ def endpoint_fingerprints(urls: list[str],
         url.encode("utf-8", "surrogateescape")).hexdigest()[:20] for url in urls]
 
 
+def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
+    """Stand von HEAD gegenüber einem Tracking-Ref: (voraus, zurück).
+
+    Vor dem ersten Commit gibt es kein HEAD-Objekt, gegen das Git zählen könnte;
+    `rev-list HEAD...<ref>` bricht dort mit Exit 128 ab. Genau dieser Zustand
+    entsteht nach dem Klonen eines LEEREN Repos, sobald jemand den ersten Commit
+    pusht und man fetcht: Der Tracking-Ref ist da, der lokale Branch noch
+    ungeboren. Früher meldete gmf das Repo deshalb als kaputt („git rev-list
+    failed (exit 128)“). Richtig ist: null Commits voraus und so viele zurück,
+    wie auf dem Remote liegen.
+
+    Der Sonderfall wird bewusst erst NACH dem fehlgeschlagenen Aufruf geprüft.
+    So kostet der Normalfall — jedes Repo mit Commits — weiterhin genau einen
+    Git-Aufruf.
+    """
+    r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{ref}",
+                timeout=timeout)
+    if r.returncode != 0:
+        if repo_has_head(repo, timeout):
+            raise GitReadError("git rev-list failed (exit %d)" % r.returncode)
+        counted = _required_git(repo, "rev-list", "--count", ref, timeout=timeout)
+        return 0, int(counted.stdout.strip())
+    values = r.stdout.split()
+    if len(values) != 2:
+        raise GitReadError("git rev-list returned malformed output")
+    return int(values[0]), int(values[1])
+
+
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
                             configs: dict[str, RemoteConfig] | None = None,
@@ -3242,12 +3308,8 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                 raise GitReadError("git show-ref failed (exit %d)" % r.returncode)
             state.branch_exists = r.returncode == 0
             if state.branch_exists:
-                r = _required_git(repo, "rev-list", "--left-right", "--count",
-                                  f"HEAD...{ref}", timeout=cfg["git_timeout"])
-                values = r.stdout.split()
-                if len(values) != 2:
-                    raise GitReadError("git rev-list returned malformed output")
-                state.ahead, state.behind = map(int, values)
+                state.ahead, state.behind = branch_delta(
+                    repo, ref, cfg["git_timeout"])
         states.append(state)
     # Sync-Remote zuerst; GitHub unabhängig vom tatsächlichen Namen ganz rechts.
     states.sort(key=lambda r: (r.public, not r.is_sync, r.name.lower()))
@@ -4933,7 +4995,13 @@ def pad_cells(text: str, width: int) -> str:
 
 def set_cursor_visible(visible: bool) -> None:
     """Terminal-Cursor ein- oder ausblenden, ohne auf Terminals ohne
-    Cursor-Steuerung zu stürzen — curses meldet das als `curses.error`."""
+    Cursor-Steuerung zu stürzen — curses meldet das als `curses.error`.
+
+    Die einzige Stelle, die curs_set aufruft. Der Filter (`/`), die
+    Einstellungen (`,`) und der Programmstart taten das früher direkt; auf einem
+    Terminal ohne Cursor-Steuerung beendete schon der erste Tastendruck die
+    Oberfläche mit einem Traceback, weil `_loop()` nur Timeouts abfängt.
+    """
     try:
         curses.curs_set(1 if visible else 0)
     except curses.error:
@@ -5280,7 +5348,7 @@ class TUI:
         safe_addstr(self.scr, h - 4, 1, self.message, curses.color_pair(C_YELLOW))
         # Footer dreizeilig, damit auch in schmalen Fenstern nichts abgeschnitten wird.
         # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
-        app_hints = " · ".join(f"{key.upper()} {app['name']}"
+        app_hints = " · ".join(f"{key.upper()} {app_label(app)}"
                                for key, app in self.cfg["apps"].items())
         footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
         safe_addstr(self.scr, h - 3, 0, t("f1").ljust(w - 1), footer_dim)
@@ -5534,11 +5602,11 @@ class TUI:
         ist reine Anzeige — er verändert nichts am Scan und an keinem Repo.
         """
         h, _ = self.scr.getmaxyx()
-        curses.curs_set(1)
+        set_cursor_visible(True)
         try:
             answer = self.prompt_line(h - 4, t("filter_prompt"), self.filter_query)
         finally:
-            curses.curs_set(0)
+            set_cursor_visible(False)
         if answer is None:          # Esc: bestehenden Filter unangetastet lassen
             return
         self.filter_query = canonical_filter_query(answer)
@@ -5670,14 +5738,14 @@ class TUI:
         """Eine Einstellung abfragen, prüfen, übernehmen. Liefert die Meldung."""
         h, _ = self.scr.getmaxyx()
         prompt = t("set_prompt", name=t(f"set_{setting.key}"))
-        curses.curs_set(1)
+        set_cursor_visible(True)
         try:
             raw = self.prompt_line(h - 2, prompt,
                                    setting_display(self.cfg, setting.key)
                                    if self.cfg.get(setting.key) not in (None, [], {})
                                    else "")
         finally:
-            curses.curs_set(0)
+            set_cursor_visible(False)
         if raw is None:                       # Esc: nichts ändern
             return ""
         value, error = parse_setting(setting, raw)
@@ -5705,22 +5773,26 @@ class TUI:
         app = self.cfg["apps"].get(key)
         if not st or not app:
             return
-        if not Path(app["path"]).exists():
-            self.message = t("app_not_found", p=app["path"])
+        name, path = app_label(app), app_path(app)
+        if not path or not Path(path).exists():
+            # Ein fehlender `path` ist derselbe Fall wie ein falscher: Es gibt
+            # nichts zu starten. Der Platzhalter zeigt, dass in der Config gar
+            # keine Adresse steht.
+            self.message = t("app_not_found", p=path or "?")
             return
         if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
             # Über SSH gibt es keine Fenstersitzung: `open` würde nichts Sichtbares
             # tun. Das ehrlich sagen, statt einen kryptischen macOS-Fehler zu zeigen.
-            self.message = t("app_over_ssh", name=app["name"])
+            self.message = t("app_over_ssh", name=name)
             return
         # `open -a <App> <Ordner>` öffnet den Repo-Ordner in der App. Fehler (z.B.
         # App kann Ordner nicht öffnen) sichtbar machen, statt still zu schlucken.
-        r = subprocess.run(["open", "-a", app["path"], str(st.path)],
+        r = subprocess.run(["open", "-a", path, str(st.path)],
                            capture_output=True, text=True)
         if r.returncode == 0:
-            self.message = t("app_opened", name=app["name"], rel=st.rel)
+            self.message = t("app_opened", name=name, rel=st.rel)
         else:
-            self.message = t("app_open_failed", name=app["name"], e=r.stderr.strip()[:120])
+            self.message = t("app_open_failed", name=name, e=r.stderr.strip()[:120])
 
     def action_cd_and_quit(self) -> bool:
         st = self.current()
@@ -6302,8 +6374,12 @@ class TUI:
         # Alle Pfade starten ausgewaehlt; Space nimmt einzelne Pfade oder ein
         # zusammengehoeriges Rename-Paar aus dem Commit. Die Hilfe veraendert
         # den Arbeitsbaum vor dem Commit nicht (insbesondere keine .gitignore).
+        # Nur Eintraege, fuer die es gegenueber HEAD ueberhaupt etwas zu
+        # committen gibt, sind an- und abwaehlbar (committable_against_head).
         items = [
-            {"code": entry.code, "path": entry.path, "include": True,
+            {"code": entry.code, "path": entry.path,
+             "include": committable_against_head(entry),
+             "committable": committable_against_head(entry),
              "rename_group": entry.rename_group}
             for entry in st.files
         ]
@@ -6324,13 +6400,23 @@ class TUI:
                 off = sel
             if sel >= off + body_h:
                 off = sel - body_h + 1
+            # Die Breite der Pfadspalte richtet sich nach der LÄNGSTEN
+            # Beschriftung. Eine feste Zahl schnitt die längste still ab —
+            # sichtbar wurde das erst, als eine dritte dazukam.
+            # Die 6 Zellen daneben sind fest: der Statuscode, die zwei
+            # Leerzeichen dahinter, das eine vor der Beschriftung und die zwei,
+            # die safe_addstr() an den Rändern frei lässt.
+            label_width = max(cell_width(t(key)) for key in
+                              ("do_commit", "do_skip", "do_nothing_vs_head"))
+            path_width = max(1, w - label_width - 6)
             for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
                 it = items[i]
-                if it["include"]:
+                if not it["committable"]:
+                    label, pair = t("do_nothing_vs_head"), C_DIM
+                elif it["include"]:
                     label, pair = t("do_commit"), C_GREEN
                 else:
                     label, pair = t("do_skip"), C_DIM
-                path_width = max(1, w - 40)
                 safe_addstr(self.scr, y, 1,
                             f"{it['code']}  {pad_cells(it['path'], path_width)} {label}",
                             color_attr(pair, i == sel))
@@ -6351,10 +6437,10 @@ class TUI:
                            if selected["rename_group"]
                            and it["rename_group"] == selected["rename_group"]]
                 for it in related or [selected]:
-                    it["include"] = include
+                    it["include"] = include and it["committable"]
             elif ch in (ord("a"), ord("A")):
                 for it in items:
-                    it["include"] = True
+                    it["include"] = it["committable"]
             elif ch in (ord("n"), ord("N")):
                 for it in items:
                     it["include"] = False
@@ -6385,7 +6471,10 @@ class TUI:
         Liefert die Meldung fuer die Hilfe zurueck, statt `self.message` zu
         setzen: Das Bild der Repo-Liste ist hier nicht sichtbar.
         """
-        groups = commit_groups(st.files)
+        # Nicht committebare Eintraege bleiben aussen vor: Ein Vorschlag, der
+        # sie enthielte, liesse den Commit anschliessend scheitern.
+        groups = commit_groups([f for f in st.files
+                                if committable_against_head(f)])
         if not groups:
             return t("group_none")
         picked = self._choose_commit_group(groups)
@@ -6599,7 +6688,7 @@ class TUI:
             self.action_open_app(key)
 
     def run(self):
-        curses.curs_set(0)
+        set_cursor_visible(False)
         self.reload()
         try:
             self._loop()
