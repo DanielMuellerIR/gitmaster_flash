@@ -3970,10 +3970,16 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
     t_ = cfg["git_timeout"]
     detached = False
     try:
-        # Branch (oder detached HEAD)
-        r = run_git(repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=t_)
+        # Branch (oder detached HEAD). Bewusst der VOLLE Ref und selbst
+        # gekuerzt: `--short` liefert nicht den Branchnamen, sondern den
+        # eindeutigen Kurznamen. Existiert ein gleichnamiger Tag, antwortet Git
+        # `heads/main` statt `main`. Daraus baute gmf `refs/heads/heads/main` —
+        # der Commit scheiterte dauerhaft mit "HEAD changed after UI approval",
+        # der Push mit "inspect failed", und die Liste behauptete "Branch nicht
+        # auf origin" (Review-Fund 2026-09-03).
+        r = run_git(repo, "symbolic-ref", "-q", "HEAD", timeout=t_)
         if r.returncode == 0:
-            st.branch = r.stdout.strip()
+            st.branch = r.stdout.strip().removeprefix("refs/heads/")
         else:
             _required_git(repo, "rev-parse", "--verify", "HEAD", timeout=t_)
             st.branch = "(detached)"

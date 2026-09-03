@@ -3205,6 +3205,89 @@ class CommitWizardSafetyTests(unittest.TestCase):
         self.assertTrue(all(item["include"] for item in other))
 
 
+class TagNamedLikeBranchTests(unittest.TestCase):
+    """Ein Tag, der wie der aktuelle Branch heißt, legte gmf lahm.
+
+    `git symbolic-ref --short HEAD` liefert nicht den Branchnamen, sondern den
+    EINDEUTIGEN Kurznamen. Gibt es einen gleichnamigen Tag, antwortet Git
+    `heads/main`. gmf baute daraus `refs/heads/heads/main`: Der Commit
+    scheiterte dauerhaft mit „HEAD changed after UI approval", der Push mit
+    „inspect failed", und die Repo-Zeile behauptete, der Branch liege nicht auf
+    origin.
+    """
+
+    class Screen:
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
+        def getmaxyx(self): return (30, 120)
+        def erase(self): pass
+        def refresh(self): pass
+        def addstr(self, y, x, text, *_a): self.drawn.append(text)
+        def move(self, *_args): pass
+        def clrtoeol(self): pass
+        def getch(self): return next(self.keys)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        bare = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(bare))
+        self.repo = self.root / "work"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.txt").write_text("a\n")
+        git(self.repo, "add", "a.txt")
+        git(self.repo, "commit", "-qm", "eins")
+        git(self.repo, "remote", "add", "origin", str(bare))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        git(self.repo, "fetch", "-q", "origin")
+        git(self.repo, "tag", "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_git_really_answers_with_the_ambiguous_short_name(self):
+        self.assertEqual(
+            git_output(self.repo, "symbolic-ref", "--short", "-q", "HEAD"),
+            "heads/main")
+
+    def test_the_branch_name_matches_the_real_head_ref(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.branch, "main")
+        self.assertEqual("refs/heads/" + st.branch,
+                         gmf_module.current_symbolic_head_ref(self.repo, 10))
+
+    def test_the_remote_branch_is_found_instead_of_reported_missing(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.remote_state, "ok")
+        self.assertEqual([r.branch_exists for r in st.remotes], [True])
+
+    def test_the_transfer_preflight_reaches_a_real_verdict(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        # Sauberer Baum, kein ausstehender Commit: "nichts zu pushen" ist die
+        # richtige Auskunft. Vorher endete schon der Ref-Vergleich in
+        # "inspect-failed".
+        self.assertEqual(
+            inspect_transfer(self.repo, "origin", st.branch, "push", 10).reason,
+            "nothing-push")
+
+    def test_the_commit_helper_actually_commits(self):
+        (self.repo / "a.txt").write_text("geändert\n")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(self.Screen([10]), self.root, DEFAULT_CONFIG, None)
+        ui.all_statuses = [st]
+        ui.statuses = [st]
+        with mock.patch.object(ui, "prompt_line", return_value="zwei"), \
+                mock.patch.object(ui, "refresh_one", return_value=st), \
+                mock.patch.object(ui, "show_busy"), \
+                mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.flushinp"):
+            ui.action_commit_wizard()
+        self.assertEqual(git_output(self.repo, "log", "-1", "--format=%s"), "zwei")
+
+
 class HookInterferenceTests(unittest.TestCase):
     """`git commit` vererbt GIT_INDEX_FILE an seine Hooks.
 

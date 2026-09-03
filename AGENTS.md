@@ -228,6 +228,14 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Adresse wäre Dekoration. Ein eigener Schlüssel oder Port gehört deshalb in
   `~/.ssh/config`, nicht in einen Wrapper; das Befehlsprotokoll zeigt das
   `env -u …` mit an. Reine Lesebefehle des Scans behalten die Benutzerumgebung.
+- `st.branch` kommt aus dem VOLLEN symbolischen Ref (`git symbolic-ref -q HEAD`,
+  danach `refs/heads/` abgeschnitten), nie aus `--short`. `--short` liefert nicht
+  den Branchnamen, sondern den EINDEUTIGEN Kurznamen: Gibt es einen gleichnamigen
+  Tag, antwortet Git `heads/main`. Daraus baute gmf `refs/heads/heads/main` —
+  der Commit scheiterte dauerhaft mit „HEAD changed after UI approval", der Push
+  mit „inspect failed", und die Repo-Zeile behauptete, der Branch liege nicht auf
+  origin (Review-Fund 2026-09-03). Dasselbe gilt für jeden künftigen Leser, der
+  einen Ref-Namen wieder zusammensetzen will.
 - Ein Repo ohne ersten Commit ist ein gewöhnlicher Zustand, kein Fehler. Nach
   dem Klonen eines LEEREN Repos zeigt HEAD auf einen Branch, den es noch nicht
   gibt; sobald jemand den ersten Commit pusht und man fetcht, existiert der
