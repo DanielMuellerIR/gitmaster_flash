@@ -1220,8 +1220,8 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             git_output(self.repo, "rev-parse", check.remote_ref),
             check.target_oid)
 
-        self.assertTrue(gmf_module.update_tracking_after_push(
-            self.repo, check, 10))
+        self.assertEqual(gmf_module.update_tracking_after_push(
+            self.repo, check, 10), "ok")
 
         self.assertEqual(
             git_output(self.repo, "rev-parse", check.remote_ref),
@@ -1240,7 +1240,7 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
 
         updated = gmf_module.update_tracking_after_push(self.repo, check, 10)
 
-        self.assertTrue(updated)
+        self.assertEqual(updated, "ok")
         self.assertEqual(
             git_output(self.repo, "rev-parse", "refs/heads/victim"),
             check.target_oid)
@@ -1291,8 +1291,8 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
                 check.transfer_url, check.branch, check.head_oid,
                 check.target_oid), timeout=10)
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
-        self.assertTrue(gmf_module.update_tracking_after_push(
-            self.repo, check, 10))
+        self.assertEqual(gmf_module.update_tracking_after_push(
+            self.repo, check, 10), "ok")
         self.assertFalse(marker.exists())
 
     def test_tracking_ref_is_rolled_back_if_remote_config_changes_after_push(self):
@@ -1318,7 +1318,10 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             updated = gmf_module.update_tracking_after_push(self.repo, check, 10)
 
         self.assertTrue(changed)
-        self.assertFalse(updated)
+        # Nicht bloss "nicht ok": Am Tracking-Ref hat sich nichts geaendert,
+        # die geaenderte Remote-Konfiguration ist der Grund. Die Oberflaeche
+        # nannte dafuer lange denselben Satz wie fuer einen fremden Zugriff.
+        self.assertEqual(updated, "changed")
         self.assertEqual(git_output(self.repo, "rev-parse", check.remote_ref),
                          check.target_oid)
 
@@ -1340,7 +1343,33 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
                 side_effect=concurrent_fetch_and_config_change):
             updated = gmf_module.update_tracking_after_push(self.repo, check, 10)
 
-        self.assertFalse(updated)
+        self.assertEqual(updated, "changed")
+
+    def test_a_foreign_tracking_ref_change_is_named_as_such(self):
+        """Gegenprobe: Genau EIN Fall heisst wirklich "parallel geaendert".
+
+        Alle vier Ausgaenge lieferten bis 2026-09-03 ein `False`, und die
+        Oberflaeche nannte dafuer immer den fremden Zugriff als Grund. Hier ist
+        er der richtige — und die Faelle "Konfiguration geaendert" und
+        "Ausgang unklar" sind daneben getestet.
+        """
+        for text in ("2\n", "3\n"):
+            (self.repo / "a.md").write_text(text)
+            git(self.repo, "commit", "-qam", "c" + text.strip())
+        check = inspect_transfer(self.repo, "github", "main", "push")
+        self.assertTrue(check.ready, check.reason)
+        # Ein anderer Prozess setzt den Tracking-Ref auf einen dritten Stand:
+        # weder unser Push-Ziel noch der beim Preflight gesehene Wert.
+        fremd = git_output(self.repo, "rev-parse", "HEAD~1")
+        self.assertNotIn(fremd, (check.head_oid, check.target_oid))
+        git(self.repo, "update-ref", check.remote_ref, fremd)
+
+        self.assertEqual(
+            gmf_module.update_tracking_after_push(self.repo, check, 10),
+            "raced")
+        # Der fremde Stand bleibt unangetastet.
+        self.assertEqual(git_output(self.repo, "rev-parse", check.remote_ref),
+                         fremd)
 
     def test_public_preview_keeps_files_added_then_deleted_in_outgoing_history(self):
         secret = self.repo / "secret.env"
@@ -5948,7 +5977,7 @@ class RemoteAndCommandLogTests(unittest.TestCase):
                 mock.patch.object(gmf_module, "run_git_logged",
                                   return_value=pushed) as run, \
                 mock.patch.object(gmf_module, "update_tracking_after_push",
-                                  return_value=True), \
+                                  return_value="ok"), \
                 mock.patch.object(ui, "refresh_one", return_value=st):
             ui.action_github_push()
 
@@ -6060,7 +6089,9 @@ class RemoteAndCommandLogTests(unittest.TestCase):
                 mock.patch.object(ui, "refresh_one", return_value=st):
             ui.action_sync_push()
 
-        self.assertEqual(ui.message, gmf_module.t("push_tracking_changed"))
+        # Der Ausgang der eigenen Ref-CAS ist nach dem Timeout nicht belegt —
+        # "der Ref aenderte sich parallel" waere eine andere Aussage.
+        self.assertEqual(ui.message, gmf_module.t("push_tracking_unknown"))
 
     def test_repo_line_with_error_still_shows_branch_and_remotes(self):
         """Der Fehlertext darf Branch und Remote-Badges nicht verdrängen —

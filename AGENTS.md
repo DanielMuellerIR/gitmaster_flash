@@ -190,6 +190,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
     Nicht-Aqua-Sitzung reicht nicht. Ein abgelehnter SSH-Schlüssel
     („permission denied (publickey)“) bleibt `auth`, denn dort ist gar kein
     Schlüsselbund im Spiel.
+- Nach einem belegt gelungenen Push nennt die Meldung, was am Tracking-Ref
+  wirklich offen blieb. `update_tracking_after_push()` liefert dafür den Grund
+  statt ja/nein: `ok`, `changed` (Remote-Konfiguration geändert, am Ref hat sich
+  nichts getan), `raced` (ein anderer Prozess hat den Ref bewegt) oder `unknown`
+  (Ausgang der eigenen Ref-CAS nicht belegt). Vorher waren alle vier Fälle ein
+  `False`, und die Oberfläche nannte immer denselben Grund — in drei von vier
+  Fällen falsch (Review-Fund 2026-09-03). Der Rückgabewert ist bewusst eine
+  Zeichenkette: Ein Aufrufer, der ihn wie einen Wahrheitswert liest, bekäme für
+  jeden Fall „wahr“.
 - Ein gescheiterter Fetch ist **kein** Unterschied zwischen zwei Rechnern. Er
   beschreibt die Sitzung, die gemessen hat. `diff_status()` blendet deshalb
   `error` und `remote_state` aus, sobald eine Seite `fetch_error` meldet, und

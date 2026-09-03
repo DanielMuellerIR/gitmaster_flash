@@ -438,6 +438,12 @@ TR = {
     "push_tracking_changed": {
         "en": "Push succeeded, but the local tracking ref changed concurrently; reload before another push.",
         "de": "Push erfolgreich, aber der lokale Tracking-Ref änderte sich parallel; vor einem weiteren Push neu laden."},
+    "push_config_changed": {
+        "en": "Push succeeded, but the remote configuration changed meanwhile; the tracking ref was left as it was — reload before another push.",
+        "de": "Push erfolgreich, aber die Remote-Konfiguration änderte sich inzwischen; der Tracking-Ref blieb, wie er war — vor einem weiteren Push neu laden."},
+    "push_tracking_unknown": {
+        "en": "Push succeeded, but whether the local tracking ref was updated is unknown; reload before another push.",
+        "de": "Push erfolgreich, aber ob der lokale Tracking-Ref nachgezogen wurde, ist unklar; vor einem weiteren Push neu laden."},
     "nothing_to_commit": {"en": "Nothing to commit in this repo.",
                           "de": "Nichts zu committen in diesem Repo."},
     # Sichere Push-Hilfe
@@ -3944,13 +3950,27 @@ def safe_push_args(destination: str, branch: str, source_oid: str,
 
 
 def update_tracking_after_push(repo: Path, check: TransferCheck,
-                               timeout: int) -> bool:
+                               timeout: int) -> str:
     """Den geprüften Tracking-Ref nach belegtem Push-Erfolg per OID-CAS nachziehen.
 
     Der Remote-Name ist veränderliche Konfiguration. Vor und nach der Mutation
     muss deshalb exakt derselbe URL-/Refspec-Snapshot gelten wie beim Push.
     Ändert er sich im Fenster, wird unsere eigene CAS-Aktualisierung ebenfalls
     per CAS zurückgenommen; ein paralleler Fetch wird dabei nie überschrieben.
+
+    Liefert den Grund, nicht bloß ja/nein — der Push ist zu diesem Zeitpunkt
+    belegt gelungen, und die Meldung danach muss sagen, was WIRKLICH offen ist:
+
+      "ok"       der Tracking-Ref steht auf dem gepushten Stand
+      "changed"  die Remote-Konfiguration änderte sich; unsere Aktualisierung
+                 fand nicht statt oder wurde per CAS zurückgenommen. Am
+                 Tracking-Ref selbst hat sich dadurch nichts geändert.
+      "raced"    ein anderer Prozess hat den Tracking-Ref bewegt
+      "unknown"  der Ausgang der eigenen Aktualisierung ist nicht belegt
+
+    Bis 2026-09-03 waren alle vier Fälle ein `False`, und die Oberfläche nannte
+    dafür immer denselben Grund („der lokale Tracking-Ref änderte sich
+    parallel“) — in drei von vier Fällen falsch.
     """
     def config_matches() -> bool:
         remote = read_remote_config_or_none(
@@ -3964,35 +3984,37 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
                 and fetch_maps_branch_exactly(remote, check.branch))
 
     if not config_matches():
-        return False
+        return "changed"
     try:
         updated = run_git_logged(
             repo, *safe_update_ref_args(
                 "--no-deref", check.remote_ref,
                 check.head_oid, check.target_oid), timeout=timeout)
     except (subprocess.TimeoutExpired, OSError):
-        return False
+        # Die Ref-CAS kann trotz Timeout oder Startfehler schon gewirkt haben.
+        return "unknown"
     if updated.returncode == 0:
         if config_matches():
-            return True
+            return "ok"
         try:
             run_git_logged(
                 repo, *safe_update_ref_args(
                     "--no-deref", check.remote_ref,
                     check.target_oid, check.head_oid), timeout=timeout)
         except (subprocess.TimeoutExpired, OSError):
-            pass
-        return False
+            return "unknown"
+        return "changed"
     # Ein paralleler Fetch kann denselben Zielstand schon eingetragen haben.
     try:
         current = run_git(
             repo, "rev-parse", "--verify", check.remote_ref, timeout=timeout,
             env=RAW_OBJECT_ENV)
     except (subprocess.TimeoutExpired, OSError):
-        return False
-    return (current.returncode == 0
-            and current.stdout.strip() == check.head_oid
-            and config_matches())
+        return "unknown"
+    if (current.returncode == 0
+            and current.stdout.strip() == check.head_oid):
+        return "ok" if config_matches() else "changed"
+    return "raced"
 
 
 def upstream_delta(repo: Path, sync_remote: str | None,
@@ -6251,11 +6273,17 @@ class TUI:
             # Reihenfolge: erst das Tracking nachziehen, dann neu einlesen.
             # Andersherum zeigte die Liste noch den Stand von VOR der
             # Aktualisierung, also weiterhin ausstehende Commits.
-            tracking_ok = update_tracking_after_push(
+            tracking = update_tracking_after_push(
                 newest.path, final, self.cfg["git_timeout"])
             self.refresh_one(newest)
-            self.message = (t(pushed_key, r=remote.name) if tracking_ok
-                            else t("push_tracking_changed"))
+            # Der Push ist hier belegt gelungen. Die Meldung darf deshalb nur
+            # noch benennen, was am Tracking-Ref offen blieb — und zwar den
+            # richtigen Grund.
+            self.message = {
+                "ok": lambda: t(pushed_key, r=remote.name),
+                "changed": lambda: t("push_config_changed"),
+                "unknown": lambda: t("push_tracking_unknown"),
+            }.get(tracking, lambda: t("push_tracking_changed"))()
             return
         self.refresh_one(newest)
         if credentials_missing(
