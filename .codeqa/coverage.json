@@ -2,12 +2,12 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260903T095958732950+0200",
-    "token_budget": 1000000,
+    "id": "20260903T154930666327+0200",
+    "token_budget": 3467953,
     "status": "complete",
-    "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 173395,
-    "finished_at": "2026-09-03T11:32:37+02:00",
+    "started_at": "2026-09-03T15:49:30+02:00",
+    "tokens_spent": 532047,
+    "finished_at": "2026-09-03T15:50:16+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -54,6 +54,15 @@
       "started_at": "2026-08-30T10:03:09+02:00",
       "finished_at": "2026-08-30T10:04:49+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260903T095958732950+0200",
+      "token_budget": 1000000,
+      "status": "complete",
+      "started_at": "2026-09-03T09:59:58+02:00",
+      "tokens_spent": 173395,
+      "finished_at": "2026-09-03T11:32:37+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -82,17 +91,16 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T11:28:09+02:00",
-        "observed_head": "3f9ed77ef7f12978d7add04e29f5c28d6db5b162",
-        "content_sha256": "5a6e8722af29570e31390e40aa1e61b29514f1ade7207f9805cf33038d588d9c",
+        "campaign_id": "20260903T154930666327+0200",
+        "completed_at": "2026-09-03T15:49:48+02:00",
+        "observed_head": "c10c02bcaca1cb6cd2b8fc9230c45a6728243669",
+        "content_sha256": "c8eae76d2db0cd4e2419577d20ef158951a4fb06fe4a2b09e1d7cf55acab41dd",
         "file_count": 2,
-        "review": "delta-plus-boundaries",
+        "review": "full",
         "outcome": "improved",
-        "summary": "Datei-Zeile beider Ansichten (aufgeklappte Repo-Liste und Aenderungsansicht) an einer Stelle: file_row() liefert Text und Farbpaar, FILE_CODE_COLORS ist die einzige Zuordnung, ein unbekannter Code daempft statt zu werfen. Delta seit dem letzten Abschluss ist genau dieser Diff.",
+        "summary": "Vollstaendiger Korrektheits-Review des Kerns (kein Delta): gitmaster_flash.py komplett gelesen, Testsuite gelesen und per Mutationsproben geprueft. Neun behobene Fehler, alle an temporaeren Git-Repos nachgestellt: detached HEAD als unsichere Refspec gemeldet; Remote-Host 'local' als lokaler Ordner behandelt (Fetch/Push landeten im Verzeichnis dieses Rechners); Branchname aus 'symbolic-ref --short' bei gleichnamigem Tag ('heads/main'), wodurch Commit und Push dauerhaft scheiterten; Freigabepruefung des Commits verlangte Gleichheit statt Teilmenge, wodurch 'git rm --cached', ein schmutziges Submodul oder ein RD-Rename den ganzen Commit mitrissen; Replace-Refs verschoben die angezeigten ahead/behind-Zahlen gegen den Push-Preflight; Auswahlindex ohne untere Schranke (-1 = letztes Repo); geerbtes GIT_PROXY_COMMAND umging die URL-Bindung; Standardport schreibungsabhaengig; doppelte Pfadzeile der Commit-Hilfe mit wirkungslosem Haekchen; update_tracking_after_push nannte fuer vier Ausgaenge denselben Grund; krumme config.json endete mit Traceback statt Rueckfallebene. Dazu sieben Zusicherungen nachgezogen, die eine Mutation ueberlebten. Der Verbrauch dieser Buchung deckt den gesamten Review inklusive Doku- und Regelpflege.",
         "tests": [
-          "python3 -m unittest discover -s tests: 542 passed (4 neu)",
-          "python3 docs/make-screens.py --check: passed"
+          "python3 -m unittest discover -s tests: 595 Tests gruen (vor dem Review 542); zsh -n install.sh; python3 docs/make-screens.py --check"
         ]
       }
     },
@@ -158,17 +166,16 @@
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T10:51:55+02:00",
-        "observed_head": "baa04995f10b71250184342e40e7208ce2d179a2",
-        "content_sha256": "f0a85e7e14942089bc873f1ecada723cce8b9ab0e3a81932be19ade5f61e386f",
+        "campaign_id": "20260903T154930666327+0200",
+        "completed_at": "2026-09-03T15:50:09+02:00",
+        "observed_head": "c10c02bcaca1cb6cd2b8fc9230c45a6728243669",
+        "content_sha256": "7ae5c8c39c44e19caf56af115f05500741f27c06e7f9cc5ff4ebe497d238b4ca",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Der abgedruckte Block der Commit-Hilfe zeigte die alte Spaltenbreite und kannte den neuen dritten Zustand nicht; beide READMEs zeigen jetzt die echte Ausgabe und erklaeren den Fall. Neu gebunden: DocumentationContractTests baut den Block wie schon die Kopfzeile nach und verlangt jede gezeichnete Zeile woertlich. Delta (Rueckfrage-Balken 0.22.3, Versionszeile) und die uebrigen Vertragspruefungen mitgeprueft.",
+        "summary": "Beide READMEs an die Korrekturen des Kern-Reviews nachgezogen: Versionszeile 0.22.5 in der abgedruckten Kopfzeile, und der Abschnitt zur Commit-Hilfe nennt jetzt beide gesperrten Eintragsarten (gestaget-und-geloescht sowie ein fremdes Git-Repo als Ordner-Eintrag) plus die neue Teilmengen-Regel: Ein freigegebener Pfad, der gegenueber HEAD nichts beitraegt, laesst den Commit nicht mehr scheitern. Der abgedruckte Textblock wurde aus dem Code neu erzeugt, nicht abgeschrieben.",
         "tests": [
-          "python3 -m unittest discover -s tests: 534 passed (1 neu)",
-          "Gegenprobe: um zwei Spalten verschobene README-Zeile laesst den neuen Test rot werden"
+          "DocumentationContractTests (7 Tests) baut Kopfzeile und Commit-Hilfe-Block aus dem Code nach und prueft sie Zeile fuer Zeile gegen beide READMEs; volle Suite 595 gruen"
         ]
       }
     },
@@ -182,16 +189,16 @@
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T11:32:29+02:00",
-        "observed_head": "cc0936b48de2cb1aa6be9ca7726c2c364fe640fc",
-        "content_sha256": "95c4a73eceb1e995f16d18ee595602d886e196def5147ba09d86578fdf999d9e",
+        "campaign_id": "20260903T154930666327+0200",
+        "completed_at": "2026-09-03T15:50:09+02:00",
+        "observed_head": "c10c02bcaca1cb6cd2b8fc9230c45a6728243669",
+        "content_sha256": "d170441ee2abf91e404e0606477775e4c95a1a5356768a5a8d3ca3d0e10fc7bd",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Die drei Einzelstellen der Kampagne (scroll_window, file_row/FILE_CODE_COLORS, importierte cell_width) als Regel festgehalten, damit die zweite Fassung nicht beim naechsten Mal wieder entsteht.",
+        "summary": "Sieben neue Regeln aus dem Kern-Review festgehalten: detached HEAD faellt aus dem Fetch statt als unsichere Refspec zu gelten; Pfad-Remotes tragen keinen Host (RemoteTarget.is_local), weil 'local' ein gueltiger Hostname ist; st.branch kommt aus dem vollen symbolischen Ref; Anzeigezaehler lesen mit NO_REPLACE_ENV, aber nicht mit dem ganzen RAW_OBJECT_ENV (flacher Klon); Freigabepruefung des Commits ist eine Teilmenge, und ein Ordner-Eintrag ist gesperrt; update_tracking_after_push liefert den Grund statt ja/nein; load_config prueft die Form, nie den Wert. Dazu GIT_PROXY_COMMAND in der TRANSPORT_GIT_ENV-Regel und ein neuer offener Punkt: core.gitProxy und http.proxy aus der REPO-Config umgehen die URL-Bindung, mit Beleg und zwei Loesungsvorschlaegen zur Entscheidung.",
         "tests": [
-          "python3 -m unittest discover -s tests: 542 passed"
+          "keine ausfuehrbaren Tests fuer Prosa; die benannten Regeln sind jeweils durch einen Test im Kern belegt (DetachedHeadFetchTests, HostNamedLocalTests, TagNamedLikeBranchTests, ReplaceRefCountingTests, ApprovedPathsWithoutContributionTests, LoadConfigShapeTests)"
         ]
       }
     }
