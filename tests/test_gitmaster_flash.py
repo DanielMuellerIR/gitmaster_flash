@@ -6471,14 +6471,18 @@ class DisplayNameNormalisationTests(unittest.TestCase):
 
 
 class RepoTransportOverrideTests(unittest.TestCase):
-    """`core.gitProxy` aus der Config DES REPOS sperrt die Übertragung.
+    """Transporteinstellungen aus der Config DES REPOS sperren die Übertragung.
 
-    Der Schlüssel bestimmt für `git://`, WELCHES Programm die Verbindung
-    aufbaut — dieselbe Frage wie `core.sshCommand`. Anders als dort lässt er
-    sich nicht per `-c` neutralisieren: `core.gitproxy` ist MEHRWERTIG, ein
-    zusätzlicher Wert stellt sich nur daneben, und das Skript des Repos lief
-    trotzdem. Deshalb wird abgelehnt statt gegengesteuert. Global gesetzt
-    bleibt er erlaubt: Dort hat ihn der Mensch selbst hingeschrieben.
+    `core.gitProxy` (für `git://`), `http.proxy` samt seiner adressgebundenen
+    Form und ein `http.sslVerify = false` entscheiden, wohin eine Übertragung
+    wirklich geht beziehungsweise ob die geprüfte Adresse überhaupt
+    nachgewiesen wird — dieselbe Frage wie bei `core.sshCommand`. Anders als
+    dort lässt sich keine davon für einen einzelnen Aufruf ausschalten:
+    `core.gitproxy` ist MEHRWERTIG (ein zusätzlicher Wert stellt sich nur
+    daneben, das Skript des Repos lief trotzdem), und ein erzwungenes leeres
+    `http.proxy` schaltete auch den echten Firmen-Proxy aus der globalen Config
+    ab. Deshalb wird abgelehnt statt gegengesteuert. Global gesetzt bleibt
+    alles erlaubt: Dort hat der Mensch es selbst hingeschrieben.
     """
 
     def setUp(self):
@@ -6527,6 +6531,10 @@ class RepoTransportOverrideTests(unittest.TestCase):
                 inspect_transfer(self.repo, "origin", "main", "push", 10).reason,
                 check_remote(self.repo, "origin", 10)[0])
 
+    def _append(self, text: str) -> None:
+        with (self.repo / ".git" / "config").open("a") as handle:
+            handle.write(text)
+
     def test_an_untouched_repository_transfers_normally(self):
         self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
 
@@ -6534,17 +6542,53 @@ class RepoTransportOverrideTests(unittest.TestCase):
         git(self.repo, "config", "core.gitProxy", str(self.proxy))
         self.assertEqual(
             self._reasons(),
-            ("core.gitProxy", "unsafe_transport", "unsafe-transport",
-             "unsafe_transport"))
+            ("core.gitProxy", ("unsafe_transport", "core.gitProxy"),
+             "unsafe-transport", "unsafe_transport"))
 
-    def test_the_same_value_from_the_global_config_stays_allowed(self):
-        """Gegenprobe: Global hat der Mensch ihn selbst hingeschrieben.
+    def test_an_http_proxy_in_the_repo_config_blocks_too(self):
+        self._append("[http]\n\tproxy = http://127.0.0.1:9\n")
+        self.assertEqual(
+            self._reasons(),
+            ("http.proxy", ("unsafe_transport", "http.proxy"),
+             "unsafe-transport", "unsafe_transport"))
+
+    def test_the_address_bound_form_of_http_proxy_is_no_back_door(self):
+        """`http.<url>.proxy` tut dasselbe, nur für eine bestimmte Adresse."""
+        self._append('[http "https://example.com/"]\n\tproxy = http://127.0.0.1:9\n')
+        self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                         "http.proxy")
+
+    def test_sslverify_false_in_the_repo_config_blocks(self):
+        """Ohne Nachweis der Gegenstelle ist die geprüfte Adresse austauschbar."""
+        self._append("[http]\n\tsslVerify = false\n")
+        self.assertEqual(
+            self._reasons(),
+            ("http.sslVerify=false", ("unsafe_transport", "http.sslVerify=false"),
+             "unsafe-transport", "unsafe_transport"))
+
+    def test_sslverify_true_is_the_normal_case_and_never_blocks(self):
+        """Gegenprobe: Hier ist nur der Wert `false` ein Grund, nicht der Schlüssel."""
+        self._append("[http]\n\tsslVerify = true\n")
+        self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
+        # Auch die adressgebundene Form mit `true` bleibt erlaubt.
+        self._append('[http "https://example.com/"]\n\tsslVerify = true\n')
+        self.assertIsNone(gmf_module.repo_transport_override(self.repo, 10))
+
+    def test_an_unparsable_boolean_counts_as_not_provable(self):
+        self._append("[http]\n\tsslVerify = vielleicht\n")
+        self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                         "http.sslVerify=false")
+
+    def test_the_same_settings_from_the_global_config_stay_allowed(self):
+        """Gegenprobe: Global hat der Mensch sie selbst hingeschrieben.
 
         Ohne diese Grenze wäre die Regel keine Aussage über das Repo, sondern
-        ein Verbot des Schlüssels — und jeder Rechner hinter einem echten Proxy
-        könnte nichts mehr übertragen.
+        ein Verbot der Einstellungen — und jeder Rechner hinter einem echten
+        Firmen-Proxy könnte nichts mehr übertragen.
         """
-        self.global_config.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
+        self.global_config.write_text(
+            f"[core]\n\tgitProxy = {self.proxy}\n"
+            "[http]\n\tproxy = http://firmenproxy:3128\n\tsslVerify = false\n")
         self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
 
     def test_a_value_reached_through_an_include_is_caught_too(self):
@@ -6555,18 +6599,23 @@ class RepoTransportOverrideTests(unittest.TestCase):
         einzubinden, traf die Repo-Config.
         """
         self.included.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
-        with (self.repo / ".git" / "config").open("a") as handle:
-            handle.write(f"[include]\n\tpath = {self.included}\n")
+        self._append(f"[include]\n\tpath = {self.included}\n")
         self.assertEqual(
             self._reasons(),
-            ("core.gitProxy", "unsafe_transport", "unsafe-transport",
-             "unsafe_transport"))
+            ("core.gitProxy", ("unsafe_transport", "core.gitProxy"),
+             "unsafe-transport", "unsafe_transport"))
 
     def test_a_global_value_plus_a_repo_value_is_still_blocked(self):
-        self.global_config.write_text(f"[core]\n\tgitProxy = {self.proxy}\n")
+        self.global_config.write_text(
+            f"[core]\n\tgitProxy = {self.proxy}\n"
+            "[http]\n\tproxy = http://firmenproxy:3128\n")
         git(self.repo, "config", "core.gitProxy", str(self.proxy))
         self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
                          "core.gitProxy")
+        git(self.repo, "config", "--unset-all", "core.gitProxy")
+        self._append("[http]\n\tproxy = http://127.0.0.1:9\n")
+        self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                         "http.proxy")
 
     def test_the_scan_says_so_and_never_starts_the_proxy(self):
         git(self.repo, "remote", "set-url", "origin", "git://127.0.0.1/repo.git")
@@ -6583,17 +6632,19 @@ class RepoTransportOverrideTests(unittest.TestCase):
         self.assertFalse(self.marker.exists(),
                          "das Proxy-Skript des Repos entschied über das Ziel")
 
-    def test_the_message_names_the_key_and_the_way_out_in_both_languages(self):
+    def test_the_message_names_the_one_setting_in_both_languages(self):
+        """Nicht alle drei aufzaehlen: Gesetzt ist genau eine davon."""
         for lang in ("en", "de"):
-            with self.subTest(lang=lang):
-                with mock.patch.object(gmf_module, "UI_LANG", lang):
-                    message = remote_check_message(
-                        "origin", "unsafe_transport", 0, "", 30)
-                self.assertIn("core.gitProxy", message)
-                self.assertIn("origin", message)
-                self.assertNotEqual(
-                    message,
-                    remote_check_message("origin", "unsafe_url", 0, "", 30))
+            for setting in ("core.gitProxy", "http.proxy", "http.sslVerify=false"):
+                with self.subTest(lang=lang, setting=setting):
+                    with mock.patch.object(gmf_module, "UI_LANG", lang):
+                        message = remote_check_message(
+                            "origin", "unsafe_transport", 0, setting, 30)
+                    self.assertIn(setting, message)
+                    self.assertIn("origin", message)
+                    for other in ("core.gitProxy", "http.proxy"):
+                        if other not in setting:
+                            self.assertNotIn(other, message)
 
     def test_an_unreadable_config_counts_as_not_provable(self):
         """Fail closed: Ohne lesbare Config lässt sich nichts belegen."""
@@ -6601,6 +6652,24 @@ class RepoTransportOverrideTests(unittest.TestCase):
         with mock.patch.object(gmf_module, "run_git", return_value=broken):
             self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
                              "core.gitProxy")
+
+    def test_a_proxy_value_never_leaves_the_check(self):
+        """Eine Proxy-Adresse kann Zugangsdaten tragen.
+
+        Sie darf deshalb weder in einer Meldung noch im Befehlsprotokoll
+        landen. Der Vergleich sieht bei den Proxy-Einträgen nur die
+        Schlüsselnamen an; nur die Wahrheitswerte von `sslVerify` liest er,
+        und die normalisiert Git vorher auf `true`/`false`.
+        """
+        geheim = "http://benutzer:s3cr3t@proxy.example:3128"
+        self._append(f"[http]\n\tproxy = {geheim}\n")
+        gmf_module.COMMAND_LOG.clear()
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        spuren = "\n".join([st.error, st.error_long, st.error_detail,
+                            *gmf_module.COMMAND_LOG,
+                            json.dumps(gmf_module.status_dict(st))])
+        self.assertNotIn("s3cr3t", spuren)
+        self.assertNotIn("proxy.example", spuren)
 
 
 class DetachedHeadFetchTests(unittest.TestCase):
@@ -6648,10 +6717,10 @@ class DetachedHeadFetchTests(unittest.TestCase):
         self.assertTrue(gmf_module.fetch_refspecs_safe(remote))
         self.assertEqual(
             gmf_module.fetch_remote_block_reason(
-                self.repo, remote, "(detached)", 10), "detached")
+                self.repo, remote, "(detached)", 10), ("detached", ""))
         self.assertEqual(
             gmf_module.fetch_remote_block_reason(
-                self.repo, remote, "?", 10), "detached")
+                self.repo, remote, "?", 10), ("detached", ""))
 
     def test_message_for_the_detached_case_does_not_accuse_the_refspec(self):
         message = remote_check_message("origin", "detached", 0, "", 30)
@@ -6677,7 +6746,7 @@ class DetachedHeadFetchTests(unittest.TestCase):
         remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
         self.assertEqual(
             gmf_module.fetch_remote_block_reason(
-                self.repo, remote, "main", 10), "unsafe_refspec")
+                self.repo, remote, "main", 10), ("unsafe_refspec", ""))
         git(self.repo, "checkout", "-q", "main")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
         self.assertTrue(st.fetch_error)
@@ -7241,7 +7310,7 @@ class TransferMessageTests(unittest.TestCase):
         for reason in self.REASONS:
             with self.subTest(reason=reason):
                 check = gmf_module.TransferCheck(reason, ahead=2, behind=3)
-                message = ui._transfer_message(check, "origin", "main")
+                message = ui._transfer_message(check, "origin", "main", Path("/tmp"))
                 self.assertNotEqual(message, reason)
                 self.assertTrue(message.strip())
 

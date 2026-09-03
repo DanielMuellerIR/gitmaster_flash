@@ -231,7 +231,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.6 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.7 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -644,12 +644,15 @@ außerdem Repo-Hooks abgeschaltet, damit ein pre-push-Hook keine ungeprüften Ta
 oder weiteren Refs veröffentlicht. Die Übertragung verwendet die
 exakt geprüfte URL statt eines Remote-Namens, den eine parallele Konfigurationsänderung
 umleiten könnte. Der Weg zu dieser Adresse gehört dazu: Für diesen einen Aufruf
-bleibt ein SSH-Wrapper aus der Umgebung oder der Repo-Config außen vor, und ein
-`core.gitProxy` in der Config des Repos sperrt die Übertragung ganz — er
-entscheidet, wohin eine `git://`-Verbindung wirklich geht, und lässt sich als
-mehrwertiger Schlüssel für einen einzelnen Aufruf nicht überschreiben. In der
-globalen Git-Config bleibt er erlaubt: Dort hat man ihn selbst hingeschrieben,
-und ein Repo kann ihn nicht einschleusen. Die Fetch-Refspec muss
+bleibt ein SSH-Wrapper aus der Umgebung oder der Repo-Config außen vor, und drei
+Einstellungen in der *eigenen* Config des Repos sperren die Übertragung ganz —
+`core.gitProxy`, `http.proxy` (samt seiner adressgebundenen Form) und
+`http.sslVerify = false`. Jede davon kann eine Übertragung woanders landen
+lassen als bei der geprüften Adresse, und keine lässt sich für einen einzelnen
+Aufruf abschalten: Die erste ist ein mehrwertiger Schlüssel, und die zweite leer
+zu erzwingen schaltete auch einen echten Firmen-Proxy ab. In der globalen
+Git-Config bleiben alle drei erlaubt: Dort hat man sie selbst hingeschrieben,
+und ein Repo kann sie nicht einschleusen. Die Fetch-Refspec muss
 `refs/heads/<Branch>` auf den passenden Tracking-Ref dieses Remotes abbilden.
 
 Pull bleibt eine Terminal-Aktion. Branch, Index und Arbeitsbaum lassen sich

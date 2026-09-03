@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.6"
+__version__ = "0.22.7"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -474,11 +474,12 @@ TR = {
     "transfer_dirty": {"en": "Working tree is not clean — commit, ignore, or stash first.",
                        "de": "Arbeitsbaum ist nicht sauber — erst committen, ignorieren oder stashen."},
     "transfer_unsafe_transport": {
-        "en": ("Transfer blocked: this repository's own config sets {k}, and that "
-               "decides where the push really goes. Move it to your global Git config."),
-        "de": ("Übertragung gesperrt: Die Config dieses Repos setzt {k}, und das "
-               "entscheidet, wohin der Push wirklich geht. Gehört in die globale "
-               "Git-Config.")},
+        "en": ("Transfer blocked: this repository's own config sets {k}. That can "
+               "send the push somewhere other than the checked address; move it to "
+               "your global Git config."),
+        "de": ("Übertragung gesperrt: Die Config dieses Repos setzt {k}. Damit kann "
+               "der Push woanders landen als bei der geprüften Adresse; gehört in "
+               "die globale Git-Config.")},
     "transfer_detached": {"en": "Detached HEAD — use the terminal for this special case.",
                           "de": "Detached HEAD — diesen Sonderfall im Terminal bearbeiten."},
     "transfer_missing": {"en": "Branch '{b}' does not exist on {r}; creating remote branches is blocked here.",
@@ -629,12 +630,12 @@ TR = {
     "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
                       "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
     "check_unsafe_transport": {
-        "en": ("{r}: transfer blocked — this repository's own config sets {k}, and "
-               "that decides where the connection really goes. Move it to your "
-               "global Git config."),
-        "de": ("{r}: Übertragung gesperrt — die Config dieses Repos setzt {k}, und "
-               "das entscheidet, wohin die Verbindung wirklich geht. Gehört in die "
-               "globale Git-Config.")},
+        "en": ("{r}: transfer blocked — this repository's own config sets {k}. That "
+               "can send the transfer somewhere other than the checked address; "
+               "move it to your global Git config."),
+        "de": ("{r}: Übertragung gesperrt — die Config dieses Repos setzt {k}. Damit "
+               "kann die Übertragung woanders landen als bei der geprüften Adresse; "
+               "gehört in die globale Git-Config.")},
     "check_detached": {
         "en": "{r}: no branch is checked out (detached HEAD) — there is nothing to fetch for it.",
         "de": "{r}: kein Branch ausgecheckt (detached HEAD) — dafür gibt es nichts zu holen."},
@@ -661,8 +662,8 @@ TR = {
     "short_server": {"en": "server error", "de": "Serverfehler"},
     "short_timeout": {"en": "no answer", "de": "keine Antwort"},
     "short_unsafe_refspec": {"en": "unsafe fetch refspec", "de": "unsichere Fetch-Refspec"},
-    "short_unsafe_transport": {"en": "repo config redirects the transport",
-                               "de": "Repo-Config lenkt den Weg um"},
+    "short_unsafe_transport": {"en": "repo config controls the transport",
+                               "de": "Repo-Config bestimmt den Weg"},
     "short_unsafe_url": {"en": "unsafe remote address", "de": "unsichere Remote-Adresse"},
     "short_changed": {"en": "remote changed", "de": "Remote geändert"},
     "short_outcome_unknown": {"en": "fetch outcome unknown",
@@ -1315,69 +1316,120 @@ def approved_fetch_args(remote: RemoteConfig, branch: str,
     )
 
 
-# Diese Konfigurationsschlüssel bestimmen, WELCHES Programm die Verbindung
-# aufbaut — dieselbe Frage wie `core.sshCommand`, nur für das git://-Protokoll.
-# Anders als dort lässt sich der Wert nicht per `-c` neutralisieren:
-# `core.gitproxy` ist MEHRWERTIG, ein zusätzlicher Wert stellt sich nur daneben.
-# Belegt am 2026-09-03 an einem gepinnten Fetch — das Skript des Repos lief
-# trotzdem und bekam Host und Port übergeben. Setzt die Config DES REPOS ihn,
-# wird die Übertragung deshalb abgelehnt, statt eine wirkungslose Gegenmaßnahme
-# vorzutäuschen. Global oder systemweit gesetzt bleibt er erlaubt: Dort hat ihn
-# der Mensch selbst hingeschrieben, und die Repo-Config kann ihn nicht
-# einschleusen.
-TRANSPORT_CONFIG_KEYS = ("core.gitProxy",)
+# Diese Konfigurationseinstellungen entscheiden, WOHIN eine Übertragung
+# tatsächlich geht — dieselbe Frage wie `core.sshCommand`, nur über andere
+# Wege. Anders als dort lässt sich keine davon für einen einzelnen Aufruf
+# ausschalten:
+#
+#   core.gitProxy   nennt für `git://` ein Hilfsprogramm, das die Verbindung
+#                   aufbaut. Es bekommt Host und Port als Argumente, muss sich
+#                   aber nicht daran halten. Der Schlüssel ist MEHRWERTIG: ein
+#                   `-c core.gitProxy=none` stellt sich nur daneben, und das
+#                   Skript des Repos lief trotzdem (belegt 2026-09-03).
+#   http.proxy      lenkt HTTP(S) auf einen anderen Endpunkt. Ein leerer Wert
+#                   für den Aufruf würde auch einen echten Firmen-Proxy aus der
+#                   globalen Config abschalten — die GIT_CONFIG_*-Werte schlagen
+#                   sie mit. Auch die adressgebundene Form `http.<url>.proxy`
+#                   zählt, sonst wäre sie das offene Hintertürchen.
+#   http.sslVerify  auf `false` macht die geprüfte Adresse gegen einen Mitleser
+#                   austauschbar. Hier ist nur dieser Wert ein Grund; ein `true`
+#                   ist der Normalfall.
+#
+# Setzt die Config DES REPOS eine davon, wird die Übertragung deshalb
+# abgelehnt, statt eine wirkungslose Gegenmaßnahme vorzutäuschen. Global oder
+# systemweit gesetzt bleiben sie erlaubt: Dort hat der Mensch sie selbst
+# hingeschrieben, und die Repo-Config kann sie nicht einschleusen.
+#
+# Der dritte Eintrag sagt, ob die Werte als Wahrheitswert gelesen werden. Nur
+# dann wird der WERT überhaupt angesehen — und Git normalisiert ihn vorher auf
+# `true`/`false`. Bei den Proxy-Einträgen bleibt es beim Vergleich der
+# Schlüsselnamen: Eine Proxy-Adresse kann Zugangsdaten tragen, und die haben in
+# keiner Meldung, keinem Protokoll und keinem Vergleich etwas verloren.
+TRANSPORT_CONFIG_SETTINGS = (
+    (r"^core\.gitproxy$", "core.gitProxy", False),
+    (r"^http\.(.*\.)?proxy$", "http.proxy", False),
+    (r"^http\.(.*\.)?sslverify$", "http.sslVerify=false", True),
+)
 
 
 def repo_transport_override(repo: Path, timeout: int) -> str | None:
-    """Den ersten Schlüssel nennen, mit dem DIESES Repo den Verbindungsweg umlenkt.
+    """Die erste Einstellung nennen, mit der DIESES Repo den Weg umlenkt.
 
-    Verglichen wird die wirksame Werteliste mit der, die global und systemweit
-    allein ergäbe. Ein Unterschied heißt: Etwas repo-seitiges hat mitgeredet —
-    `.git/config`, `.git/config.worktree` oder eine von dort eingebundene Datei.
-    Der Vergleich braucht dafür keine Pfadarithmetik und übersieht deshalb auch
-    keinen `include.path`. Ist eine der Listen nicht lesbar, gilt das als nicht
-    belegbar und damit als Ablehnungsgrund.
+    Verglichen wird, was wirksam ist, mit dem, was global und systemweit allein
+    ergäbe. Ein Unterschied heißt: Etwas repo-seitiges hat mitgeredet —
+    `.git/config`, `.git/config.worktree` oder eine von dort eingebundene
+    Datei. Der Vergleich braucht dafür keine Pfadarithmetik und übersieht
+    deshalb auch keinen `include.path`. Eine Config-Datei kann nur hinzufügen,
+    nie entfernen; jeder repo-seitige Eintrag verlängert die Liste also.
+
+    Ist eine der Listen nicht lesbar — auch weil Git einen kaputten
+    Wahrheitswert ablehnt —, gilt das als nicht belegbar und damit als
+    Ablehnungsgrund.
     """
-    def values(*scope: str) -> list[str] | None:
-        result = run_git(repo, "config", "-z", "--get-all", *scope, "--", key,
-                         timeout=timeout)
-        if result.returncode == 1:          # Schlüssel in diesem Bereich nicht gesetzt
+    def read(pattern: str, as_bool: bool, *scope: str) -> list | None:
+        args = ["config", "-z", "--get-regexp"]
+        if as_bool:
+            args.append("--type=bool")
+        result = run_git(repo, *args, *scope, "--", pattern, timeout=timeout)
+        if result.returncode == 1:      # in diesem Bereich nicht gesetzt
             return []
         if result.returncode != 0:
             return None
-        return [value for value in result.stdout.split("\0") if value]
+        entries = []
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            key, _, value = record.partition("\n")
+            entries.append((key, value) if as_bool else key)
+        return entries
 
-    for key in TRANSPORT_CONFIG_KEYS:
-        effective, system, glob = values(), values("--system"), values("--global")
-        if effective is None or system is None or glob is None:
-            return key
-        # Git liest System, dann Global, dann die Repo-Seite; `--get-all` gibt
-        # die Werte in genau dieser Reihenfolge zurück.
-        if effective != system + glob:
-            return key
+    for pattern, shown, as_bool in TRANSPORT_CONFIG_SETTINGS:
+        effective = read(pattern, as_bool)
+        system = read(pattern, as_bool, "--system")
+        outside = read(pattern, as_bool, "--global")
+        if effective is None or system is None or outside is None:
+            return shown
+        # Git liest System, dann Global, dann die Repo-Seite; `--get-regexp`
+        # gibt die Einträge in genau dieser Reihenfolge zurück. Was danach noch
+        # kommt, stammt von hier.
+        outside = system + outside
+        if effective[:len(outside)] != outside:
+            return shown                # andere Reihenfolge: nicht belegbar
+        extra = effective[len(outside):]
+        if not as_bool:
+            if extra:
+                return shown
+        elif any(value == "false" for _, value in extra):
+            return shown
     return None
 
 
 def fetch_remote_block_reason(repo: Path, remote: RemoteConfig, branch: str,
-                              timeout: int) -> str | None:
-    """Den belegten Sicherheitsgrund nennen, bevor irgendein Netzaufruf läuft."""
+                              timeout: int) -> tuple[str, str] | None:
+    """Den belegten Sicherheitsgrund nennen, bevor irgendein Netzaufruf läuft.
+
+    Liefert `(Grund, Beleg)`: Der Beleg nennt die schuldige Einstellung, wo es
+    eine gibt, und bleibt sonst leer. Ohne ihn müsste die Meldung alle
+    infrage kommenden Einstellungen aufzählen, statt die eine zu nennen.
+    """
     if remote.fetch_invalid_reason:
-        return remote.fetch_invalid_reason
-    if repo_transport_override(repo, timeout) is not None:
-        return "unsafe_transport"
+        return remote.fetch_invalid_reason, ""
+    override = repo_transport_override(repo, timeout)
+    if override is not None:
+        return "unsafe_transport", override
     if branch in ("?", "(detached)"):
         # Kein Branch, also kein Tracking-Ref, den ein Fetch aktualisieren
         # koennte. Das ist ein gewoehnlicher Repo-Zustand und ausdruecklich
         # KEINE unsichere Refspec: Wer beides zusammenwirft, beschuldigt eine
         # voellig gewoehnliche Konfiguration (Review-Fund 2026-09-03).
-        return "detached"
+        return "detached", ""
     if (not fetch_refspecs_safe(remote)
             or not fetch_maps_branch_exactly(remote, branch)
             or not remote.fetch_urls or not remote.fetch_targets):
-        return "unsafe_refspec"
+        return "unsafe_refspec", ""
     fetch_url = remote_fetch_url(remote)
     if fetch_url is None or not _argv_safe_remote_url(fetch_url):
-        return "unsafe_url"
+        return "unsafe_url", ""
     return None
 
 
@@ -1421,10 +1473,10 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
         return update_tracking(*safe_update_ref_args(
             "--no-deref", "-d", destination, source_oid))
 
-    reason = fetch_remote_block_reason(repo, remote, branch, timeout)
-    if reason is not None:
+    blocked = fetch_remote_block_reason(repo, remote, branch, timeout)
+    if blocked is not None:
         return subprocess.CompletedProcess(
-            ["git", "fetch"], 128, "", reason)
+            ["git", "fetch"], 128, "", blocked[0])
     fetch_url = remote_fetch_url(remote)
     if fetch_url is None:
         return subprocess.CompletedProcess(
@@ -2764,8 +2816,9 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
         fetch_url = remote_fetch_url(remote)
         if not _argv_safe_remote_url(fetch_url):
             return "unsafe_url", 0, ""
-        if repo_transport_override(repo, timeout) is not None:
-            return "unsafe_transport", 0, ""
+        override = repo_transport_override(repo, timeout)
+        if override is not None:
+            return "unsafe_transport", 0, override
         pin_config, pinned_url = _pinned_url_config(fetch_url)
         r = run_git_logged(
             repo, *pin_config, "ls-remote", "--heads", "--", pinned_url,
@@ -2806,7 +2859,8 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_timeout", r=name, s=timeout)
     if outcome == "unsafe_transport":
         return t("check_unsafe_transport", r=name,
-                 k=", ".join(TRANSPORT_CONFIG_KEYS))
+                 k=detail or " / ".join(
+                     shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
     if outcome == "detached":
         return t("check_detached", r=name)
     if outcome == "unsafe_refspec":
@@ -4195,13 +4249,14 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
             # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
             for name, remote in configs.items():
-                block_reason = fetch_remote_block_reason(
+                blocked = fetch_remote_block_reason(
                     repo, remote, st.branch, t_)
-                if block_reason is not None:
+                if blocked is not None:
+                    block_reason, block_detail = blocked
                     fetch_failures[name] = (
                         block_reason,
-                        remote_check_message(
-                            name, block_reason, 0, "", cfg["fetch_timeout"]),
+                        remote_check_message(name, block_reason, 0,
+                                             block_detail, cfg["fetch_timeout"]),
                         "",
                     )
                     continue
@@ -6226,12 +6281,12 @@ class TUI:
 
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
         config = read_remote_config_or_none(st.path, self.cfg, remote)
-        block_reason = ("unsafe_refspec" if config is None
-                        else fetch_remote_block_reason(
-                            st.path, config, st.branch, self.cfg["git_timeout"]))
-        if block_reason is not None:
+        blocked = (("unsafe_refspec", "") if config is None
+                   else fetch_remote_block_reason(
+                       st.path, config, st.branch, self.cfg["git_timeout"]))
+        if blocked is not None:
             self.message = remote_check_message(
-                remote, block_reason, 0, "", self.cfg["fetch_timeout"])
+                remote, blocked[0], 0, blocked[1], self.cfg["fetch_timeout"])
             return None
         # Der Fetch kann bei großen Repos oder langsamem Netz spürbar dauern;
         # ohne Zwischenmeldung stünde das alte Bild starr da (Befund 2026-08-22).
@@ -6268,12 +6323,14 @@ class TUI:
         return self.refresh_one(st, refetched=remote)
 
     def _transfer_message(self, check: TransferCheck, remote: str,
-                          branch: str) -> str:
+                          branch: str, repo: Path) -> str:
         if check.reason == "dirty":
             return t("transfer_dirty")
         if check.reason == "unsafe-transport":
             return t("transfer_unsafe_transport",
-                     k=", ".join(TRANSPORT_CONFIG_KEYS))
+                     k=repo_transport_override(repo, self.cfg["git_timeout"])
+                     or " / ".join(shown
+                                   for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
         if check.reason == "detached":
             return t("transfer_detached")
         if check.reason == "inspect-failed":
@@ -6337,7 +6394,8 @@ class TUI:
                                  self.cfg["git_timeout"],
                                  expected_public=expected_public)
         if not check.ready:
-            self.message = self._transfer_message(check, remote.name, fresh.branch)
+            self.message = self._transfer_message(check, remote.name, fresh.branch,
+                                                  fresh.path)
             return None
         return fresh, check
 

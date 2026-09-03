@@ -240,20 +240,35 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Seit 2026-09-03 gehört `GIT_PROXY_COMMAND` dazu: Für `git://` ruft Git dieses
   Programm mit Host und Port auf, und es entscheidet dieselbe Frage. Belegt an
   einem gepinnten Fetch — der Wrapper lief und bekam „127.0.0.1 9418“.
-- Dieselbe Frage stellt `core.gitProxy` aus der CONFIG, und dort hilft keine
-  Gegenmaßnahme: Der Schlüssel ist mehrwertig, ein `-c core.gitProxy=none`
-  stellt sich nur daneben und das Skript des Repos läuft trotzdem (geprüft
-  2026-09-03). Setzt die Config DES REPOS ihn, lehnt gmf die Übertragung
-  deshalb ab (`repo_transport_override()` → Grund `unsafe_transport` beim
-  Fetch, `unsafe-transport` im Push-Preflight, beides mit eigenem Satz).
-  Global oder systemweit gesetzt bleibt er erlaubt — dort hat ihn der Mensch
-  selbst hingeschrieben, und die Repo-Config kann ihn nicht einschleusen.
-  Verglichen wird die wirksame Werteliste mit der aus System und Global allein;
-  ein Unterschied heißt „etwas repo-seitiges hat mitgeredet“. Das erspart
-  Pfadarithmetik und übersieht auch keinen `include.path` aus `.git/config` —
-  eine Prüfung nur auf `git config --local` täte das. Eine unlesbare Config
-  gilt als nicht belegbar und damit als Ablehnungsgrund. Wer einen weiteren
-  solchen Schlüssel kennt, trägt ihn in `TRANSPORT_CONFIG_KEYS` ein.
+- Dieselbe Frage stellen drei Einstellungen aus der CONFIG, und dort hilft
+  keine Gegenmaßnahme: `core.gitProxy` (Hilfsprogramm für `git://`) ist
+  mehrwertig, ein `-c core.gitProxy=none` stellt sich nur daneben und das
+  Skript des Repos läuft trotzdem (geprüft 2026-09-03); ein erzwungenes leeres
+  `http.proxy` schaltete auch einen echten Firmen-Proxy aus der globalen Config
+  ab, weil die `GIT_CONFIG_*`-Werte sie mitschlagen; und `http.sslVerify =
+  false` macht die geprüfte Adresse gegen einen Mitleser austauschbar. Setzt
+  die Config DES REPOS eine davon, lehnt gmf die Übertragung ab
+  (`repo_transport_override()` → Grund `unsafe_transport` beim Fetch und bei
+  der T-Prüfung, `unsafe-transport` im Push-Preflight; die Meldung nennt die
+  EINE gesetzte Einstellung, nicht alle drei). Global oder systemweit gesetzt
+  bleiben sie erlaubt — dort hat der Mensch sie selbst hingeschrieben, und die
+  Repo-Config kann sie nicht einschleusen.
+  Verglichen wird die wirksame Einträgeliste mit der aus System und Global
+  allein; was danach noch kommt, stammt von hier. Eine Config-Datei kann nur
+  hinzufügen, nie entfernen. Das erspart Pfadarithmetik und übersieht auch
+  keinen `include.path` aus `.git/config` — eine Prüfung nur auf
+  `git config --local` täte das. Die adressgebundenen Formen
+  (`http.<url>.proxy`, `http.<url>.sslVerify`) gehören mit in die Muster, sonst
+  wären sie das offene Hintertürchen. Eine unlesbare Config gilt als nicht
+  belegbar und damit als Ablehnungsgrund; dazu zählt ein Wahrheitswert, den Git
+  nicht lesen kann.
+  Angesehen wird nur, was sein muss: Bei den Proxy-Einträgen vergleicht
+  `repo_transport_override()` ausschließlich die SCHLÜSSELNAMEN, denn eine
+  Proxy-Adresse kann Zugangsdaten tragen und hat in keiner Meldung und keinem
+  Protokoll etwas verloren. Nur `sslVerify` wird als Wahrheitswert gelesen, und
+  den normalisiert Git vorher auf `true`/`false`. Ein Test hält das fest. Wer
+  eine weitere solche Einstellung kennt, trägt sie in
+  `TRANSPORT_CONFIG_SETTINGS` ein.
 - Die Zahlen, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der
   Historie, „gemergt" —, lesen den Commit-Graph mit `NO_REPLACE_ENV`
   (`branch_delta`, `upstream_delta`, `read_branches`, die beiden `rev-list`-Zeilen
@@ -534,20 +549,6 @@ liegengebliebene Arbeit aus.
 
 ## Offene Punkte / Ideen
 
-- **`http.proxy` und `http.sslVerify` aus der REPO-Config umgehen die
-  URL-Bindung.** Belegt am 2026-09-03: Ein `http.proxy = http://127.0.0.1:9`
-  in `.git/config` lenkte einen gepinnten HTTPS-Fetch auf diesen Endpunkt statt
-  auf die geprüfte Adresse. `core.gitProxy` ist derselbe Fall und seit
-  2026-09-03 abgelehnt (siehe Regel oben); für diese beiden steht die
-  Entscheidung noch aus.
-  Vorschlag: dieselbe Regel, also `http.proxy` (samt der URL-gebundenen Form
-  `http.<url>.proxy`) und ein repo-seitiges `http.sslVerify = false` in
-  `TRANSPORT_CONFIG_KEYS` aufnehmen. Der Vergleich gegen System und Global
-  trägt hier genauso: Ein echter Firmen-Proxy steht in der globalen Config und
-  bliebe unberührt — anders als bei einem erzwungenen leeren `http.proxy`, das
-  auch ihn abschalten würde. Für `sslVerify` genügt die Anwesenheit nicht als
-  Grund; nur ein repo-seitiges `false` ist einer, denn erst es macht die
-  geprüfte Adresse gegen einen Mitleser austauschbar.
-  Preis: Wer einen Proxy heute im Repo statt global konfiguriert hat, bekommt
-  eine Ablehnung mit Hinweis statt einer stillen Umleitung. Das ist dieselbe
-  Abwägung, die bei `core.sshCommand` und `core.gitProxy` schon getroffen ist.
+- (derzeit keine; die Frage zu `http.proxy` und `http.sslVerify` ist am
+  2026-09-03 entschieden — beide werden wie `core.gitProxy` abgelehnt, sobald
+  die Config des Repos sie setzt, siehe Regel oben)
