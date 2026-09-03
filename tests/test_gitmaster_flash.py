@@ -6840,6 +6840,73 @@ class RepoFilterLogicTests(unittest.TestCase):
         self.assertEqual(len(gmf_module.filter_repo_dicts(repos, "")), 3)
 
 
+class ListNavigationBoundsTests(unittest.TestCase):
+    """Die Auswahl der Repo-Liste bleibt ein gültiger Index.
+
+    Bis 2026-09-03 hielt sie nur die obere Schranke ein. Bei leerer
+    Trefferliste ergab `min(len - 1, selected + 1)` genau -1 — in Python der
+    LETZTE Eintrag. Solange die Liste leer blieb, fiel das nicht auf; sobald
+    ein Aufrufer sie wieder füllte, ohne über `apply_filter()` zu gehen, träfe
+    jede Aktion still ein anderes Repo als das gemeinte. Kein Test fuhr die
+    Liste überhaupt bis an ihr Ende.
+    """
+
+    class Screen:
+        def __init__(self, keys=()):
+            self.keys = iter(keys)
+            self.drawn = []
+
+        def getmaxyx(self): return (24, 100)
+        def erase(self): pass
+        def clear(self): pass
+        def addstr(self, y, x, text, *a): self.drawn.append((y, text))
+        def move(self, *_a): pass
+        def refresh(self): pass
+        def timeout(self, *_a): pass
+        def getch(self): return next(self.keys)
+        def get_wch(self): return next(self.keys)
+
+    def _run(self, names, keys, view_mode="detail", query=""):
+        ui = TUI(self.Screen([*keys, ord("q")]), Path("/tmp"),
+                 DEFAULT_CONFIG, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp") / n, rel=n)
+                           for n in names]
+        ui.view_mode = view_mode
+        ui.filter_query = query
+        ui.apply_filter()
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"):
+            ui._loop()
+        return ui
+
+    def test_arrow_down_stops_at_the_last_repo(self):
+        names = [f"repo-{i}" for i in range(6)]
+        ui = self._run(names, [curses.KEY_DOWN] * 12)
+        self.assertEqual(ui.selected, len(names) - 1)
+        self.assertEqual(ui.current().rel, names[-1])
+
+    def test_arrow_right_in_the_compact_view_stops_at_the_last_repo(self):
+        names = [f"repo-{i}" for i in range(6)]
+        ui = self._run(names, [curses.KEY_RIGHT] * 12, view_mode="compact")
+        self.assertEqual(ui.selected, len(names) - 1)
+        self.assertEqual(ui.current().rel, names[-1])
+
+    def test_arrow_down_on_an_empty_result_keeps_a_valid_index(self):
+        ui = self._run(["alpha", "beta"], [curses.KEY_DOWN] * 3,
+                       query="gibtsnicht")
+        self.assertEqual(ui.statuses, [])
+        self.assertEqual(ui.selected, 0)
+        self.assertIsNone(ui.current())
+
+    def test_an_out_of_range_index_never_points_at_another_repo(self):
+        """Gegenprobe: `current()` prüft den Index, nicht nur die Länge."""
+        ui = self._run(["alpha", "beta"], [])
+        ui.selected = -1
+        self.assertIsNone(ui.current())
+        ui.selected = 2
+        self.assertIsNone(ui.current())
+
+
 class TuiFilterTests(unittest.TestCase):
     """Verhalten des Filters in der TUI: Auswahl, Kopfzeile, Esc."""
 

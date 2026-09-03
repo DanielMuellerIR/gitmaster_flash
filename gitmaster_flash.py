@@ -5481,8 +5481,10 @@ class TUI:
         target = self.selected + direction * rows
         if 0 <= target < len(self.statuses):
             return target
-        # Am Rand: auf den ersten/letzten Eintrag springen statt stecken zu bleiben.
-        return 0 if direction < 0 else len(self.statuses) - 1
+        # Am Rand: auf den ersten/letzten Eintrag springen statt stecken zu
+        # bleiben. Die untere Schranke gilt auch hier: Ohne sie liefert eine
+        # leere Trefferliste -1, und -1 ist in Python der LETZTE Eintrag.
+        return 0 if direction < 0 else max(0, len(self.statuses) - 1)
 
     def log_height(self, h: int) -> int:
         """Wie viele Zeilen das Protokoll bekommt.
@@ -5704,7 +5706,15 @@ class TUI:
     # -- Aktionen -----------------------------------------------------------
 
     def current(self) -> RepoStatus | None:
-        return self.statuses[self.selected] if self.statuses else None
+        """Das ausgewählte Repo — oder None, wenn der Index nicht darauf zeigt.
+
+        Geprüft wird der INDEX, nicht nur die Länge: Ein durchgerutschtes -1
+        wäre in Python das letzte Repo, und jede Aktion liefe dann still auf
+        einem anderen als dem gemeinten (Review-Fund 2026-09-03).
+        """
+        if not 0 <= self.selected < len(self.statuses):
+            return None
+        return self.statuses[self.selected]
 
     def action_filter(self):
         """Repo-Liste über einen Suchtext eingrenzen (Taste /).
@@ -6863,7 +6873,10 @@ class TUI:
                 self.selected = max(0, self.selected - 1)
                 continue
             elif ch == curses.KEY_DOWN:
-                self.selected = min(len(self.statuses) - 1, self.selected + 1)
+                # Untere Schranke: Bei leerer Trefferliste ergäbe
+                # `min(len - 1, …)` genau -1, und -1 ist der letzte Eintrag.
+                self.selected = max(0, min(len(self.statuses) - 1,
+                                           self.selected + 1))
                 continue
             elif ch == curses.KEY_RIGHT and st:
                 if self.view_mode == "compact":
