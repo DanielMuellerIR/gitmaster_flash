@@ -6,7 +6,7 @@
     "token_budget": 1000000,
     "status": "active",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 109187
+    "tokens_spent": 126470
   },
   "campaign_history": [
     {
@@ -156,28 +156,20 @@
       "risk": "low",
       "priority": 4,
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T100309995450+0200",
-        "completed_at": "2026-08-30T10:04:41+02:00",
-        "observed_head": "7e1287ded8a203de4ab6514db6d8e4541954bdef",
-        "content_sha256": "426590e5ee420bfac7ade38af31080cc0de212aa27d02ea69a88ca3ada123191",
+        "campaign_id": "20260903T095958732950+0200",
+        "completed_at": "2026-09-03T10:51:55+02:00",
+        "observed_head": "baa04995f10b71250184342e40e7208ce2d179a2",
+        "content_sha256": "f0a85e7e14942089bc873f1ecada723cce8b9ab0e3a81932be19ade5f61e386f",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Beide READMEs beschreiben den strukturierten JSON-Filtervertrag, die konkreten Timeout-Defaults und die aktuelle Version synchron; Vertragstests binden Werte an ihren Schluessel und erfassen auch Hauptschleifen- sowie Standard-App-Tasten. Sprachpaar, Codegrenzen und generierte Bilder nachgeprueft.",
+        "summary": "Der abgedruckte Block der Commit-Hilfe zeigte die alte Spaltenbreite und kannte den neuen dritten Zustand nicht; beide READMEs zeigen jetzt die echte Ausgabe und erklaeren den Fall. Neu gebunden: DocumentationContractTests baut den Block wie schon die Kopfzeile nach und verlangt jede gezeichnete Zeile woertlich. Delta (Rueckfrage-Balken 0.22.3, Versionszeile) und die uebrigen Vertragspruefungen mitgeprueft.",
         "tests": [
-          "python3 tests/test_gitmaster_flash.py DocumentationContractTests: 6 passed",
-          "python3 docs/make-screens.py --check: passed",
-          "python3 -m unittest discover -s tests: 511 passed"
+          "python3 -m unittest discover -s tests: 534 passed (1 neu)",
+          "Gegenprobe: um zwei Spalten verschobene README-Zeile laesst den neuen Test rot werden"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260903T095958732950+0200",
-        "started_at": "2026-09-03T10:46:16+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
@@ -188,7 +180,7 @@
       "risk": "medium",
       "priority": 5,
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T203952085645+0200",
         "completed_at": "2026-08-29T20:57:34+02:00",
@@ -201,6 +193,13 @@
         "tests": [
           "Alle 43 in AGENTS.md genannten Bezeichner im Code belegt (Skript ueber gitmaster_flash.py, docs/make-screens.py, install.sh, gmf.zsh und beide Testdateien); alle Markdown-Links auf vorhandene Dateien; die vier zitierten Shell-Ausgaben einzeln nachgemessen; python3 -m unittest discover -s tests: 506 Tests OK; git diff --check"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260903T095958732950+0200",
+        "started_at": "2026-09-03T10:52:04+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     }
   ],

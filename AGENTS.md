@@ -199,6 +199,24 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Adresse wäre Dekoration. Ein eigener Schlüssel oder Port gehört deshalb in
   `~/.ssh/config`, nicht in einen Wrapper; das Befehlsprotokoll zeigt das
   `env -u …` mit an. Reine Lesebefehle des Scans behalten die Benutzerumgebung.
+- Ein Repo ohne ersten Commit ist ein gewöhnlicher Zustand, kein Fehler. Nach
+  dem Klonen eines LEEREN Repos zeigt HEAD auf einen Branch, den es noch nicht
+  gibt; sobald jemand den ersten Commit pusht und man fetcht, existiert der
+  Tracking-Ref sehr wohl. `git rev-list HEAD...<ref>` bricht dort mit Exit 128
+  ab, und gmf meldete das Repo als kaputt („ERROR: git rev-list failed (exit
+  128)“, Review-Fund 2026-09-03). `branch_delta()` zählt in diesem Fall die
+  Commits des Tracking-Refs: null voraus, n zurück. Der Sonderfall wird erst
+  NACH dem fehlgeschlagenen Aufruf geprüft, damit jedes Repo mit Commits
+  weiterhin genau einen Git-Aufruf kostet — und ein echter Lesefehler bleibt
+  einer, sobald HEAD existiert.
+- Werte aus der `config.json` können fehlen: Die App-Tasten trägt man von Hand
+  ein, ein vergessenes `name` oder `path` ist ein naheliegender Tippfehler.
+  `app_label()` und `app_path()` liefern dafür sichtbare Platzhalter statt eines
+  KeyError — den fängt in der Hauptschleife niemand ab, und die Fußzeile
+  zeichnet vor der ersten Repo-Zeile (Review-Fund 2026-09-03).
+- `curses.curs_set()` steht ausschließlich in `set_cursor_visible()`. Auf einem
+  Terminal ohne Cursor-Steuerung wirft curses dort; jeder direkte Aufruf machte
+  daraus einen Traceback statt einer Auskunft.
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
   acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
   `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
@@ -279,6 +297,17 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   etwas ergänzt, prüft es zuerst an der Shell selbst: Die Grammatik ist an
   mehreren Stellen anders, als sie aussieht (siehe `while` unter „Bewusst nicht
   umgesetzt").
+  Eine Zeile, die auf einen ungequoteten Backslash endet, ist gar keine
+  Zeilengrenze: zsh entfernt Backslash und Umbruch, bevor es zu lesen beginnt.
+  Der Lesedurchgang fügt solche Zeilen deshalb ohne Trennzeichen zusammen,
+  bevor irgendein Scanner sie sieht (`line_continues`, `scan_zshrc_line`) —
+  ein eingefügtes Leerzeichen zerrisse `PATH=/a:\` + `/b`. Bis 2026-09-03 galt
+  der Backslash wie ein offener Quote-Kontext; `zshrc_context_state` meldete
+  danach dauerhaft `opaque`, und der Installer lehnte jede völlig gewöhnliche
+  `.zshrc` mit einer Fortsetzung ab. Offene Anführungszeichen und `${…}` bleiben
+  dagegen ein Ablehnungsgrund — `scan_line_end()` trennt beide Fälle an einer
+  Stelle, `line_leaves_quote_open()` und `line_continues()` sind nur Fragen
+  darauf.
   Der Rumpf beginnt an einem KOMMANDOANFANG, und beide Scanner müssen ihn dort
   auch so behandeln (`short_loop_body_at`): Sie prüfen `return`/`exit`/`exec`
   nur an einer solchen Stelle, und `for x (a b) return` bricht die `.zshrc` ab
@@ -322,6 +351,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Die Commit-Hilfe zeichnet ihr eigenes Bild und hat deshalb eine eigene
   Meldungszeile. `self.message` gehört der Repo-Liste und ist dort unsichtbar —
   Rückmeldungen aus der Hilfe werden zurückgegeben, nicht gesetzt.
+- Ein Eintrag, für den es gegenüber HEAD nichts zu committen gibt, ist in der
+  Hilfe sichtbar, aber nicht anwählbar (`committable_against_head()`). Das
+  betrifft den Porcelain-Status `AD`: im echten Index hinzugefügt, im
+  Arbeitsbaum wieder gelöscht — den Pfad gibt es weder in HEAD noch daneben.
+  Weil die Hilfe mit allem angehakt startet, ließ ein einziger solcher Pfad
+  vorher den GESAMTEN Commit an der Freigabeprüfung scheitern („temporary index
+  differs from approved paths“), und auch gewöhnliche Änderungen blieben liegen
+  (Review-Fund 2026-09-03). Vorauswahl, `␣`, `A` und die Vorschläge gehen alle
+  über dieselbe Funktion. Die Breite der Pfadspalte leitet sich seither aus der
+  längsten Beschriftung ab; eine feste Zahl schnitt die neue, längere still ab.
+  Der abgedruckte Textblock im README wird nachgebaut und Zeile für Zeile
+  geprüft (`DocumentationContractTests`), damit er nicht wieder still veraltet.
 - Der Hintergrund-Fetch (`R`) ist der einzige Ort, an dem Git-Aufrufe außerhalb
   des Hauptthreads laufen. Drei Regeln hängen daran:
   1. `_run_process_group()` trägt jeden Prozess in `_LIVE_PROCESSES` ein und
