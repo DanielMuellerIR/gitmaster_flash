@@ -152,6 +152,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Home-Pfad und ein gleichnamiger HTTPS-Pfad ebenfalls als dasselbe Ziel. Dazu
   müsste derselbe Host beides anbieten — dann ist er ein Hosting-Dienst
   (Code-Review 2026-08-06 geprüft, Entscheidung bleibt).
+- Ohne ausgecheckten Branch (detached HEAD) gibt es keinen Tracking-Ref, den ein
+  Fetch aktualisieren könnte. `collect_status()` lässt den Fetch dann ganz aus,
+  und `fetch_remote_block_reason()` nennt dafür den eigenen Grund `detached`.
+  Vorher fiel dieser Fall mit einer wirklich unsicheren Refspec zusammen: `R`
+  und `--fetch` meldeten für jedes Remote „unsichere Fetch-Refspec", färbten das
+  Repo rot und ersetzten den ehrlichen Zustand `detached` durch `error` samt
+  `fetch_error` — eine Falschaussage über eine völlig gewöhnliche Konfiguration,
+  die im Rechnervergleich zusätzlich `error` und `remote_state` aus dem
+  Vergleich nahm (Review-Fund 2026-09-03).
 - Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,

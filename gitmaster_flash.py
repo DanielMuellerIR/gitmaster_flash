@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.4"
+__version__ = "0.22.5"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -613,6 +613,9 @@ TR = {
         "de": "{r}: Serverfehler dort — deren Problem, nicht dein Repo."},
     "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
                       "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
+    "check_detached": {
+        "en": "{r}: no branch is checked out (detached HEAD) — there is nothing to fetch for it.",
+        "de": "{r}: kein Branch ausgecheckt (detached HEAD) — dafür gibt es nichts zu holen."},
     "check_unsafe_refspec": {
         "en": "{r}: fetch blocked — its refspec can change refs outside refs/remotes/{r}/.",
         "de": "{r}: Fetch gesperrt — seine Refspec kann Refs außerhalb refs/remotes/{r}/ ändern."},
@@ -1245,8 +1248,13 @@ def fetch_remote_block_reason(remote: RemoteConfig, branch: str) -> str | None:
     """Den belegten Sicherheitsgrund nennen, bevor irgendein Netzaufruf läuft."""
     if remote.fetch_invalid_reason:
         return remote.fetch_invalid_reason
-    if (branch in ("?", "(detached)")
-            or not fetch_refspecs_safe(remote)
+    if branch in ("?", "(detached)"):
+        # Kein Branch, also kein Tracking-Ref, den ein Fetch aktualisieren
+        # koennte. Das ist ein gewoehnlicher Repo-Zustand und ausdruecklich
+        # KEINE unsichere Refspec: Wer beides zusammenwirft, beschuldigt eine
+        # voellig gewoehnliche Konfiguration (Review-Fund 2026-09-03).
+        return "detached"
+    if (not fetch_refspecs_safe(remote)
             or not fetch_maps_branch_exactly(remote, branch)
             or not remote.fetch_urls or not remote.fetch_targets):
         return "unsafe_refspec"
@@ -2637,6 +2645,8 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_empty", r=name)
     if outcome == "timeout":
         return t("check_timeout", r=name, s=timeout)
+    if outcome == "detached":
+        return t("check_detached", r=name)
     if outcome == "unsafe_refspec":
         return t("check_unsafe_refspec", r=name)
     if outcome == "unsafe_url":
@@ -3967,7 +3977,12 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         configs = read_remote_configs(repo, cfg)
         st.remote = detect_sync_remote(repo, cfg, configs)
         fetch_failures: dict[str, tuple[str, str, str]] = {}
-        if fetch:
+        # Ohne ausgecheckten Branch gibt es keinen Tracking-Ref zu holen. Der
+        # Fetch entfaellt dann ganz, statt jedes Remote als gescheitert zu
+        # melden: Das ueberschriebe den ehrlichen Zustand "detached" mit einem
+        # Fehler und setzte `fetch_error`, was im Rechnervergleich zusaetzlich
+        # `error` und `remote_state` aus dem Vergleich nimmt.
+        if fetch and st.branch not in ("?", "(detached)"):
             # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
             # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.

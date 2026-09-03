@@ -5825,6 +5825,84 @@ class UnbornBranchTests(unittest.TestCase):
         self.assertIn("rev-list", str(raised.exception))
 
 
+class DetachedHeadFetchTests(unittest.TestCase):
+    """Ein detached HEAD ist ein gewöhnlicher Zustand, kein Sicherheitsproblem.
+
+    Ohne ausgecheckten Branch gibt es keinen Tracking-Ref, den ein Fetch
+    aktualisieren könnte. Bis 2026-09-03 warf `fetch_remote_block_reason()`
+    diesen Fall mit einer wirklich unsicheren Refspec zusammen: `R` (und
+    `--fetch`) meldeten für jedes Remote „unsichere Fetch-Refspec", färbten das
+    Repo rot und ersetzten den ehrlichen Zustand `detached` durch `error` —
+    eine Falschaussage über eine völlig gewöhnliche Konfiguration.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        bare = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(bare))
+        self.repo = self.root / "work"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.txt").write_text("a\n")
+        git(self.repo, "add", "a.txt")
+        git(self.repo, "commit", "-qm", "eins")
+        git(self.repo, "remote", "add", "origin", str(bare))
+        git(self.repo, "push", "-q", "origin", "main")
+        git(self.repo, "fetch", "-q", "origin")
+        git(self.repo, "checkout", "-q", "--detach", "HEAD")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_setup_really_is_detached_with_an_ordinary_refspec(self):
+        self.assertEqual(
+            subprocess.run(["git", "-C", str(self.repo), "symbolic-ref", "-q", "HEAD"],
+                           capture_output=True).returncode, 1)
+        self.assertEqual(
+            git_output(self.repo, "config", "remote.origin.fetch"),
+            "+refs/heads/*:refs/remotes/origin/*")
+
+    def test_block_reason_names_the_missing_branch_not_the_refspec(self):
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        # Die Refspec selbst ist einwandfrei — nur der Branch fehlt.
+        self.assertTrue(gmf_module.fetch_refspecs_safe(remote))
+        self.assertEqual(
+            gmf_module.fetch_remote_block_reason(remote, "(detached)"), "detached")
+        self.assertEqual(
+            gmf_module.fetch_remote_block_reason(remote, "?"), "detached")
+
+    def test_message_for_the_detached_case_does_not_accuse_the_refspec(self):
+        message = remote_check_message("origin", "detached", 0, "", 30)
+        self.assertNotIn("refspec", message.lower())
+        self.assertIn("origin", message)
+        self.assertIn("detached", message.lower())
+        self.assertNotEqual(message, remote_check_message("origin", "unsafe_refspec",
+                                                          0, "", 30))
+
+    def test_fetch_scan_leaves_the_detached_state_intact(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertEqual(st.branch, "(detached)")
+        self.assertEqual(st.error, "")
+        self.assertEqual(st.remote_state, "detached")
+        self.assertFalse(st.fetch_error)
+        self.assertEqual([(r.name, r.fetch_failed, r.fetch_outcome)
+                          for r in st.remotes], [("origin", False, "")])
+
+    def test_a_truly_unsafe_refspec_is_still_blocked_as_such(self):
+        """Gegenprobe: Der neue Zweig darf keine echte Gefahr durchlassen."""
+        git(self.repo, "config", "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/fremd/*")
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        self.assertEqual(
+            gmf_module.fetch_remote_block_reason(remote, "main"), "unsafe_refspec")
+        git(self.repo, "checkout", "-q", "main")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG, fetch=True)
+        self.assertTrue(st.fetch_error)
+        self.assertEqual([r.fetch_outcome for r in st.remotes], ["unsafe_refspec"])
+
+
 class BranchAndDiffTests(unittest.TestCase):
     """Branch-Übersicht und Datei-Diffs — beides rein lesend gegen echte Repos."""
 
