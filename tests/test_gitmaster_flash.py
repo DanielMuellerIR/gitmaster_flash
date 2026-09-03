@@ -2047,6 +2047,39 @@ class RemoteSecurityTests(unittest.TestCase):
         self.assertEqual(a.host, "example.com")
         self.assertNotIn("secret", a.fingerprint)
 
+    def test_the_default_port_falls_away_in_every_spelling(self):
+        """Der Standardport hing an der Rohschreibweise der Adresse.
+
+        `default_port` verglich `raw.startswith("ssh://")`, waehrend der Rest
+        der Funktion das kleingeschriebene Schema benutzt. `SSH://host:22/x`
+        galt dadurch als anderes Ziel als `ssh://host/x`, und eine voellig
+        gewoehnliche Konfiguration war ohne Not blockiert. `git+ssh`, `ssh+git`
+        und `git://` kannte die Liste ueberhaupt nicht.
+        """
+        for plain, loud in (
+                ("ssh://example.com/a/b", "SSH://example.com:22/a/b"),
+                ("https://example.com/a/b", "HTTPS://example.com:443/a/b"),
+                ("http://example.com/a/b", "HTTP://example.com:80/a/b"),
+                ("git+ssh://example.com/a/b", "git+ssh://example.com:22/a/b"),
+                ("git://example.com/a/b", "git://example.com:9418/a/b"),
+                ("file:///tmp/a/b", "FILE:///tmp/a/b")):
+            with self.subTest(url=loud):
+                self.assertEqual(canonical_remote_target(plain).fingerprint,
+                                 canonical_remote_target(loud).fingerprint)
+
+    def test_a_non_default_port_still_separates_two_targets(self):
+        """Gegenprobe: Nur der Standardport faellt weg."""
+        self.assertNotEqual(
+            canonical_remote_target("ssh://example.com/a/b").fingerprint,
+            canonical_remote_target("ssh://example.com:2222/a/b").fingerprint)
+
+    def test_an_option_like_address_never_counts_as_argv_safe(self):
+        """Eine Adresse mit fuehrendem "-" liest Git als Option."""
+        for url in ("--upload-pack=/bin/sh", "-oProxyCommand=x", "-"):
+            with self.subTest(url=url):
+                self.assertFalse(gmf_module._argv_safe_remote_url(url))
+        self.assertTrue(gmf_module._argv_safe_remote_url("https://example.com/a/b"))
+
     def test_reserved_percent_escapes_do_not_alias_another_network_path(self):
         encoded_slash = canonical_remote_target(
             "https://example.com/org%2Frepo.git")

@@ -1158,6 +1158,12 @@ def _argv_safe_remote_url(url: str) -> bool:
     if not url or display_remote_url(url) != url or terminal_text(url) != url:
         return False
     raw = str(url).strip()
+    # Eine Adresse, die mit "-" beginnt, liest Git als Option. Heute übergeben
+    # alle Aufrufer den Einmal-Alias hinter einem "--"; die Funktion verspricht
+    # aber, was in argv landen darf, und ein künftiger Aufrufer soll diese
+    # Einschleusung nicht erben.
+    if raw.startswith("-"):
+        return False
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*::", raw):
         return False
     parsed = urllib.parse.urlsplit(raw)
@@ -3140,7 +3146,11 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     elif urllib.parse.urlsplit(raw).scheme:
         parsed = urllib.parse.urlsplit(raw)
         scheme = parsed.scheme.lower()
-        if parsed.scheme == "file":
+        # Ab hier nur noch `scheme`: `urlsplit` liefert das Schema zwar bereits
+        # klein, aber zwei Schreibweisen derselben Frage im selben Block laden
+        # zur nächsten Verwechslung ein — beim Standardport unten war genau das
+        # ein Fehler.
+        if scheme == "file":
             path = urllib.parse.unquote(parsed.path)
         else:
             host = _normal_host(parsed.hostname or "")
@@ -3166,9 +3176,15 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
         home_relative = home_relative or (
             scheme in {"scp", "ssh", "git+ssh", "ssh+git"}
             and repo_id.startswith("/~"))
-        default_port = ((raw.startswith("ssh://") and port == 22)
-                        or (raw.startswith("https://") and port == 443)
-                        or (raw.startswith("http://") and port == 80))
+        # Der Standardport gehört nicht in die Identität: `ssh://host/x` und
+        # `ssh://host:22/x` sind dasselbe Repo. Verglichen wird das
+        # kleingeschriebene Schema, nicht der Rohtext — sonst galt `SSH://…:22`
+        # als anderes Ziel als `ssh://…`, und eine gewöhnliche Konfiguration
+        # war ohne Not blockiert. `git+ssh`/`ssh+git` sprechen ebenfalls SSH.
+        default_port = ((scheme in {"ssh", "git+ssh", "ssh+git"} and port == 22)
+                        or (scheme == "https" and port == 443)
+                        or (scheme == "http" and port == 80)
+                        or (scheme == "git" and port == 9418))
         # Der Benutzername bleibt aus der Anzeige (repo_id) heraus, gehört bei
         # benutzerabhängigen Pfaden aber in die Identität: sonst gälten zwei
         # verschiedene Home-Verzeichnisse als dasselbe Ziel — und ein
