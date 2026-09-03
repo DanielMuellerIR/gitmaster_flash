@@ -499,6 +499,28 @@ class TestSeveritySort(unittest.TestCase):
         st.stashes = ["stash@{0} WIP"]
         self.assertFalse(st.clean_and_synced)
 
+    def test_all_five_levels_keep_their_order(self):
+        """Die vollstaendige Reihenfolge, nicht nur "dreckig vor sauber".
+
+        Die Namen sind absichtlich GEGEN die Sollreihenfolge gewaehlt: Sonst
+        deckte der alphabetische Zweitschluessel eine falsche Stufe zu.
+        """
+        stufen = [
+            ("zz-kaputt", dict(error="boom")),
+            ("mm-dreckig", dict(modified=1)),
+            ("ll-stash", dict(stashes=["stash@{0} WIP"])),
+            ("aa-voraus", dict(ahead=1)),
+            ("yy-ohne-remote", dict(remote_state="no-remote")),
+            ("bb-sauber", {}),
+        ]
+        statuses = [RepoStatus(path=Path("/x") / rel, rel=rel, **kw)
+                    for rel, kw in stufen]
+        self.assertEqual([s.severity() for s in statuses], [0, 1, 1, 2, 3, 4])
+        self.assertEqual(
+            [s.rel for s in gmf_module.sort_statuses(statuses)],
+            ["zz-kaputt", "ll-stash", "mm-dreckig", "aa-voraus",
+             "yy-ohne-remote", "bb-sauber"])
+
 
 def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -6222,6 +6244,29 @@ class UnbornBranchTests(unittest.TestCase):
         self.assertIn("rev-list", str(raised.exception))
 
 
+class DisplayNameNormalisationTests(unittest.TestCase):
+    """`collect_status()` normalisiert den Anzeigenamen auf NFC.
+
+    Darauf beruhen die Spaltenbreiten (bei NFD verrechnet sich `len()`), die
+    Vergleichbarkeit der `--json`-Ausgabe zwischen Rechnern und die ganze
+    Entscheidung, Repos ueber `path` statt ueber `rel` wiederzuerkennen. Alle
+    NFC/NFD-Tests bauten ihre `RepoStatus` bisher von Hand — die Zeile selbst
+    hatte keinen.
+    """
+
+    def test_a_folder_written_in_nfd_gets_an_nfc_display_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            nfd = "cafe\u0301"
+            repo = root / nfd
+            git(root, "init", "-q", "-b", "main", str(repo))
+            st = collect_status(repo, root, DEFAULT_CONFIG)
+            self.assertEqual(st.rel, unicodedata.normalize("NFC", nfd))
+            self.assertTrue(unicodedata.is_normalized("NFC", st.rel))
+            # Der echte Pfad bleibt unangetastet — er ist der Schluessel.
+            self.assertEqual(st.path, repo)
+
+
 class DetachedHeadFetchTests(unittest.TestCase):
     """Ein detached HEAD ist ein gewöhnlicher Zustand, kein Sicherheitsproblem.
 
@@ -6840,6 +6885,36 @@ class RepoFilterLogicTests(unittest.TestCase):
         self.assertEqual(len(gmf_module.filter_repo_dicts(repos, "")), 3)
 
 
+class TransferMessageTests(unittest.TestCase):
+    """Jeder Ablehnungsgrund von `inspect_transfer()` bekommt einen Satz.
+
+    `_transfer_message()` wurde von keinem Test ausgefuehrt. Wird ein Grund
+    umbenannt, faellt sie stumm auf `return check.reason` durch und der
+    Anwender liest ein internes Stichwort statt einer Auskunft.
+    """
+
+    REASONS = ("dirty", "detached", "inspect-failed", "remote-unsafe",
+               "missing-branch", "divergent", "behind", "nothing-push")
+
+    def test_every_reason_becomes_a_sentence(self):
+        ui = TUI(None, Path("/tmp"), DEFAULT_CONFIG, None)
+        for reason in self.REASONS:
+            with self.subTest(reason=reason):
+                check = gmf_module.TransferCheck(reason, ahead=2, behind=3)
+                message = ui._transfer_message(check, "origin", "main")
+                self.assertNotEqual(message, reason)
+                self.assertTrue(message.strip())
+
+    def test_the_reasons_are_exactly_the_ones_inspect_transfer_can_return(self):
+        """Gegenprobe: Ein neuer Grund darf hier nicht unbemerkt fehlen."""
+        source = Path(gmf_module.__file__).read_text(encoding="utf-8")
+        start = source.index("def inspect_transfer(")
+        end = source.index("def safe_push_args(")
+        found = set(re.findall(r'TransferCheck\(\s*"([a-z-]+)"',
+                               source[start:end]))
+        self.assertEqual(found - {"ready"}, set(self.REASONS))
+
+
 class ListNavigationBoundsTests(unittest.TestCase):
     """Die Auswahl der Repo-Liste bleibt ein gültiger Index.
 
@@ -7205,7 +7280,13 @@ class FilterCliTests(unittest.TestCase):
             "--filter", "api",
             remote_repos=[self._remote_repo("api-gateway", branch="andere"),
                           self._remote_repo("blog")])
-        self.assertIn("api", out.splitlines()[0])
+        # Die ganze Zeile pruefen, nicht nur "api": Der Suchtext steckt auch im
+        # Repo-Namen der DRIFT-Zeile darunter — ein `assertIn` blieb gruen,
+        # obwohl der Hinweis gar nicht mehr gedruckt wird.
+        self.assertEqual(
+            out.splitlines()[0],
+            gmf_module.t("diff_filter_note", q="api", n=1, total=2, m=1, mt=2,
+                         h="host"))
         # Der Hinweis ist kein Unterschied: Der Exit-Code beschreibt weiterhin
         # nur die Vergleichszeilen.
         self.assertEqual(code, 1)
@@ -7870,6 +7951,80 @@ class TuiBackgroundFetchTests(unittest.TestCase):
                          "Der lokal aufgefrischte Eintrag behaelt seinen juengeren Stand")
         self.assertEqual(nach_pfad[f"/tmp/{nfd}"], 2,
                          "Der andere Eintrag darf davon nicht ueberschrieben werden")
+
+    def test_the_visible_list_is_rebuilt_when_the_scan_finishes(self):
+        """Wer eine Liste anfasst, muss die andere mitziehen.
+
+        Die vorhandenen Tests des Scanendes sahen nur `all_statuses`. Ohne das
+        `apply_filter()` in `_finish_scan()` bliebe `statuses` auf dem Stand von
+        vor dem Scan stehen: veraltete Zahlen, und ein neu gefundenes Repo wäre
+        gar nicht sichtbar.
+        """
+        ui = self._ui(["alpha", "beta"])
+        ui.scan = self.FakeScan()
+        ui.scan.queue.put(("done", [
+            self._st("alpha", modified=5), self._st("beta"), self._st("neu")]))
+        ui.drain_background_scan()
+        self.assertEqual([(s.rel, s.modified) for s in ui.statuses],
+                         [("alpha", 5), ("beta", 0), ("neu", 0)])
+        self.assertEqual([s.rel for s in ui.all_statuses],
+                         [s.rel for s in ui.statuses])
+
+    def test_a_filter_survives_the_end_of_the_scan(self):
+        ui = self._ui(["api-gateway", "blog"])
+        ui.filter_query = "api"
+        ui.apply_filter()
+        ui.scan = self.FakeScan()
+        ui.scan.queue.put(("done", [
+            self._st("api-gateway", modified=3), self._st("blog"),
+            self._st("api-docs")]))
+        ui.drain_background_scan()
+        # Sortiert wird nach Dringlichkeit: das geaenderte Repo zuerst.
+        self.assertEqual([(s.rel, s.modified) for s in ui.statuses],
+                         [("api-gateway", 3), ("api-docs", 0)])
+        self.assertEqual(len(ui.all_statuses), 3)
+
+    def test_a_single_result_is_matched_by_path_not_by_display_name(self):
+        """Einzelmeldung `("one", …)` mit zwei Ordnern, die nur NFC/NFD trennt.
+
+        Der vorhandene Test schickte nur `("done", …)` und deckte damit
+        `_finish_scan()` ab; `_merge_scanned()` blieb ungeschützt. Über `rel`
+        gesucht, ersetzte das eine Repo den Zustand des anderen.
+        """
+        nfd = "cafe\u0301"
+        nfc = unicodedata.normalize("NFC", nfd)
+        ui = self._ui([])
+        ui.all_statuses = [
+            RepoStatus(path=Path("/tmp") / nfc, rel=nfc, modified=1),
+            RepoStatus(path=Path("/tmp") / nfd, rel=nfc, modified=99),
+        ]
+        ui.statuses = list(ui.all_statuses)
+        ui.scan = self.FakeScan()
+        ui.scan.queue.put(
+            ("one", RepoStatus(path=Path("/tmp") / nfd, rel=nfc, modified=2)))
+        ui.drain_background_scan()
+        nach_pfad = {str(s.path): s.modified for s in ui.all_statuses}
+        self.assertEqual(sorted(nach_pfad), sorted([f"/tmp/{nfc}", f"/tmp/{nfd}"]),
+                         "Ueber `rel` gesucht, ersetzt ein Repo das andere")
+        self.assertEqual(nach_pfad[f"/tmp/{nfc}"], 1)
+        self.assertEqual(nach_pfad[f"/tmp/{nfd}"], 2)
+
+    def test_every_scan_starts_with_an_empty_refresh_list(self):
+        """Sonst verwirft JEDER weitere Scan das Ergebnis von damals.
+
+        `locally_refreshed` merkt sich Repos, die während des laufenden Scans
+        lokal neu eingelesen wurden. Bliebe der Eintrag stehen, käme das Repo
+        auch in allen folgenden Scans nie wieder auf den neuesten Stand.
+        """
+        ui = self._ui(["alpha"])
+        ui.locally_refreshed.add(Path("/tmp") / "alpha")
+        with mock.patch.object(gmf_module, "BackgroundScan"):
+            ui.dispatch_action("R")
+        self.assertEqual(ui.locally_refreshed, set())
+        ui.scan.queue = queue.Queue()
+        ui.scan.queue.put(("done", [self._st("alpha", modified=42)]))
+        ui.drain_background_scan()
+        self.assertEqual([s.modified for s in ui.all_statuses], [42])
 
     def test_a_running_scan_shows_its_progress_in_the_header(self):
         ui = self._ui(["alpha"])
