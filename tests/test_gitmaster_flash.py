@@ -8326,6 +8326,44 @@ class CommitWizardSelectionTests(unittest.TestCase):
         taken, _ = self._run([ord("n"), ord("a"), 10])
         self.assertEqual(len(taken), 3)
 
+    def test_space_treats_one_path_as_one_decision(self):
+        """Zwei Zeilen koennen denselben Pfad tragen.
+
+        Nach `git rm --cached x` meldet der Status ihn als `D ` (aus dem Index
+        entfernt) UND als `??` (im Arbeitsbaum noch da). Getrennt angehakt,
+        widersprachen sich die beiden Zeilen auf dem Schirm, waehrend
+        `_commit_step2()` sie ohnehin wieder zu einem Pfad zusammenfaltet — das
+        Haekchen auf der einen Zeile blieb also wirkungslos.
+        """
+        st = RepoStatus(path=Path("/tmp/x"), rel="x", files=[
+            ChangedFile("M", "a.txt", " M"),
+            ChangedFile("D", "cfg.local", "D "),
+            ChangedFile("U", "cfg.local", "??"),
+        ])
+        gesehen = {}
+
+        def step2(_self, _st, items):
+            gesehen["items"] = [(it["path"], it["include"]) for it in items]
+            return True
+
+        # Zweimal ↓ auf die "??"-Zeile von cfg.local, dann ␣, dann ⏎.
+        ui = TUI(self.Screen([curses.KEY_DOWN, curses.KEY_DOWN, ord(" "), 10]),
+                 Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = ui.statuses = [st]
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch("gitmaster_flash.curses.curs_set"), \
+                mock.patch.object(TUI, "_commit_step2", step2):
+            ui.action_commit_wizard()
+
+        self.assertEqual(gesehen["items"],
+                         [("a.txt", True), ("cfg.local", False),
+                          ("cfg.local", False)])
+
+    def test_space_still_toggles_only_the_chosen_path(self):
+        """Gegenprobe: Verschiedene Pfade bleiben unabhaengig."""
+        taken, _ = self._run([ord(" "), 10])
+        self.assertEqual(sorted(taken), ["docs/neu.md", "src/util.py"])
+
     def test_g_replaces_the_selection_with_the_chosen_suggestion(self):
         # G öffnet die Liste, ⏎ nimmt den ersten Vorschlag, ⏎ committet.
         taken, _ = self._run([ord("g"), 10, 10])

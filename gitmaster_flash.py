@@ -6574,10 +6574,20 @@ class TUI:
             elif ch == ord(" "):
                 selected = items[sel]
                 include = not selected["include"]
+                # Ein Pfad ist EINE Entscheidung. Zwei Zeilen koennen denselben
+                # Pfad tragen: Nach `git rm --cached x` meldet der Status ihn
+                # als `D ` (aus dem Index entfernt) UND als `??` (im
+                # Arbeitsbaum noch da). Getrennt angehakt, widersprachen sich
+                # die beiden Zeilen auf dem Schirm, waehrend `_commit_step2()`
+                # sie ohnehin wieder zu einem Pfad zusammenfaltet — das Haekchen
+                # auf der einen Zeile blieb also wirkungslos
+                # (Review-Fund 2026-09-03). Ein Rename-Paar haengt aus dem
+                # gleichen Grund zusammen, nur ueber verschiedene Pfade.
                 related = [it for it in items
-                           if selected["rename_group"]
-                           and it["rename_group"] == selected["rename_group"]]
-                for it in related or [selected]:
+                           if it["path"] == selected["path"]
+                           or (selected["rename_group"]
+                               and it["rename_group"] == selected["rename_group"])]
+                for it in related:
                     it["include"] = include and it["committable"]
             elif ch in (ord("a"), ord("A")):
                 for it in items:
