@@ -4,9 +4,11 @@
   "campaign": {
     "id": "20260903T095958732950+0200",
     "token_budget": 1000000,
-    "status": "active",
+    "status": "complete",
     "started_at": "2026-09-03T09:59:58+02:00",
-    "tokens_spent": 165395
+    "tokens_spent": 173395,
+    "finished_at": "2026-09-03T11:32:37+02:00",
+    "finish_reason": "all-current"
   },
   "campaign_history": [
     {
@@ -181,15 +183,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260903T095958732950+0200",
-        "completed_at": "2026-09-03T10:56:37+02:00",
-        "observed_head": "6fd11b76b342364143fc89348560acf632511cbb",
-        "content_sha256": "5cd76f416eab3f7ceca3f98005d0491bf2b4e858eff8076d4612afcbf2910486",
+        "completed_at": "2026-09-03T11:32:29+02:00",
+        "observed_head": "cc0936b48de2cb1aa6be9ca7726c2c364fe640fc",
+        "content_sha256": "95c4a73eceb1e995f16d18ee595602d886e196def5147ba09d86578fdf999d9e",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Die vier Regeln der 0.22.4-Korrekturen samt Begruendung festgehalten: unborn HEAD ist ein gewoehnlicher Zustand (branch_delta), fehlende config.json-Werte bekommen Platzhalter, curses.curs_set nur in set_cursor_visible, AD-Eintraege sind sichtbar aber nicht anwaehlbar. Dazu die Installer-Regel zur Zeilenfortsetzung. Delta (Rueckfrage-Balken 0.22.3) mitgeprueft; keine privaten Remotes oder Hosts im oeffentlichen Text.",
+        "summary": "Die drei Einzelstellen der Kampagne (scroll_window, file_row/FILE_CODE_COLORS, importierte cell_width) als Regel festgehalten, damit die zweite Fassung nicht beim naechsten Mal wieder entsteht.",
         "tests": [
-          "python3 -m unittest discover -s tests: 534 passed (Doku-Vertrag inklusive)"
+          "python3 -m unittest discover -s tests: 542 passed"
         ]
       }
     }
