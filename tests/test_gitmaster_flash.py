@@ -1930,6 +1930,93 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(_remote_root(Path("/srv/code"), None), "/srv/code")
 
 
+class ReplaceRefCountingTests(unittest.TestCase):
+    """Ein `refs/replace/*` darf die angezeigten Zahlen nicht verschieben.
+
+    Ein Replace-Ref deutet den Commit-Graph um. Die Zähler der Anzeige lasen
+    ihn mit, der Push-Preflight (`inspect_transfer`, `RAW_OBJECT_ENV`) nicht:
+    Das Abzeichen sagte „↓3" — also erst pullen —, während `P` zugleich
+    „bereit, 2 Commits" meldete. Und `--diff` machte daraus einen Unterschied
+    zwischen zwei Rechnern, den nur ein rein lokaler Kunstgriff erzeugt.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.bare = self.root / "origin.git"
+        git(self.root, "init", "-q", "--bare", str(self.bare))
+        self.repo = self.root / "work"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        git(self.repo, "remote", "add", "origin", str(self.bare))
+        for i in range(1, 5):
+            (self.repo / "f.txt").write_text(f"{i}\n")
+            git(self.repo, "add", "f.txt")
+            git(self.repo, "commit", "-qm", f"c{i}")
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        for i in (5, 6):
+            (self.repo / "f.txt").write_text(f"{i}\n")
+            git(self.repo, "add", "f.txt")
+            git(self.repo, "commit", "-qm", f"c{i}")
+        git(self.repo, "fetch", "-q", "origin")
+        # c5 bekommt den Wurzel-Commit als Elter: Git sieht danach drei
+        # Commits auf origin/main, die es hier scheinbar nicht gibt.
+        root_commit = git_output(self.repo, "rev-list", "--max-parents=0", "HEAD")
+        git(self.repo, "replace", "--graft",
+            git_output(self.repo, "rev-parse", "HEAD~1"), root_commit)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_git_itself_really_is_fooled_by_the_replace_ref(self):
+        """Ohne die Sperre zählt Git tatsächlich falsch — sonst prüft der Test nichts."""
+        self.assertEqual(
+            git_output(self.repo, "rev-list", "--left-right", "--count",
+                       "HEAD...refs/remotes/origin/main").split(),
+            ["2", "3"])
+
+    def test_the_displayed_counts_describe_the_real_history(self):
+        self.assertEqual(
+            gmf_module.branch_delta(self.repo, "refs/remotes/origin/main", 10),
+            (2, 0))
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual((st.ahead, st.behind), (2, 0))
+        self.assertEqual([(r.ahead, r.behind) for r in st.remotes], [(2, 0)])
+
+    def test_display_and_transfer_preflight_agree(self):
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        check = inspect_transfer(self.repo, "origin", "main", "push", 10)
+        self.assertEqual(check.reason, "ready")
+        self.assertEqual((st.ahead, st.behind), (check.ahead, check.behind))
+
+    def test_branch_list_and_upstream_delta_use_the_real_history(self):
+        self.assertEqual(
+            [(b.name, b.ahead, b.behind)
+             for b in read_branches(self.repo, DEFAULT_CONFIG)],
+            [("main", 2, 0)])
+        self.assertEqual(upstream_delta(self.repo, None, DEFAULT_CONFIG),
+                         ("origin/main", 2, 0))
+
+    def test_a_shallow_clone_is_still_counted_instead_of_broken(self):
+        """Gegenprobe: Nur die Replace-Sperre, nicht die ganze Härtung.
+
+        `RAW_OBJECT_ENV` leert zusätzlich die Shallow-Datei. In einem flachen
+        Klon scheitert dann schon `git rev-list --count HEAD` mit Exit 128 —
+        gmf meldete das Repo als kaputt, statt es zu zählen.
+        """
+        shallow = self.root / "shallow"
+        git(self.root, "clone", "-q", "--depth", "1", "--branch", "main",
+            "file://" + str(self.bare), str(shallow))
+        self.assertEqual(git_output(shallow, "rev-parse",
+                                    "--is-shallow-repository"), "true")
+        st = collect_status(shallow, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.error, "")
+        self.assertEqual((st.ahead, st.behind), (0, 0))
+        self.assertIn("shallow clone",
+                      "\n".join(repo_info_lines(st, DEFAULT_CONFIG)))
+
+
 class RemoteSecurityTests(unittest.TestCase):
     def test_endpoint_fingerprint_omits_credentials_query_and_git_suffix(self):
         a = canonical_remote_target("https://user:secret@example.com/org/repo.git?token=x")

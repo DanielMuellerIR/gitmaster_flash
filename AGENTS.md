@@ -228,6 +228,17 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Adresse wäre Dekoration. Ein eigener Schlüssel oder Port gehört deshalb in
   `~/.ssh/config`, nicht in einen Wrapper; das Befehlsprotokoll zeigt das
   `env -u …` mit an. Reine Lesebefehle des Scans behalten die Benutzerumgebung.
+- Die Zahlen, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der
+  Historie, „gemergt" —, lesen den Commit-Graph mit `NO_REPLACE_ENV`
+  (`branch_delta`, `upstream_delta`, `read_branches`, die beiden `rev-list`-Zeilen
+  der Info-Ansicht). Ein repo-lokales `refs/replace/*` verschob sie sonst, während
+  der Push-Preflight (`RAW_OBJECT_ENV`) die echte Historie sah: Das Abzeichen
+  sagte „↓3“ — erst pullen —, und `P` meldete zugleich „bereit, 2 Commits“; im
+  Rechnervergleich wurde daraus ein Unterschied, den nur ein lokaler Kunstgriff
+  erzeugt (Review-Fund 2026-09-03). Bewusst NUR die Replace-Sperre und nicht das
+  ganze `RAW_OBJECT_ENV`: Dessen leere Shallow-Datei lässt in einem flachen Klon
+  schon `git rev-list --count HEAD` mit Exit 128 scheitern, und gmf meldete das
+  Repo dann als kaputt.
 - `st.branch` kommt aus dem VOLLEN symbolischen Ref (`git symbolic-ref -q HEAD`,
   danach `refs/heads/` abgeschnitten), nie aus `--short`. `--short` liefert nicht
   den Branchnamen, sondern den EINDEUTIGEN Kurznamen: Gibt es einen gleichnamigen

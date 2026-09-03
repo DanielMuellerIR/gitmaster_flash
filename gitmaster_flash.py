@@ -2374,12 +2374,24 @@ REPOSITORY_GIT_ENV = {
 # gehört in ~/.ssh/config; von dort liest `ssh` ihn unverändert.
 TRANSPORT_GIT_ENV = {"GIT_SSH", "GIT_SSH_COMMAND"}
 
+# Ein `refs/replace/*` im Repo deutet den Commit-Graph um. Wer daraus Zahlen
+# liest, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der
+# Historie, „gemergt“ —, muss deshalb die echte Historie sehen. Sonst sagt das
+# Abzeichen „↓3“ (also: erst pullen), obwohl der Remote nichts hat, was hier
+# fehlt, und `--diff` meldete zwischen zwei Rechnern einen Unterschied, den nur
+# ein rein lokaler Kunstgriff erzeugt (Review-Fund 2026-09-03).
+# Bewusst NUR die Replace-Refs: Ein flacher Klon (`--depth`) hat seine
+# Graph-Grenze zu Recht, und die leeren Graft-/Shallow-Dateien aus
+# RAW_OBJECT_ENV lassen dort schon `git rev-list --count HEAD` mit Exit 128
+# scheitern — gmf meldete das Repo dann als kaputt.
+NO_REPLACE_ENV = {"GIT_NO_REPLACE_OBJECTS": "1"}
+
 # Objekt- und Historienprüfungen müssen den echten Commit-Graph sehen. Das leere
 # Graft-/Shallow-Dateien unterdrücken sowohl geerbte Umleitungen als auch die
 # repo-lokalen Graph-Grenzen; GIT_NO_REPLACE_OBJECTS schaltet Replace-Refs ab.
 # `run_git()` lässt genau diese kontrollierten leeren Dateien intern zu.
 RAW_OBJECT_ENV = {
-    "GIT_NO_REPLACE_OBJECTS": "1",
+    **NO_REPLACE_ENV,
     "GIT_GRAFT_FILE": os.devnull,
     "GIT_SHALLOW_FILE": os.devnull,
 }
@@ -3295,11 +3307,12 @@ def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
     Git-Aufruf.
     """
     r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{ref}",
-                timeout=timeout)
+                timeout=timeout, env=NO_REPLACE_ENV)
     if r.returncode != 0:
         if repo_has_head(repo, timeout):
             raise GitReadError("git rev-list failed (exit %d)" % r.returncode)
-        counted = _required_git(repo, "rev-list", "--count", ref, timeout=timeout)
+        counted = _required_git(repo, "rev-list", "--count", ref, timeout=timeout,
+                                env=NO_REPLACE_ENV)
         return 0, int(counted.stdout.strip())
     values = r.stdout.split()
     if len(values) != 2:
@@ -3378,13 +3391,15 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     t_ = cfg["git_timeout"]
     fields = ("%(HEAD)", "%(refname:short)", "%(upstream:short)", "%(upstream:track)",
               "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)")
-    r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_)
+    r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_,
+                env=NO_REPLACE_ENV)
     if r.returncode != 0:
         if strict:
             raise GitReadError("git branch failed (exit %d)" % r.returncode)
         return []
     merged_r = run_git(repo, "branch", "--merged", "HEAD",
-                       "--format=%(refname:short)", timeout=t_)
+                       "--format=%(refname:short)", timeout=t_,
+                       env=NO_REPLACE_ENV)
     if merged_r.returncode != 0 and strict and repo_has_head(repo, t_):
         raise GitReadError("git branch --merged failed (exit %d)" % merged_r.returncode)
     merged = {line.strip() for line in merged_r.stdout.splitlines() if line.strip()}
@@ -3569,10 +3584,10 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     """Wie repo_info_lines, liefert zusätzlich die Zeilenbereiche der Remotes."""
     t_ = cfg["git_timeout"]
 
-    def read_git(*args: str) -> subprocess.CompletedProcess:
+    def read_git(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         """Optionale Info darf bei einem kaputten/langsamen Repo nie die TUI beenden."""
         try:
-            return run_git(st.path, *args, timeout=t_)
+            return run_git(st.path, *args, timeout=t_, env=env)
         except (OSError, subprocess.SubprocessError):
             return subprocess.CompletedProcess(args, 1, "", "")
 
@@ -3595,7 +3610,7 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
         head_rows.append((t("info_last_commit"), f"{date} · {author}"))
         subject_line = subject
 
-        count = read_git("rev-list", "--count", "HEAD")
+        count = read_git("rev-list", "--count", "HEAD", env=NO_REPLACE_ENV)
         shallow = read_git("rev-parse", "--is-shallow-repository")
         if count.returncode == 0:
             clone_kind = (t("info_shallow_clone")
@@ -3611,7 +3626,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     if upstream.returncode == 0 and upstream.stdout.strip():
         upstream_name = upstream.stdout.strip()
         delta = read_git(
-            "rev-list", "--left-right", "--count", f"HEAD...{upstream_name}")
+            "rev-list", "--left-right", "--count", f"HEAD...{upstream_name}",
+            env=NO_REPLACE_ENV)
         delta_fields = delta.stdout.split()
         if delta.returncode == 0 and len(delta_fields) == 2:
             upstream_value = (f"{terminal_text(upstream_name)} "
@@ -3975,7 +3991,8 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     up_remote = up.split("/", 1)[0]
     if not up or up_remote == sync_remote:
         return None, 0, 0                 # kein Upstream oder == Sync-Remote (schon gezeigt)
-    r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{up}", timeout=t_)
+    r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{up}",
+                timeout=t_, env=NO_REPLACE_ENV)
     if r.returncode != 0:
         return None, 0, 0                 # Tracking-Ref (noch) nicht lokal vorhanden
     ahead, behind = r.stdout.split()
