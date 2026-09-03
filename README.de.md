@@ -351,25 +351,34 @@ Lokale Branches:
 ## Commit-Hilfe (`C`)
 
 ```
- Commit-Hilfe · api-gateway — 4/5 gewählt, prüfen, dann ⏎
+ Commit-Hilfe · api-gateway — 4/6 gewählt, prüfen, dann ⏎
  M  README.md                                  ✔ committen
  U  notes.txt                                  ✔ committen
  U  server.py                                  ✔ committen
  U  build/out.o                                ✔ committen
  D  old-draft.md                               — gestaget und gelöscht: nichts zu committen
+ U  vendor/lib/                                — fremdes Repo: im Terminal erledigen
 
  ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter · Esc abbrechen
 ```
 
 1. Alle geänderten und neuen Dateien werden gelistet. `␣` wählt sie an oder ab;
    die Hilfe ändert vor dem Commit weder `.gitignore` noch eine andere Datei im
-   Arbeitsbaum. `A` wählt alle, `N` keine. Eine Art Eintrag lässt sich gar nicht
-   anwählen: eine Datei, die gestaget und danach gelöscht wurde
-   (`git add x && rm x`). Die Hilfe committet die freigegebenen Pfade gegenüber
+   Arbeitsbaum. `A` wählt alle, `N` keine. Zwei Arten von Einträgen lassen sich
+   gar nicht anwählen. Eine Datei, die gestaget und danach gelöscht wurde
+   (`git add x && rm x`): Die Hilfe committet die freigegebenen Pfade gegenüber
    `HEAD`, und so ein Pfad steht weder in `HEAD` noch im Arbeitsbaum — es gibt
-   nichts zu committen. Sichtbar bleibt er trotzdem, denn der Unterschied
-   zwischen Index und Arbeitsbaum ist echt; er sagt es nur, statt den ganzen
-   Commit scheitern zu lassen.
+   nichts zu committen. Und ein Pfad mit `/` am Ende, also ein weiteres
+   Git-Repo mitten im Arbeitsbaum: `git add` machte daraus stillschweigend einen
+   Submodul-Verweis, und `git commit -- sub/` lehnt es ebenfalls ab. Sichtbar
+   bleiben beide, denn beide Unterschiede sind echt; sie sagen es nur, statt den
+   ganzen Commit scheitern zu lassen.
+
+   Alles andere bleibt anwählbar, auch Pfade, die gegenüber `HEAD` am Ende
+   nichts beitragen — ein per `git rm --cached` entfernter Pfad, ein Submodul
+   mit nur schmutzigem Arbeitsbaum. Der Commit lässt sie dann einfach weg, genau
+   wie `git commit -- <pfad>`. Erst wenn KEIN gewählter Pfad etwas beiträgt,
+   sagt die Hilfe das, statt zu committen.
 2. `G` bietet fertige Teilmengen an — denn bei dreißig geänderten Dateien will
    man meist mehrere zusammenhängende Commits statt eines großen. Drei Sichten:
    nach Art der Änderung (geändert / neu / gelöscht), nach oberstem Ordner und

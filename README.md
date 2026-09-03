@@ -331,24 +331,33 @@ Local branches:
 ## Commit helper (`C`)
 
 ```
- Commit helper · api-gateway — 4/5 selected, review then ⏎
+ Commit helper · api-gateway — 4/6 selected, review then ⏎
  M  README.md                                      ✔ commit
  U  notes.txt                                      ✔ commit
  U  server.py                                      ✔ commit
  U  build/out.o                                    ✔ commit
  D  old-draft.md                                   — staged then deleted: nothing to commit
+ U  vendor/lib/                                    — foreign repository: use the terminal
 
  ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel
 ```
 
 1. Every changed and new file is listed. `␣` selects or excludes it; the helper
    never edits `.gitignore` or any other working-tree file before the commit.
-   `A` takes all of them, `N` none. One kind of entry cannot be selected at all:
-   a file you staged and then deleted (`git add x && rm x`). The helper commits
+   `A` takes all of them, `N` none. Two kinds of entry cannot be selected at all.
+   A file you staged and then deleted (`git add x && rm x`): the helper commits
    the approved paths against `HEAD`, and such a path is in neither `HEAD` nor
-   the working tree — there is nothing to commit for it. It stays visible,
-   because the difference between index and working tree is real; it just says
-   so instead of letting the whole commit fail.
+   the working tree — there is nothing to commit for it. And a path ending in
+   `/`, which is another Git repository inside the working tree: `git add` would
+   silently turn it into a submodule link, and `git commit -- sub/` refuses it
+   too. Both stay visible, because both differences are real; they just say so
+   instead of letting the whole commit fail.
+
+   Everything else stays selectable, including paths that turn out to contribute
+   nothing against `HEAD` — a path removed with `git rm --cached`, a submodule
+   whose working tree is merely dirty. The commit then simply leaves them out,
+   exactly as `git commit -- <path>` does. Only when *no* selected path
+   contributes anything does the helper say so instead of committing.
 2. `G` offers ready-made subsets — because with thirty changed files you usually
    want several coherent commits rather than one large one. Three views:
    by kind of change (changed / new / deleted), by top-level folder, and by file

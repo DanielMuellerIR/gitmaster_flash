@@ -361,6 +361,9 @@ TR = {
     "do_nothing_vs_head": {
         "en": "— staged then deleted: nothing to commit",
         "de": "— gestaget und gelöscht: nichts zu committen"},
+    "do_embedded_repo": {
+        "en": "— foreign repository: use the terminal",
+        "de": "— fremdes Repo: im Terminal erledigen"},
     "commit_footer": {
         "en": " ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel",
         "de": (" ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter ·"
@@ -1428,8 +1431,16 @@ def committable_against_head(entry: ChangedFile) -> bool:
     `commit_selected()` anschlagen („temporary index differs from approved
     paths“), und auch alle übrigen, völlig gewöhnlichen Änderungen blieben
     liegen (Review-Fund 2026-09-03).
+
+    Der zweite Fall ist ein Pfad mit Schrägstrich am Ende. Mit
+    ``--untracked-files=all`` fasst Git nur noch EINEN Fall zu einem Ordner
+    zusammen: ein fremdes Git-Repo mitten im Arbeitsbaum. ``git add`` machte
+    daraus stillschweigend einen Submodul-Verweis („adding embedded git
+    repository“) — also etwas, das gar nicht ausgewählt war. Git selbst lehnt
+    ``git commit -- sub/`` ebenfalls ab („pathspec did not match any files
+    known to git“). Der Eintrag bleibt deshalb sichtbar, aber nicht anwählbar.
     """
-    return entry.xy != "AD"
+    return entry.xy != "AD" and not entry.path.endswith("/")
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -1730,8 +1741,23 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         names = _required_git(repo, "diff", "--cached", "--no-renames",
                               "--name-only", "-z", "--", timeout=timeout, env=env)
         actual = {path for path in names.stdout.split("\0") if path}
-        if actual != approved:
+        # Die Zusage lautet: NICHTS committen, was nicht freigegeben ist. Sie
+        # verlangt eine Teilmenge, keine Gleichheit. Ein freigegebener Pfad, der
+        # gegenüber HEAD nichts beiträgt, ist harmlos — genau so verhält sich
+        # auch `git commit -- <pfad>`. Auf Gleichheit geprüft, riss ein einziger
+        # solcher Pfad den GESAMTEN Commit mit: ein per `git rm --cached`
+        # entfernter Pfad, ein Submodul mit nur schmutzigem Arbeitsbaum oder die
+        # Zielhälfte eines Renames, dessen Datei danach gelöscht wurde. Auch
+        # jede gewöhnliche Änderung daneben blieb dann liegen
+        # (Review-Fund 2026-09-03).
+        if actual - approved:
             raise CommitSafetyError("temporary index differs from approved paths")
+        if not actual:
+            # Kein einziger freigegebener Pfad trägt etwas bei. `git commit`
+            # scheiterte hier mit seiner eigenen, in dieser Lage irreführenden
+            # Meldung ("nothing to commit, working tree clean").
+            raise CommitSafetyError(
+                "the selected paths change nothing against HEAD")
         tree_before = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if has_unmerged_entries(repo, timeout):
             raise CommitSafetyError("merge conflicts appeared before commit")
@@ -6468,12 +6494,18 @@ class TUI:
             # Leerzeichen dahinter, das eine vor der Beschriftung und die zwei,
             # die safe_addstr() an den Rändern frei lässt.
             label_width = max(cell_width(t(key)) for key in
-                              ("do_commit", "do_skip", "do_nothing_vs_head"))
+                              ("do_commit", "do_skip", "do_nothing_vs_head",
+                               "do_embedded_repo"))
             path_width = max(1, w - label_width - 6)
             for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
                 it = items[i]
                 if not it["committable"]:
-                    label, pair = t("do_nothing_vs_head"), C_DIM
+                    # Zwei verschiedene Gruende, zwei verschiedene Saetze: ein
+                    # Ordner-Eintrag ist ein fremdes Repo, kein gestagter und
+                    # dann geloeschter Pfad.
+                    label = t("do_embedded_repo" if it["path"].endswith("/")
+                              else "do_nothing_vs_head")
+                    pair = C_DIM
                 elif it["include"]:
                     label, pair = t("do_commit"), C_GREEN
                 else:

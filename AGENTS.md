@@ -400,6 +400,25 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   längsten Beschriftung ab; eine feste Zahl schnitt die neue, längere still ab.
   Der abgedruckte Textblock im README wird nachgebaut und Zeile für Zeile
   geprüft (`DocumentationContractTests`), damit er nicht wieder still veraltet.
+  Der zweite gesperrte Fall ist ein Pfad mit Schrägstrich am Ende. Mit
+  `--untracked-files=all` fasst Git nur noch EINEN Fall zu einem Ordner
+  zusammen: ein fremdes Git-Repo mitten im Arbeitsbaum. `git add` machte daraus
+  stillschweigend einen Submodul-Verweis, also etwas, das gar nicht ausgewählt
+  war; `git commit -- sub/` lehnt es ebenfalls ab. Beide Fälle haben eine eigene
+  Beschriftung — zwei verschiedene Gründe, zwei verschiedene Sätze.
+- Die Freigabeprüfung in `commit_selected()` verlangt eine TEILMENGE, keine
+  Gleichheit: `actual - approved` muss leer sein. Die Zusage lautet „nichts
+  committen, was nicht freigegeben ist"; ein freigegebener Pfad, der gegenüber
+  HEAD nichts beiträgt, ist harmlos, und `git commit -- <pfad>` lässt ihn
+  ebenfalls einfach weg. Auf Gleichheit geprüft, riss ein einziger solcher Pfad
+  den GESAMTEN Commit mit — ein per `git rm --cached` entfernter Pfad
+  (Status `D `), ein Submodul mit nur schmutzigem Arbeitsbaum (` M`) oder die
+  Zielhälfte eines Renames, dessen Datei danach gelöscht wurde (`RD`). Auch jede
+  gewöhnliche Änderung daneben blieb dann liegen, mit einer Meldung, die den
+  schuldigen Pfad nicht einmal nennt (Review-Fund 2026-09-03). Trägt am Ende
+  KEIN freigegebener Pfad etwas bei, sagt gmf genau das, statt `git commit` mit
+  seiner hier irreführenden Meldung („nothing to commit, working tree clean")
+  scheitern zu lassen.
 - Der Hintergrund-Fetch (`R`) ist der einzige Ort, an dem Git-Aufrufe außerhalb
   des Hauptthreads laufen. Drei Regeln hängen daran:
   1. `_run_process_group()` trägt jeden Prozess in `_LIVE_PROCESSES` ein und

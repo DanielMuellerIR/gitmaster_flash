@@ -2878,16 +2878,28 @@ class CommitWizardSafetyTests(unittest.TestCase):
         self.assertFalse(gmf_module.committable_against_head(entries["neu.txt"]))
         self.assertTrue(gmf_module.committable_against_head(entries["one.txt"]))
 
-    def test_committing_such_a_path_would_fail_the_whole_commit(self):
+    def test_committing_such_a_path_contributes_nothing(self):
         """Der Grund für die Ausnahme — hier ausdrücklich festgehalten.
 
         Der temporäre Index startet aus HEAD; den Pfad gibt es dort nicht, im
-        Arbeitsbaum auch nicht. Die Freigabeprüfung schlägt an und nimmt die
-        völlig gewöhnliche Änderung an one.txt mit ins Verderben.
+        Arbeitsbaum auch nicht. Er trägt also nichts bei. Seit die
+        Freigabeprüfung eine Teilmenge statt Gleichheit verlangt, reißt er die
+        gewöhnliche Änderung an one.txt nicht mehr mit — der Commit enthält
+        genau sie, und die Hilfe zeigt für den Pfad trotzdem, dass es dort
+        nichts zu committen gibt.
         """
         self._staged_then_deleted()
-        with self.assertRaises(CommitSafetyError):
-            commit_selected(self.repo, ["neu.txt", "one.txt"], "test", 10, 20)
+        result = commit_selected(self.repo, ["neu.txt", "one.txt"], "test", 10, 20)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            git_output(self.repo, "show", "--name-only", "--format=", "HEAD").split(),
+            ["one.txt"])
+
+    def test_such_a_path_alone_is_nothing_to_commit(self):
+        self._staged_then_deleted()
+        with self.assertRaises(CommitSafetyError) as raised:
+            commit_selected(self.repo, ["neu.txt"], "test", 10, 20)
+        self.assertIn("change nothing against HEAD", str(raised.exception))
 
     def test_the_wizard_leaves_it_unselected_and_says_why(self):
         st = self._staged_then_deleted()
@@ -3286,6 +3298,139 @@ class TagNamedLikeBranchTests(unittest.TestCase):
                 mock.patch("gitmaster_flash.curses.flushinp"):
             ui.action_commit_wizard()
         self.assertEqual(git_output(self.repo, "log", "-1", "--format=%s"), "zwei")
+
+
+class ApprovedPathsWithoutContributionTests(unittest.TestCase):
+    """Ein freigegebener Pfad, der gegenüber HEAD nichts beiträgt.
+
+    Die Freigabeprüfung verlangte Gleichheit von freigegebenen und tatsächlich
+    im temporären Index veränderten Pfaden. Damit riss ein einziger solcher
+    Pfad den GESAMTEN Commit mit — auch jede gewöhnliche Änderung daneben.
+    Betroffen waren `git rm --cached` (Status `D `), ein Submodul mit nur
+    schmutzigem Arbeitsbaum (` M`) und die Zielhälfte eines Renames, dessen
+    Datei danach gelöscht wurde (`RD`). Die Zusage lautet aber „nichts
+    committen, was nicht freigegeben ist" — das ist eine Teilmenge.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = self.root / "repo"
+        git(self.root, "init", "-q", "-b", "main", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        (self.repo / "a.txt").write_text("a\n")
+        (self.repo / "config.local").write_text("c\n")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _selection(self) -> tuple[RepoStatus, list[str]]:
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        paths = list(dict.fromkeys(
+            f.path for f in st.files if gmf_module.committable_against_head(f)))
+        return st, paths
+
+    def test_a_path_removed_from_the_index_only_no_longer_blocks_the_commit(self):
+        (self.repo / "a.txt").write_text("a2\n")
+        git(self.repo, "rm", "-q", "--cached", "config.local")
+        st, paths = self._selection()
+        self.assertEqual([f.xy for f in st.files if f.path == "config.local"],
+                         ["D ", "??"])
+        result = commit_selected(self.repo, paths, "test", 10, 30)
+        self.assertEqual(result.returncode, 0)
+        # Genau das Ergebnis von `git commit -m … -- a.txt config.local`, dem im
+        # Protokoll versprochenen gleichwertigen Befehl.
+        self.assertEqual(
+            git_output(self.repo, "show", "--name-only", "--format=", "HEAD").split(),
+            ["a.txt"])
+        self.assertEqual(
+            git_output(self.repo, "status", "--porcelain=v1",
+                       "--untracked-files=all"), "")
+
+    def test_a_dirty_submodule_no_longer_blocks_the_commit(self):
+        upstream = self.root / "sub-origin"
+        git(self.root, "init", "-q", "-b", "main", str(upstream))
+        git(upstream, "config", "user.email", "t@example.invalid")
+        git(upstream, "config", "user.name", "T")
+        (upstream / "s.txt").write_text("s\n")
+        git(upstream, "add", "s.txt")
+        git(upstream, "commit", "-qm", "s")
+        git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add",
+            "-q", str(upstream), "sub")
+        git(self.repo, "commit", "-qm", "submodul")
+        (self.repo / "sub" / "s.txt").write_text("schmutzig\n")
+        (self.repo / "a.txt").write_text("a2\n")
+        st, paths = self._selection()
+        self.assertIn("sub", paths)
+        result = commit_selected(self.repo, paths, "test", 10, 30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            git_output(self.repo, "show", "--name-only", "--format=", "HEAD").split(),
+            ["a.txt"])
+        # Das Submodul bleibt unangetastet schmutzig — nichts wurde still mitcommittet.
+        self.assertIn("M sub", git_output(self.repo, "status", "--porcelain=v1"))
+
+    def test_a_rename_whose_target_was_deleted_no_longer_blocks_the_commit(self):
+        (self.repo / "alt.txt").write_text("o\n")
+        git(self.repo, "add", "alt.txt")
+        git(self.repo, "commit", "-qm", "alt")
+        git(self.repo, "mv", "alt.txt", "neu.txt")
+        (self.repo / "neu.txt").unlink()
+        (self.repo / "a.txt").write_text("a2\n")
+        st, paths = self._selection()
+        self.assertEqual(sorted(f.xy for f in st.files), [" M", "RD", "RD"])
+        result = commit_selected(self.repo, paths, "test", 10, 30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            sorted(git_output(self.repo, "show", "--name-only", "--format=",
+                              "HEAD").split()),
+            ["a.txt", "alt.txt"])
+
+    def _embed_repository(self) -> None:
+        """Ein fremdes Repo MIT Commit — nur dann macht `git add` einen Gitlink."""
+        inner = self.repo / "sub"
+        git(self.root, "init", "-q", "-b", "main", str(inner))
+        git(inner, "config", "user.email", "t@example.invalid")
+        git(inner, "config", "user.name", "T")
+        (inner / "s.txt").write_text("s\n")
+        git(inner, "add", "s.txt")
+        git(inner, "commit", "-qm", "s")
+
+    def test_an_embedded_repository_is_visible_but_not_selectable(self):
+        self._embed_repository()
+        (self.repo / "a.txt").write_text("a2\n")
+        st, paths = self._selection()
+        self.assertIn("sub/", [f.path for f in st.files])
+        self.assertEqual(paths, ["a.txt"])
+        result = commit_selected(self.repo, paths, "test", 10, 30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            git_output(self.repo, "show", "--name-only", "--format=", "HEAD").split(),
+            ["a.txt"])
+
+    def test_a_path_that_pulls_an_unapproved_one_into_the_tree_still_fails(self):
+        """Gegenprobe: Die Teilmengenprüfung muss weiterhin greifen.
+
+        `git add -- sub/` macht aus dem fremden Repo einen Submodul-Verweis
+        `sub` — ein Pfad, der nicht freigegeben war. Genau davor schützt die
+        Prüfung, und genau deshalb ist `sub/` in der Hilfe gesperrt.
+        """
+        self._embed_repository()
+        (self.repo / "a.txt").write_text("a2\n")
+        with self.assertRaises(CommitSafetyError) as raised:
+            commit_selected(self.repo, ["a.txt", "sub/"], "test", 10, 30)
+        self.assertIn("approved paths", str(raised.exception))
+        self.assertEqual(git_output(self.repo, "log", "--format=%s"), "init")
+
+    def test_a_selection_that_changes_nothing_says_exactly_that(self):
+        git(self.repo, "rm", "-q", "--cached", "config.local")
+        with self.assertRaises(CommitSafetyError) as raised:
+            commit_selected(self.repo, ["config.local"], "test", 10, 30)
+        self.assertIn("change nothing against HEAD", str(raised.exception))
+        self.assertEqual(git_output(self.repo, "log", "--format=%s"), "init")
 
 
 class HookInterferenceTests(unittest.TestCase):
@@ -8740,6 +8885,10 @@ class DocumentationContractTests(unittest.TestCase):
             ChangedFile("U", "build/out.o", "??"),
             # Gestaget und geloescht: gegenueber HEAD gibt es nichts zu committen.
             ChangedFile("D", "old-draft.md", "AD"),
+            # Fremdes Git-Repo im Arbeitsbaum: Nur DIESER Fall kommt auch mit
+            # --untracked-files=all noch als Ordner heraus, und er hat seine
+            # eigene Beschriftung.
+            ChangedFile("U", "vendor/lib/", "??"),
         ]
 
         class Screen(_HeaderScreen):
