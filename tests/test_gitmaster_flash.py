@@ -1423,6 +1423,46 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
         self.assertEqual(git_output(self.repo, "rev-parse", check.remote_ref),
                          check.target_oid)
 
+    def test_failed_tracking_rollback_reports_the_observed_outcome(self):
+        for text in ("2\n", "3\n"):
+            (self.repo / "a.md").write_text(text)
+            git(self.repo, "commit", "-qam", "c" + text.strip())
+        check = inspect_transfer(self.repo, "github", "main", "push")
+        self.assertTrue(check.ready)
+        foreign = git_output(self.repo, "rev-parse", "HEAD~1")
+        original = gmf_module.run_git_logged
+        config_file = self.repo / ".git" / "config"
+        config_text = config_file.read_text()
+        lock = self.repo / ".git" / (check.remote_ref + ".lock")
+        for cause, expected in (("foreign", "raced"), ("lock", "unknown")):
+            with self.subTest(cause=cause):
+                config_file.write_text(config_text)
+                git(self.repo, "update-ref", check.remote_ref, check.target_oid)
+                results = []
+
+                def interfere(repo, *args, **kwargs):
+                    if not results:
+                        git(self.repo, "remote", "set-url", "github", str(self.bk))
+                    elif cause == "foreign":
+                        git(self.repo, "update-ref", check.remote_ref, foreign)
+                    else:
+                        lock.write_text("test lock\n")
+                    result = original(repo, *args, **kwargs)
+                    results.append(result.returncode)
+                    return result
+
+                try:
+                    with mock.patch.object(gmf_module, "run_git_logged",
+                                           side_effect=interfere):
+                        outcome = gmf_module.update_tracking_after_push(self.repo, check, 10)
+                finally:
+                    lock.unlink(missing_ok=True)
+                self.assertEqual(results[0], 0)
+                self.assertNotEqual(results[1], 0)
+                self.assertEqual(outcome, expected)
+                self.assertEqual(git_output(self.repo, "rev-parse", check.remote_ref),
+                                 foreign if cause == "foreign" else check.head_oid)
+
     def test_tracking_cas_failure_never_accepts_a_changed_remote_config(self):
         (self.repo / "a.md").write_text("2\n")
         git(self.repo, "commit", "-qam", "c2")
@@ -6590,6 +6630,28 @@ class RepoTransportOverrideTests(unittest.TestCase):
             f"[core]\n\tgitProxy = {self.proxy}\n"
             "[http]\n\tproxy = http://firmenproxy:3128\n\tsslVerify = false\n")
         self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
+
+    def test_outer_config_includes_stay_allowed(self):
+        """Explizite Scopes müssen dieselben Includes wie die Gesamtlesung sehen."""
+        system = self.root / "system.cfg"
+        self.included.write_text(
+            "[http]\n proxy = http://proxy.example:8080\n sslVerify = false\n")
+        for scope in (self.global_config, system):
+            for condition in ("include", f'includeIf "gitdir:{self.repo}/.git"',
+                              'includeIf "onbranch:main"'):
+                with self.subTest(scope=scope.name, condition=condition):
+                    self.global_config.write_text("")
+                    system.write_text("")
+                    scope.write_text(f"[{condition}]\n path = {self.included}\n")
+                    with mock.patch.dict(os.environ, {
+                            "GIT_CONFIG_SYSTEM": str(system),
+                            "GIT_CONFIG_NOSYSTEM": "0"}):
+                        self.assertEqual(self._reasons(), (None, None, "ready", "ok"))
+                        # Derselbe Eintrag aus dem Repo bleibt verboten.
+                        git(self.repo, "config", "http.proxy", "http://local.example:9")
+                        self.assertEqual(gmf_module.repo_transport_override(
+                            self.repo, 10), "http.proxy")
+                        git(self.repo, "config", "--unset-all", "http.proxy")
 
     def test_a_value_reached_through_an_include_is_caught_too(self):
         """`include.path` aus `.git/config` ist genauso repo-seitig.

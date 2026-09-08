@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.7"
+__version__ = "0.22.8"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -1367,7 +1367,8 @@ def repo_transport_override(repo: Path, timeout: int) -> str | None:
     Ablehnungsgrund.
     """
     def read(pattern: str, as_bool: bool, *scope: str) -> list | None:
-        args = ["config", "-z", "--get-regexp"]
+        # Bei explizitem Scope deaktiviert Git Includes sonst standardmäßig.
+        args = ["config", "--includes", "-z", "--get-regexp"]
         if as_bool:
             args.append("--type=bool")
         result = run_git(repo, *args, *scope, "--", pattern, timeout=timeout)
@@ -4150,13 +4151,24 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
         if config_matches():
             return "ok"
         try:
-            run_git_logged(
+            rolled_back = run_git_logged(
                 repo, *safe_update_ref_args(
                     "--no-deref", check.remote_ref,
                     check.target_oid, check.head_oid), timeout=timeout)
+            if rolled_back.returncode == 0:
+                return "changed"
+            # Eine gescheiterte Rücksetzung belegt keinen unveränderten Ref.
+            # Nur ein lesbarer anderer Stand beweist den parallelen Zugriff;
+            # bei unserem Stand (etwa wegen einer Lockdatei) bleibt es unklar.
+            current = run_git(
+                repo, "rev-parse", "--verify", check.remote_ref,
+                timeout=timeout, env=RAW_OBJECT_ENV)
         except (subprocess.TimeoutExpired, OSError):
             return "unknown"
-        return "changed"
+        if (current.returncode == 0
+                and current.stdout.strip() != check.head_oid):
+            return "raced"
+        return "unknown"
     # Ein paralleler Fetch kann denselben Zielstand schon eingetragen haben.
     try:
         current = run_git(
