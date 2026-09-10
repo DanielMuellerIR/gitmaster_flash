@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.10"
+__version__ = "0.22.11"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -324,7 +324,6 @@ TR = {
     "log_pane_focus": {"en": "  ↑/↓ scroll · Tab back to the list",
                        "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
-    "yesno_extra": {"en": "  (Y/N/{k})", "de": "  (J/N/{k})"},
     # Rot hervorgehobene Ja-Taste in den beiden Rückfragen (draw_question);
     # muss wörtlich in "yesno" bzw. "github_confirm" vorkommen.
     "yes_key": {"en": "Y", "de": "J"},
@@ -3624,7 +3623,13 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     Anzeige, welche Branches vollständig in HEAD stecken.
     """
     t_ = cfg["git_timeout"]
-    fields = ("%(HEAD)", "%(refname:short)", "%(upstream:short)", "%(upstream:track)",
+    # Der VOLLE Ref, danach selbst gekuerzt — nie `:short`. Das liefert nicht
+    # den Branchnamen, sondern den eindeutigen Kurznamen: Gibt es einen
+    # gleichnamigen Tag, antwortet Git `heads/main`. Dieselbe Falle wie bei
+    # `st.branch`; hier trifft sie nur die Anzeige, aber die Info-Seite nannte
+    # denselben Branch dann oben `main` und im Block darunter `heads/main`
+    # (Review-Fund 2026-09-10).
+    fields = ("%(HEAD)", "%(refname)", "%(upstream:short)", "%(upstream:track)",
               "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)")
     r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_,
                 env=NO_REPLACE_ENV)
@@ -3633,11 +3638,16 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
             raise GitReadError("git branch failed (exit %d)" % r.returncode)
         return []
     merged_r = run_git(repo, "branch", "--merged", "HEAD",
-                       "--format=%(refname:short)", timeout=t_,
+                       "--format=%(refname)", timeout=t_,
                        env=NO_REPLACE_ENV)
     if merged_r.returncode != 0 and strict and repo_has_head(repo, t_):
         raise GitReadError("git branch --merged failed (exit %d)" % merged_r.returncode)
-    merged = {line.strip() for line in merged_r.stdout.splitlines() if line.strip()}
+
+    def branch_name(ref: str) -> str:
+        return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+    merged = {branch_name(line.strip())
+              for line in merged_r.stdout.splitlines() if line.strip()}
     branches = []
     for line in r.stdout.splitlines():
         if not line.strip():
@@ -3647,7 +3657,8 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
             if strict:
                 raise GitReadError("git branch returned malformed output")
             continue
-        head, name, upstream, track, oid, date, subject = parts[:7]
+        head, ref, upstream, track, oid, date, subject = parts[:7]
+        name = branch_name(ref)
         # `upstream:track` ist dank LC_ALL=C stabil englisch: "[ahead 2, behind 1]",
         # "[gone]" oder leer.
         ahead = re.search(r"ahead (\d+)", track)
@@ -3690,10 +3701,14 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
     """
     safe_diff = ("diff", "--no-ext-diff", "--no-textconv",
                  "--ignore-submodules=none")
+
+    def against_nothing() -> subprocess.CompletedProcess:
+        """Die ganze Datei zeigen, ohne einen Vergleichspunkt im Repo."""
+        return run_git(repo, *safe_diff, "--no-index", "--", os.devnull, path,
+                       timeout=timeout)
+
     if code == "U":
-        r = run_git(
-            repo, *safe_diff, "--no-index", "--", os.devnull, path,
-            timeout=timeout)
+        r = against_nothing()
     elif repo_has_head(repo, timeout):
         # Gegen HEAD, damit gestagte UND ungestagte Änderungen zusammen erscheinen.
         r = run_git(
@@ -3706,9 +3721,7 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
         # Deshalb genau den jetzigen Pfad vollständig gegen /dev/null zeigen.
         if not os.path.lexists(repo / path):
             return True, ""
-        r = run_git(
-            repo, *safe_diff, "--no-index", "--", os.devnull, path,
-            timeout=timeout)
+        r = against_nothing()
     # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist
     # Erfolg. Exit 1 mit leerer Ausgabe und einer Fehlermeldung ist dagegen ein
     # echter Fehler: `--no-index` gegen ein unversioniertes VERZEICHNIS (Status
@@ -3768,7 +3781,18 @@ def github_web_urls(remote: RemoteConfig) -> list[str]:
     for target in remote.fetch_targets + remote.push_targets:
         if not target.is_github:
             continue
-        path = urllib.parse.quote(target.repo_id, safe="/-._~")
+        try:
+            path = urllib.parse.quote(target.repo_id, safe="/-._~")
+        except (UnicodeError, ValueError):
+            # Dieselbe Rueckfallebene wie in display_remote_url(): Git erlaubt
+            # in einer Remote-Adresse Bytes ohne UTF-8-Bedeutung, die Leser
+            # dekodieren sie mit surrogateescape, und `quote()` lehnt sie ab.
+            # Daraus wird KEINE anklickbare Web-Adresse — aber auch kein Grund,
+            # die Info-Ansicht zu beenden. Der Aufruf steht ausserhalb des
+            # try/except um read_remote_configs(), und dispatch_action() faengt
+            # nur TimeoutExpired: gmf endete mit einem Traceback
+            # (Review-Fund 2026-09-10).
+            continue
         url = "https://github.com" + path
         if url not in urls:
             urls.append(url)
@@ -3835,8 +3859,13 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
         (t("info_branch"), branch),
     ]
 
+    # Dieselbe Historie wie die Zahl direkt darunter: Ein repo-lokales
+    # `refs/replace/<HEAD>` liess sonst Kurz-OID, Datum und Betreff die
+    # Ersetzung beschreiben, waehrend "Historie: n Commits" den echten Graph
+    # zaehlte — zwei Angaben ueber verschiedene Commits in derselben Ansicht.
     commit = read_git(
-        "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD")
+        "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD",
+        env=NO_REPLACE_ENV)
     fields = commit.stdout.rstrip("\n").split("\0", 4) if commit.returncode == 0 else []
     subject_line = ""
     if len(fields) == 5:
@@ -3990,7 +4019,8 @@ def branch_block_specs(branches: list[BranchInfo]) -> list:
             labels.append(t("info_branch_upstream_gone"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
         rows = [(t("info_branch_commit"),
-                 f"{branch.oid} · {branch.date} · {terminal_text(branch.subject)}")]
+                 f"{terminal_text(branch.oid)} · {terminal_text(branch.date)}"
+                 f" · {terminal_text(branch.subject)}")]
         if branch.upstream:
             rows.append((t("info_upstream"),
                          f"{terminal_text(branch.upstream)} "
@@ -5450,6 +5480,7 @@ class TUI:
         self.view_mode = "detail"
         self.focus = "repos"       # "repos" oder "log" (Tab wechselt)
         self.log_top = 0           # erste sichtbare Protokollzeile
+        self.log_visible = 1       # zuletzt gezeichnete Hoehe (Seitenschritt)
         self.log_selected = None   # gewählte Protokollzeile (None = noch nie dort)
         self.compact_col = 0       # erste sichtbare Spalte der Kompaktansicht
         self.scan: BackgroundScan | None = None   # laufender Hintergrund-Fetch
@@ -5823,13 +5854,14 @@ class TUI:
         for row in range(rows + (1 if hint else 0)):
             safe_addstr(self.scr, top + row, 0, " " * max(0, w - 1))
         sel_row, sel_col = compact_position(self.selected, rows)
-        # Immer so scrollen, dass die Auswahl sichtbar bleibt.
-        if sel_col < self.compact_col:
-            self.compact_col = sel_col
-        if sel_col >= self.compact_col + columns:
-            self.compact_col = sel_col - columns + 1
+        # Immer so scrollen, dass die Auswahl sichtbar bleibt — nach derselben
+        # Regel wie die vier Listen, nur waagerecht. Sie stand hier von Hand
+        # ausgeschrieben und kannte deshalb die untere Hoehenschranke nicht,
+        # die `scroll_window` nach dem Fund von 2026-09-03 bekommen hat.
         total_columns = max(1, math.ceil(len(cells) / rows)) if cells else 1
-        self.compact_col = max(0, min(self.compact_col, max(0, total_columns - columns)))
+        self.compact_col = min(
+            scroll_window(sel_col, self.compact_col, columns),
+            max(0, total_columns - columns))
         for index, (mark, name, pair) in enumerate(cells):
             row, column = compact_position(index, rows)
             if not (self.compact_col <= column < self.compact_col + columns):
@@ -5868,17 +5900,20 @@ class TUI:
                     curses.color_pair(C_DIM)
                     | (curses.A_REVERSE if focused else curses.A_BOLD))
         visible = max(1, log_h - 1)
+        # In der Kompaktansicht bekommt das Protokoll den ganzen Rest, `draw()`
+        # vergroessert `log_h` also gegenueber `log_height()`. Der Seitenschritt
+        # von Bild auf/ab muss diese wirklich gezeichnete Hoehe benutzen, sonst
+        # springt eine "Seite" um zwei Eintraege, waehrend siebzehn zu sehen
+        # sind (Review-Fund 2026-09-10).
+        self.log_visible = visible
         entries = COMMAND_LOG or [t("cmdlog_empty")]
         max_top = max(0, len(entries) - visible)
         if focused:
             # Die Auswahl bleibt beim Hin- und Herwechseln stehen; sie muss nur
             # sichtbar sein, deshalb wandert der Ausschnitt hinter ihr her.
             self.log_selected = min(max(0, self.log_selected or 0), len(entries) - 1)
-            if self.log_selected < self.log_top:
-                self.log_top = self.log_selected
-            if self.log_selected >= self.log_top + visible:
-                self.log_top = self.log_selected - visible + 1
-            self.log_top = max(0, min(self.log_top, max_top))
+            self.log_top = min(
+                scroll_window(self.log_selected, self.log_top, visible), max_top)
         else:
             # Ohne Fokus immer am Ende: die letzte Aktion ist die interessante.
             self.log_top = max_top
@@ -5925,21 +5960,22 @@ class TUI:
         except curses.error:
             pass
 
-    def confirm(self, question: str, extra_key: str = "") -> bool | str:
+    def confirm(self, question: str) -> bool:
         """Rückfrage als Balken über der Fußzeile: J/Y bestätigt, N/Esc bricht ab.
 
-        Mit ``extra_key`` bekommt der Dialog eine dritte Antwort — für den Fall,
-        dass er neben Ja und Nein noch einen anderen Weg anbietet (etwa
-        „stattdessen alle Dateien"). Diese Taste liefert dann sich selbst als
-        Rückgabewert. Aufrufer müssen deshalb auf ``is True`` prüfen: Ein
-        Buchstabe ist in Python wahr und würde sonst als Zustimmung durchgehen.
+        Bis 2026-09-10 konnte der Dialog über ``extra_key`` eine dritte Antwort
+        anbieten und gab dann diesen Buchstaben zurück. Der einzige Aufrufer war
+        die entfernte `V`-Aktion („Datei verwerfen"); die Änderungsansicht ist
+        seither ausdrücklich rein lesend, ein neuer Aufrufer ist also nicht
+        vorgesehen. Übrig blieb ein Rückgabetyp ``bool | str``, bei dem ein
+        Buchstabe in Python wahr ist und ohne Prüfung auf ``is True`` als
+        Zustimmung durchginge — eine Fußangel ohne Nutzen.
         """
         h, _ = self.scr.getmaxyx()
-        hint = t("yesno_extra", k=extra_key.upper()) if extra_key else t("yesno")
         # Zeile h-4 ist sonst die Meldungszeile; die Leerzeile darüber deckt
         # kurz die letzte Protokollzeile ab und kommt mit dem nächsten
         # Neuzeichnen zurück.
-        self.draw_question(h - 4, question + hint, t("yes_key"))
+        self.draw_question(h - 4, question + t("yesno"), t("yes_key"))
         self.scr.refresh()
         try:
             while True:
@@ -5948,8 +5984,6 @@ class TUI:
                     return True
                 if ch in (ord("n"), ord("N"), 27):
                     return False
-                if extra_key and ch in (ord(extra_key.lower()), ord(extra_key.upper())):
-                    return extra_key.upper()
         finally:
             set_cursor_visible(False)
 
@@ -5974,10 +6008,21 @@ class TUI:
         buf: list[str] = list(initial)
         while True:
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, y, 1, (prompt + "".join(buf)).ljust(w - 2),
+            # Wie in draw_question(): nach BEIDEN Seiten klemmen und den
+            # Cursorsprung abfangen. Die Aufrufer rechnen `h - 4` bzw. `h - 2`;
+            # in einem sehr kleinen Fenster (drei Zeilen, etwa eine schmale
+            # tmux-Pane) wurde daraus eine negative Zeile, `move()` warf
+            # curses.error, und die Ausnahme lief bis aus `curses.wrapper`
+            # heraus — gmf endete beim Druck auf `/` mit einem Traceback
+            # (Review-Fund 2026-09-10, an echtem curses nachgestellt).
+            row = max(0, min(y, h - 1))
+            safe_addstr(self.scr, row, 1, (prompt + "".join(buf)).ljust(w - 2),
                         curses.A_BOLD)
             cursor_x = 1 + cell_width(terminal_text(prompt + "".join(buf)))
-            self.scr.move(min(y, h - 1), min(cursor_x, max(0, w - 2)))
+            try:
+                self.scr.move(row, min(cursor_x, max(0, w - 2)))
+            except curses.error:
+                pass
             self.scr.refresh()
             ch = self.scr.get_wch()
             if ch in ("\n", "\r"):
@@ -7177,7 +7222,7 @@ class TUI:
                     self.log_selected = min(last, current + 1)
                     continue
                 if ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
-                    step = max(1, self.log_height(self.scr.getmaxyx()[0]) - 1)
+                    step = max(1, self.log_visible)
                     self.log_selected = max(0, min(
                         last, current + (step if ch == curses.KEY_NPAGE else -step)))
                     continue
@@ -7326,6 +7371,30 @@ def _dgit_conflict(repo: Path, *args: str) -> None:
                                             result.stdout, result.stderr)
 
 
+def _demo_harden(repo: Path) -> None:
+    """Identitaet festlegen und jede maschinenabhaengige Datei ausblenden.
+
+    Diese Liste IST der Reproduzierbarkeits-Vertrag der Demo. Sie stand bis
+    2026-09-10 zweimal ausgeschrieben — einmal hier, einmal im Repo ohne
+    Remote. Eine sechste Haertung haette dort still gefehlt, und genau dieses
+    eine Demo-Repo waere maschinenabhaengig geworden, ohne dass etwas
+    fehlschlaegt.
+
+    `core.attributesFile` gehoert dazu: `GIT_CONFIG_GLOBAL=/dev/null` ersetzt
+    nur die Config, nicht die Attribut-Datei. Ein globales
+    `~/.config/git/attributes` mit `working-tree-encoding` oder einer
+    `text`-Variante veraenderte den beim `git add` geschriebenen Blob — andere
+    Blob- und Commit-IDs, und `docs/make-screens.py --check` schluege auf
+    dieser Maschine fehl.
+    """
+    _dgit(repo, "config", "user.email", "demo@example.invalid")
+    _dgit(repo, "config", "user.name", "Demo")
+    _dgit(repo, "config", "commit.gpgsign", "false")
+    _dgit(repo, "config", "core.excludesFile", "/dev/null")
+    _dgit(repo, "config", "core.hooksPath", "/dev/null")
+    _dgit(repo, "config", "core.attributesFile", "/dev/null")
+
+
 def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]:
     """Neues Repo mit eigenem bare-"origin"-Remote + Erst-Commit, gepusht, upstream=origin/<branch>.
 
@@ -7338,13 +7407,7 @@ def _demo_repo(root: Path, name: str, branch: str = "main") -> tuple[Path, Path]
     repo = root / name
     repo.mkdir()
     _dgit(repo, "init", "-q", "-b", branch)
-    _dgit(repo, "config", "user.email", "demo@example.invalid")
-    _dgit(repo, "config", "user.name", "Demo")
-    _dgit(repo, "config", "commit.gpgsign", "false")
-    # Globale gitignore/Hooks ausblenden, sonst hängt das Demo-Ergebnis an der
-    # Maschine (eine globale .DS_Store-Regel würde z.B. eine Zeile verschlucken).
-    _dgit(repo, "config", "core.excludesFile", "/dev/null")
-    _dgit(repo, "config", "core.hooksPath", "/dev/null")
+    _demo_harden(repo)
     (repo / "README.md").write_text(f"# {name}\n")
     _dgit(repo, "add", "README.md")
     _dgit(repo, "commit", "-qm", "initial commit")
@@ -7376,8 +7439,14 @@ def _demo_extra_remote(root: Path, repo: Path, remote: str, branch: str = "main"
         _dgit(repo, "remote", "set-url", remote, url)
 
 
-def _demo_ahead(repo: Path, n: int, branch: str = "main") -> None:
-    """n Commits erzeugen, die auf origin fehlen (Repo ist 'voraus')."""
+def _demo_ahead(repo: Path, n: int) -> None:
+    """n Commits auf dem ausgecheckten Branch erzeugen (Repo ist 'voraus').
+
+    Bewusst ohne `branch`-Argument: Die Commits landen dort, wo HEAD steht.
+    Ein Parameter, der eine Wahl verspricht, die der Rumpf nicht trifft,
+    committet beim ersten Aufrufer, der ihn setzt, stumm auf den falschen
+    Branch.
+    """
     for i in range(n):
         _demo_commit(repo, "work.txt", f"step {i}\n", f"feat: step {i}")
 
@@ -7404,15 +7473,11 @@ def build_demo_sandbox(base: Path) -> Path:
 
     # 1) sauber & synchron, aber 3 Commits vor 'github' (cyaner Upstream-Badge)
     repo, _ = _demo_repo(root, "webshop-frontend")
-    gh = root / "_remotes" / "webshop-frontend-github.git"
-    gh.mkdir(parents=True)
-    _dgit(gh, "init", "-q", "--bare")
-    _dgit(repo, "remote", "add", "github", str(gh))
-    _dgit(repo, "push", "-q", "github", "main")               # github/main = Basis
-    # Nach dem lokalen Aufbau nur die URL auf eine harmlose Beispieladresse
-    # umstellen. So zeigt die Demo die echte GitHub-Sicherheitsklasse, ohne Netz.
-    _dgit(repo, "remote", "set-url", "github",
-          "https://github.com/example/webshop-frontend.git")
+    # github/main = Basis. Derselbe Helfer wie bei allen anderen Repos: Der
+    # Block stand hier Zeile fuer Zeile ein zweites Mal, und eine Aenderung an
+    # der Remote-Anlage haette dieses eine Repo stillschweigend ausgelassen.
+    _demo_extra_remote(root, repo, "github",
+                       url="https://github.com/example/webshop-frontend.git")
     for i in range(3):
         _demo_commit(repo, "app.js", f"// build {i}\n", f"feat: change {i}")
     _dgit(repo, "push", "-q", "origin", "main")               # origin synchron
@@ -7560,11 +7625,7 @@ def build_demo_sandbox(base: Path) -> Path:
     repo = root / "scratchpad"
     repo.mkdir()
     _dgit(repo, "init", "-q", "-b", "main")
-    _dgit(repo, "config", "user.email", "demo@example.invalid")
-    _dgit(repo, "config", "user.name", "Demo")
-    _dgit(repo, "config", "commit.gpgsign", "false")
-    _dgit(repo, "config", "core.excludesFile", "/dev/null")
-    _dgit(repo, "config", "core.hooksPath", "/dev/null")
+    _demo_harden(repo)
     (repo / "idea.md").write_text("# scratch\n")
     _dgit(repo, "add", "idea.md")
     _dgit(repo, "commit", "-qm", "initial commit")

@@ -54,6 +54,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Wer hier eine Sequenz ergänzt, prüft mit `--check`, dass die vorhandenen Bilder
   byteweise gleich bleiben — ändern sie sich, war die Ergänzung falsch oder das
   alte Bild war es.
+- Die Härtung eines Demo-Repos steht in `_demo_harden()` und nirgends sonst:
+  Identität, `commit.gpgsign`, `core.excludesFile`, `core.hooksPath` und
+  `core.attributesFile`. Diese Liste IST der Reproduzierbarkeits-Vertrag der
+  Demo. Sie stand bis 2026-09-10 zweimal ausgeschrieben, und eine sechste
+  Härtung hätte im Repo ohne Remote still gefehlt. `core.attributesFile` gehört
+  dazu, weil `GIT_CONFIG_GLOBAL=/dev/null` nur die Config ersetzt, nicht die
+  Attribut-Datei — ein globales `~/.config/git/attributes` mit
+  `working-tree-encoding` veränderte sonst den geschriebenen Blob und damit die
+  Commit-IDs.
 - Nach jedem Demo-/PTY-Lauf prüfen, dass kein `gitmaster_flash.py --demo`- oder
   Testprozess übrig ist. Einen Prozess nur mit eindeutigem Projektbezug beenden;
   fremde Python-Dienste und Automationen unangetastet lassen.
@@ -80,8 +89,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   nicht die, an der jemand nachsehen würde.
 - Zwei Regeln, die mehrere Ansichten teilen, stehen je genau einmal im Code, und
   ein Test hält das fest. `scroll_window()` verschiebt den sichtbaren Ausschnitt
-  von Repo-Liste, Änderungsansicht, Commit-Hilfe und Vorschlagsliste — vorher
-  viermal von Hand gerechnet, einmal ohne untere Schranke für die Höhe.
+  von Repo-Liste, Änderungsansicht, Commit-Hilfe, Vorschlagsliste, dem
+  Befehlsprotokoll und den Spalten der Kompaktansicht — vorher sechsmal von Hand
+  gerechnet, dreimal ohne untere Schranke für die Höhe. Der Seitenschritt von
+  Bild auf/ab im Protokoll nimmt die zuletzt WIRKLICH gezeichnete Höhe
+  (`log_visible`): In der Kompaktansicht vergrößert `draw()` den
+  Protokollbereich gegenüber `log_height()`, und eine „Seite" sprang sonst um
+  zwei Einträge, während siebzehn zu sehen waren (Review-Fund 2026-09-10).
   `file_row()` baut die Datei-Zeile für die aufgeklappte Liste UND die
   Änderungsansicht; beide zeigen dieselben Einträge, und `FILE_CODE_COLORS` ist
   die einzige Zuordnung von Anzeigecode zu Farbe. Auch die Zellbreite kommt aus
@@ -336,7 +350,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   der Commit scheiterte dauerhaft mit „HEAD changed after UI approval", der Push
   mit „inspect failed", und die Repo-Zeile behauptete, der Branch liege nicht auf
   origin (Review-Fund 2026-09-03). Dasselbe gilt für jeden künftigen Leser, der
-  einen Ref-Namen wieder zusammensetzen will.
+  einen Ref-Namen wieder zusammensetzen will — und für `read_branches()`, das
+  seit 2026-09-10 `%(refname)` liest und selbst kürzt statt `%(refname:short)`.
+  Dort trifft die Falle nur die Anzeige, aber die Info-Seite nannte denselben
+  Branch oben `main` und im Block darunter `heads/main`.
 - Ein Repo ohne ersten Commit ist ein gewöhnlicher Zustand, kein Fehler. Nach
   dem Klonen eines LEEREN Repos zeigt HEAD auf einen Branch, den es noch nicht
   gibt; sobald jemand den ersten Commit pusht und man fetcht, existiert der
@@ -355,6 +372,21 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - `curses.curs_set()` steht ausschließlich in `set_cursor_visible()`. Auf einem
   Terminal ohne Cursor-Steuerung wirft curses dort; jeder direkte Aufruf machte
   daraus einen Traceback statt einer Auskunft.
+- Jede Zeilenangabe an `move()` wird nach BEIDEN Seiten geklemmt und der Sprung
+  abgefangen — `draw_question()` und `prompt_line()` tun das. Die Aufrufer
+  rechnen `h - 4` beziehungsweise `h - 2`; in einem drei Zeilen hohen Fenster
+  (schmale tmux-Pane) wird daraus eine negative Zeile, echtes curses wirft
+  darauf `curses.error`, und die Ausnahme lief bis aus `curses.wrapper` heraus:
+  `/` beendete gmf mit einem Traceback (Review-Fund 2026-09-10). Die
+  Test-Bildschirme der Suite werfen bei `move()` nie — solche Fälle fallen dort
+  also nicht von selbst auf.
+- Was eine Web-Adresse aus einer Remote-URL baut, braucht dieselbe Rückfallebene
+  wie `display_remote_url()`: `urllib.parse.quote()` lehnt die
+  surrogateescape-Zeichen ab, mit denen die Leser ein Byte ohne UTF-8-Bedeutung
+  darstellen. `github_web_urls()` hatte sie nicht, der Aufruf steht außerhalb
+  des `try/except` von `build_info_view()`, und `dispatch_action()` fängt nur
+  `TimeoutExpired` — ein Druck auf `I` beendete gmf mit einem Traceback
+  (Review-Fund 2026-09-10).
 - Der reine lokale Scan darf zwölf Worker nutzen; ein Scan mit Fetch höchstens
   acht, und jeder Fetch läuft mit `--jobs=1`. Der verbreitete sshd-Default
   `MaxStartups 10:30:100` verwirft sonst beim kalten Aufbau eines
@@ -647,6 +679,20 @@ liegengebliebene Arbeit aus.
   hintere unter der neuen Einstellung gemessen wurden. Kein Datenrennen, aber
   auch keine Momentaufnahme. Ob eine Einstellungsänderung einen laufenden Scan
   erreichen SOLL, ist eine Produktentscheidung (Review-Fund 2026-09-10).
+- **Der Demo-Modus geht bei `R` und `G` doch ins Netz.** Der AUFBAU der Sandbox
+  bleibt lokal (bare-Repos, danach nur `remote set-url`), aber die drei
+  `github`-Remotes tragen danach echte `https://github.com/example/…`-Adressen.
+  `fetch_remote_block_reason()` sperrt die nicht — Refspec und Adresse sind
+  gewöhnlich —, also setzt `R` (und `G` über `_fetch_remote`) je Remote einen
+  echten `ls-remote` ab. Belegt am 2026-09-10: Für alle drei Repos liefert die
+  Sperrprüfung `None`. Ohne Netz gibt es dafür ein DNS-Fehler-Abzeichen, mit
+  Netz eine „repository not found"-Antwort, und beides bis zu `fetch_timeout`
+  lang — die Demo sieht nach `R` also maschinen- und netzabhängig aus. Die
+  eingecheckten Bilder sind NICHT betroffen: `docs/make-screens.py` drückt nie
+  `R` oder `G`, und `--check` bleibt gleich. Eine Behebung ist keine
+  Kleinigkeit: Eine lokale Fetch-Adresse nähme der Demo genau die
+  GitHub-Sicherheitsklasse, die sie zeigen soll, und ein Demo-Sonderfall im
+  Scan gehörte in den Programmkern. Deshalb hier notiert.
 - `repo_transport_override()` liest die Repo-Config je REMOTE, und beim Fetch
   zweimal. Gemessen am 2026-09-10: Der Aufruf kostet neun `git config`-Prozesse;
   von 31 Git-Aufrufen eines Remote-Fetchs sind 20 `git config`, davon 9 reine

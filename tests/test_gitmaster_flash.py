@@ -136,10 +136,9 @@ class TranslationContractTests(unittest.TestCase):
 
 
 class ConfirmDialogTests(unittest.TestCase):
-    """Die Rückfrage kann eine dritte Antwort anbieten, ohne dass die
-    bestehenden Ja/Nein-Aufrufer etwas davon merken."""
+    """Die Rückfrage kennt genau zwei Antworten und zeichnet sie als Balken."""
 
-    def ask(self, keys, extra_key=""):
+    def ask(self, keys):
         drawn = []
 
         class Screen:
@@ -155,7 +154,7 @@ class ConfirmDialogTests(unittest.TestCase):
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
         with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
                 mock.patch("gitmaster_flash.curses.curs_set") as curs_set:
-            result = ui.confirm("Wirklich?", extra_key)
+            result = ui.confirm("Wirklich?")
         # Cursor sichtbar während der Frage, danach wieder aus.
         self.assertEqual([c.args for c in curs_set.call_args_list], [(1,), (0,)])
         return result, drawn
@@ -166,18 +165,10 @@ class ConfirmDialogTests(unittest.TestCase):
         self.assertIs(self.ask([ord("n")])[0], False)
         self.assertIs(self.ask([27])[0], False)
 
-    def test_extra_key_answers_with_itself_in_both_cases(self):
-        self.assertEqual(self.ask([ord("a")], extra_key="A")[0], "A")
-        self.assertEqual(self.ask([ord("A")], extra_key="A")[0], "A")
-
-    def test_extra_key_is_ignored_when_not_offered(self):
-        # Ohne dritte Antwort darf ein A nicht versehentlich etwas auslösen:
-        # der Dialog wartet weiter, hier bis zum folgenden N.
+    def test_any_other_key_neither_confirms_nor_cancels(self):
+        # Der Dialog kennt nur Ja und Nein: Ein A darf weder zustimmen noch
+        # abbrechen, sondern wartet weiter — hier bis zum folgenden N.
         self.assertIs(self.ask([ord("a"), ord("n")])[0], False)
-
-    def test_the_offered_key_appears_in_the_question(self):
-        _, drawn = self.ask([ord("n")], extra_key="A")
-        self.assertTrue(any("A)" in text for y, text in drawn if y == 20))
 
     def test_question_is_a_bar_with_a_blank_line_above(self):
         # 24 Zeilen: Fußzeile 21-23, Frage-Balken in 20, Leerzeile in 19.
@@ -315,6 +306,39 @@ class TestRemoteUrlDisplay(unittest.TestCase):
         separator = chr(58) + chr(47) * 2
         address = "file" + separator + "/tmp/example.git"
         self.assertEqual(display_remote_url(address), address)
+
+
+class GithubWebUrlTests(unittest.TestCase):
+    """Die anklickbare Web-Adresse darf die Info-Ansicht nie beenden."""
+
+    def test_a_ref_byte_without_utf8_meaning_does_not_end_the_view(self):
+        """`urllib.parse.quote()` lehnt Surrogate ab — hier ohne Rueckfallebene.
+
+        Git erlaubt in einer Remote-Adresse Bytes ohne UTF-8-Bedeutung, die
+        Leser dekodieren sie mit surrogateescape. `display_remote_url()` faengt
+        das seit jeher ab; `github_web_urls()` tat es nicht, der Aufruf steht
+        ausserhalb des try/except von `build_info_view()`, und
+        `dispatch_action()` faengt nur TimeoutExpired: Ein Druck auf `I`
+        beendete gmf mit einem Traceback (Review-Fund 2026-09-10).
+        """
+        broken = gmf_module.canonical_remote_target(
+            "https://github.com/org/" + os.fsdecode(b"re\xffpo") + ".git")
+        remote = gmf_module.RemoteConfig(
+            name="github", fetch_urls=["x"], push_urls=["x"],
+            fetch_targets=[broken], push_targets=[broken])
+        self.assertTrue(broken.is_github)
+
+        self.assertEqual(gmf_module.github_web_urls(remote), [])
+
+    def test_a_normal_github_address_still_becomes_a_web_url(self):
+        """Gegenprobe: Die Rueckfallebene darf den Normalfall nicht schlucken."""
+        target = gmf_module.canonical_remote_target(
+            "git@github.com:example/demo.git")
+        remote = gmf_module.RemoteConfig(
+            name="github", fetch_urls=["x"], push_urls=["x"],
+            fetch_targets=[target], push_targets=[target])
+        self.assertEqual(gmf_module.github_web_urls(remote),
+                         ["https://github.com/example/demo"])
 
 
 class SelectedLineColourTests(unittest.TestCase):
@@ -615,7 +639,10 @@ class ScrollWindowTests(unittest.TestCase):
         source = Path(gmf_module.__file__).read_text(encoding="utf-8")
         self.assertNotIn("off = sel - body_h + 1", source)
         self.assertNotIn("self.offset = sel_row - body_h + 1", source)
-        self.assertEqual(source.count("scroll_window("), 5)   # Definition + vier Listen
+        self.assertNotIn("self.compact_col = sel_col - columns + 1", source)
+        self.assertNotIn("self.log_top = self.log_selected - visible + 1", source)
+        # Definition + vier Listen + Protokoll + Spalten der Kompaktansicht.
+        self.assertEqual(source.count("scroll_window("), 7)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -7719,6 +7746,34 @@ class TuiFilterTests(unittest.TestCase):
         ui = TUI(self.Screen(()), Path("/tmp"), DEFAULT_CONFIG, None, "   ")
         self.assertEqual(ui.filter_query, "")
 
+    def test_the_prompt_survives_a_window_too_small_for_its_row(self):
+        """Ein drei Zeilen hohes Fenster liess `/` mit einem Traceback enden.
+
+        `action_filter()` rechnet `h - 4`, `_edit_setting()` `h - 2`. Beide
+        Zeilen sind dort negativ, und `prompt_line()` klemmte nur nach oben.
+        Echtes curses wirft bei `move(-1, x)` eine `curses.error`, die durch
+        `_loop` (faengt nur TimeoutExpired) bis aus `curses.wrapper` lief.
+        `draw_question()` klemmt seit jeher nach BEIDEN Seiten und faengt den
+        Sprung ab (Review-Fund 2026-09-10).
+        """
+        class TinyScreen(TuiFilterTests.Screen):
+            def getmaxyx(self):
+                return (3, 40)
+
+            def move(self, y, x):
+                # Wie echtes curses: eine Zeile ausserhalb des Fensters ist ERR.
+                if not 0 <= y < 3:
+                    raise curses.error("wmove() returned ERR")
+
+        ui = TUI(TinyScreen(iter(["a", "\n"])), Path("/tmp"), DEFAULT_CONFIG, None)
+        ui.all_statuses = [RepoStatus(path=Path("/tmp/a"), rel="a")]
+        ui.statuses = list(ui.all_statuses)
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.action_filter()
+
+        self.assertEqual(ui.filter_query, "a")
+
     def test_applying_a_filter_narrows_the_visible_list_only(self):
         ui = self._ui(["api-gateway", "blog", "api-docs"])
         ui.filter_query = "api"
@@ -9771,6 +9826,30 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 gmf_module._dgit_conflict(repo, "rev-parse", "--verify",
                                           "gibtesnicht")             # Exit 128
+
+    def test_every_demo_repo_gets_the_same_hardening(self):
+        """Die Haertungsliste IST der Reproduzierbarkeits-Vertrag der Demo.
+
+        Sie stand bis 2026-09-10 zweimal ausgeschrieben — einmal in
+        `_demo_repo()`, einmal im Repo ohne Remote. Eine sechste Haertung
+        haette dort still gefehlt, und genau dieses eine Demo-Repo waere
+        maschinenabhaengig geworden, ohne dass etwas fehlschlaegt.
+        `core.attributesFile` ist genau so eine: `GIT_CONFIG_GLOBAL=/dev/null`
+        ersetzt nur die Config, nicht die Attribut-Datei.
+        """
+        source = Path(gmf_module.__file__).read_text(encoding="utf-8")
+        # Genau eine Stelle schreibt die Liste, alle anderen rufen sie.
+        self.assertEqual(source.count('_dgit(repo, "config", "core.excludesFile"'), 1)
+        self.assertEqual(source.count("_demo_harden(repo)"), 2)  # beide Aufrufer
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = gmf_module._demo_repo(Path(temp), "probe")
+            for key in ("core.excludesFile", "core.hooksPath",
+                        "core.attributesFile"):
+                with self.subTest(key=key):
+                    value = subprocess.run(
+                        ["git", "-C", str(repo), "config", "--get", key],
+                        check=True, capture_output=True, text=True).stdout.strip()
+                    self.assertEqual(value, "/dev/null")
 
     def test_demo_commits_ignore_the_callers_git_environment(self):
         """Demo-Commit-IDs sind ein Vertrag (Bild-Check): GIT_*-Variablen der
