@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.12"
+__version__ = "0.22.13"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -2879,7 +2879,12 @@ def last_error_line(result: subprocess.CompletedProcess) -> str:
     Die eigentliche Ursache steht davor, deshalb wird die Sammelzeile übersprungen.
     """
     lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
-    detailed = [line for line in lines if "could not fetch" not in line]
+    # `hint:` ist Gits Ratgeberzeile, nie die Ursache — und sie steht oft ZULETZT
+    # (etwa nach einem abgelehnten Push). Als Beleg genommen verdraengte sie die
+    # eigentliche Fehlermeldung. Dank LC_ALL=C ist das Praefix stabil englisch.
+    detailed = [line for line in lines
+                if "could not fetch" not in line
+                and not line.startswith("hint:")]
     return redact_remote_error((detailed or lines or [""])[-1])
 
 
@@ -3119,6 +3124,16 @@ def _git_config_entries(args: tuple | list) -> list[tuple[str, str]]:
     entries = [
         ("core.fsmonitor", "false"),
         ("log.showSignature", "false"),
+        # gmf setzt fuer Objekt- und Historienpruefungen `GIT_GRAFT_FILE` auf
+        # eine leere Datei (RAW_OBJECT_ENV / TRANSFER_OBJECT_ENV). Git haelt das
+        # fuer eine benutzte Graft-Datei und schreibt bei jedem Befehl, der den
+        # Graph liest, acht Zeilen Veralterungshinweis auf stderr — auch bei
+        # jedem Fetch und jedem Push. Diese Zeilen erklaeren nichts, stehen aber
+        # mit im Beleg, aus dem gmf die Ursache eines gescheiterten Zugriffs
+        # nennt (Daniel, 2026-09-10). Der Schalter steht bewusst hier und nicht
+        # nur im ausgefuehrten Aufruf: Protokoll und Ausfuehrung nennen
+        # dieselbe Ersatzkonfiguration, genau wie `core.fsmonitor` daneben.
+        ("advice.graftFileDeprecated", "false"),
     ]
     pin = _pinned_remote_url(args)
     if pin is not None:

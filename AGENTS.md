@@ -357,6 +357,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   der ausgehenden Commits kürzer aussehen lassen, als der Push überträgt.
   Replace-Sperre und leere Graft-Datei bleiben, weil beide keinen gewöhnlichen
   Repo-Zustand beschreiben.
+- Die leere Graft-Datei ist gmf-intern und darf in keiner Ausgabe mitreden.
+  Git hält `GIT_GRAFT_FILE=/dev/null` für eine BENUTZTE Graft-Datei und schreibt
+  bei jedem Befehl, der den Graph liest, acht Zeilen Veralterungshinweis auf
+  stderr — auch bei jedem Fetch und jedem Push. Deshalb steht
+  `advice.graftFileDeprecated=false` in `_git_config_entries()`, also in
+  derselben Ersatzkonfiguration wie `core.fsmonitor`: So nennen Protokoll und
+  Ausführung weiterhin dieselbe Liste. Zusätzlich überspringt
+  `last_error_line()` jede `hint:`-Zeile — das ist Gits Ratgeber, nie die
+  Ursache, und er steht oft ZULETZT (etwa nach einem abgelehnten Push), wo er
+  als Beleg die eigentliche Fehlermeldung verdrängte. Dank `LC_ALL=C` ist das
+  Präfix stabil englisch. Bleibt nach dem Filtern nichts übrig, gilt weiterhin
+  die letzte Zeile (Daniel, 2026-09-10).
 - Ein Scan ist EINE Messung und findet unter EINER Einstellung statt:
   `BackgroundScan` bekommt beim Start eine eigene Kopie von `cfg`. Vorher lasen
   die Arbeiter dasselbe Dict wie die Oberfläche, und wer während eines laufenden

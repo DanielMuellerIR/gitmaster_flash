@@ -4924,6 +4924,42 @@ class NonInteractiveGitTests(unittest.TestCase):
         self.assertEqual(recorded["stdin"], subprocess.DEVNULL)
         self.assertTrue(recorded["start_new_session"])
 
+    def test_the_graft_blindfold_does_not_add_a_hint_to_every_stderr(self):
+        """Die leere Graft-Datei ist gmf-intern und darf nicht mitreden.
+
+        Git haelt `GIT_GRAFT_FILE=/dev/null` fuer eine BENUTZTE Graft-Datei und
+        schreibt bei jedem Befehl, der den Graph liest, acht Zeilen
+        Veralterungshinweis auf stderr — auch bei jedem Fetch und jedem Push.
+        Die Zeilen erklaeren nichts, standen aber mit im Beleg, aus dem gmf die
+        Ursache eines gescheiterten Zugriffs nennt (Daniel, 2026-09-10).
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.email", "t@example.invalid")
+            git(repo, "config", "user.name", "T")
+            (repo / "a.txt").write_text("a\n")
+            git(repo, "add", "a.txt")
+            git(repo, "commit", "-qm", "base")
+
+            # Gegenprobe: Ohne den Schalter redet Git wirklich.
+            noisy = subprocess.run(
+                ["git", "-C", str(repo), "rev-list", "--count", "HEAD"],
+                env={**os.environ, "GIT_GRAFT_FILE": os.devnull,
+                     "LC_ALL": "C"},
+                capture_output=True, text=True)
+            self.assertIn("grafts", noisy.stderr)
+
+            for env in (gmf_module.RAW_OBJECT_ENV,
+                        gmf_module.TRANSFER_OBJECT_ENV):
+                with self.subTest(env=sorted(env)):
+                    quiet = gmf_module.run_git(
+                        repo, "rev-list", "--count", "HEAD", timeout=10,
+                        env=env)
+                    self.assertEqual(quiet.returncode, 0, quiet.stderr)
+                    self.assertEqual(quiet.stderr, "")
+
     def test_readers_disable_optional_index_writes_and_fsmonitor_hooks(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -5535,6 +5571,28 @@ class ErrorRedactionTests(unittest.TestCase):
     @staticmethod
     def _result(stderr: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess([], 128, "", stderr)
+
+    def test_a_hint_line_never_becomes_the_reported_cause(self):
+        """`hint:` ist Gits Ratgeberzeile, nie die Ursache — und steht oft zuletzt.
+
+        Nach einem abgelehnten Push haengt Git seinen Ratschlag hinter die
+        Fehlermeldung. Als Beleg genommen verdraengte er die eigentliche
+        Ursache. Dank LC_ALL=C ist das Praefix stabil englisch.
+        """
+        result = self._result(
+            "error: failed to push some refs to 'example.invalid/repo.git'\n"
+            "hint: Updates were rejected because the remote contains work\n"
+            "hint: that you do not have locally.\n")
+        self.assertEqual(gmf_module.last_error_line(result),
+                         "error: failed to push some refs to "
+                         "'example.invalid/repo.git'")
+
+    def test_only_hints_still_yield_something_rather_than_nothing(self):
+        """Gegenprobe: Bleibt nach dem Filtern nichts uebrig, gilt die letzte Zeile."""
+        result = self._result("hint: see 'git help push'\n")
+        self.assertEqual(gmf_module.last_error_line(result),
+                         "hint: see 'git help push'")
+        self.assertEqual(gmf_module.last_error_line(self._result("")), "")
 
     def test_http_userinfo_query_and_fragment_are_removed(self):
         stderr = ("fatal: unable to access "
