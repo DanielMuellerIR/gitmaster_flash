@@ -647,6 +647,17 @@ liegengebliebene Arbeit aus.
   hintere unter der neuen Einstellung gemessen wurden. Kein Datenrennen, aber
   auch keine Momentaufnahme. Ob eine Einstellungsänderung einen laufenden Scan
   erreichen SOLL, ist eine Produktentscheidung (Review-Fund 2026-09-10).
+- `repo_transport_override()` liest die Repo-Config je REMOTE, und beim Fetch
+  zweimal. Gemessen am 2026-09-10: Der Aufruf kostet neun `git config`-Prozesse;
+  von 31 Git-Aufrufen eines Remote-Fetchs sind 20 `git config`, davon 9 reine
+  Wiederholung der vorgelagerten Prüfung in `collect_status()` beziehungsweise
+  `_fetch_remote()`. Bei drei Remotes im selben Repo läuft dieselbe
+  repo-weite Frage sechsmal. Die naheliegenden Konsolidierungen — den Wert aus
+  der Remote-Schleife herausziehen oder das Ergebnis an
+  `fetch_remote_safely()` weiterreichen — tauschen dabei eine
+  Sicherheitseigenschaft gegen Tempo: Die Prüfung steht bewusst unmittelbar vor
+  dem Netzaufruf, und je Remote neu gelesen fängt sie eine Config-Änderung
+  mitten im Scan. Deshalb hier notiert statt nebenbei entschieden.
 - `--list` nennt die vom Filter ausgeblendeten dreckigen Repos nicht. Die TUI
   hängt dafür `hdr_hidden_dirty` an die Kopfzeile, ausdrücklich weil ein
   Übersichtswerkzeug nicht gerade die verstecken darf, deretwegen man es
