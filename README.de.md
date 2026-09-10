@@ -219,7 +219,10 @@ aktiven Filter auf, statt das Programm zu beenden.
 Mehrere durch Leerzeichen getrennte Begriffe müssen **alle** vorkommen, in
 beliebiger Reihenfolge — `arbeit api` findet also auch
 `arbeit/kunde/api-server`, ohne dass man den Teil dazwischen kennt.
-Groß- und Kleinschreibung spielt keine Rolle.
+Groß- und Kleinschreibung spielt keine Rolle, und die Schreibweise eines
+Umlauts ebenfalls nicht: macOS liefert Ordnernamen mal in der einen, mal in der
+anderen Unicode-Normalform — ein aus dem Finder eingefügter Name findet sein
+Repo deshalb genauso wie ein getippter.
 
 Der Filter ist reine Anzeige: Er ändert nichts an einem Repo und liest auch
 nichts neu ein, das Aufheben geht deshalb ohne Wartezeit. Er trifft

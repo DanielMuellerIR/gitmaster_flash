@@ -203,7 +203,9 @@ and `Esc` in the list clears an active filter instead of quitting.
 
 Several terms separated by spaces must **all** occur, in any order — so
 `work api` also finds `work/customer/api-server` without you knowing the part in
-between. Matching ignores case.
+between. Matching ignores case, and it ignores how an accent is stored: macOS
+hands out folder names in either Unicode normalisation, so a name pasted from
+Finder finds its repository just like one you typed.
 
 The filter is display only: it changes nothing in any repository and does not
 re-run the scan, so lifting it is instant. It matches the path alone, never the
