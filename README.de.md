@@ -234,7 +234,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.11 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.12 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -558,7 +558,11 @@ ein strukturiertes `filter`-Objekt im JSON (Suchtext, Treffer- und Gesamtzahl)
 und beim Textbericht von `--diff` eine erste Zeile mit den Zahlen beider Rechner.
 Ein Filter ohne einen einzigen Treffer sagt das auf stderr — auf
 stdout sähen leere Liste oder „keine Unterschiede" mit Exit-Code 0 sonst genau
-wie „alles in Ordnung" aus.
+wie „alles in Ordnung" aus. Die `--list`-Kopfzeile zählt außerdem die
+ausgeblendeten Repos mit, die Aufmerksamkeit bräuchten (`(+7 ausgeblendet)`),
+genau wie die Kopfzeile der Oberfläche: Eine einzelne `✔`-Zeile mit Exit-Code 0
+darf nicht wie ein sauberer Bestand aussehen, während der Filter still fünfzig
+dreckige Repos versteckt.
 
 Exit-Code 0 heißt: alles sauber und synchron. 1 heißt: mindestens ein Repo
 braucht Aufmerksamkeit; gezählt wird über die Repos, die den Filter passiert

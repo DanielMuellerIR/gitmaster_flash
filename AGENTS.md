@@ -18,11 +18,20 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   die Basis, Deutsch die Übersetzung. Neue Strings immer in beiden Sprachen.
 - Doku zweisprachig halten: [README.md](README.md) (englisch, Standard) und
   [README.de.md](README.de.md) inhaltlich synchron.
-- Der Demo-Modus (`--demo`) ist die Referenz für Screenshots und muss ohne Netz
-  und unabhängig von der Maschine gleich aussehen (deshalb `core.excludesFile`
-  und `core.hooksPath` in den Demo-Repos abschalten). Alle Demo-Commits tragen den
-  festen Zeitstempel `DEMO_DATE`; nur dadurch sind die Commit-IDs überall gleich —
-  und damit auch die Commit-IDs in den Demo-Repos und Vorschauen.
+- Der Demo-Modus (`--demo`) ist die Referenz für Screenshots. Sein AUFBAU kommt
+  ohne Netz aus und ist unabhängig von der Maschine (deshalb `_demo_harden()`).
+  Alle Demo-Commits tragen den festen Zeitstempel `DEMO_DATE`; nur dadurch sind
+  die Commit-IDs überall gleich — und damit auch die Commit-IDs in den
+  Demo-Repos und Vorschauen.
+  Sein BETRIEB ist nicht netzfrei, und das ist Absicht: Drei Repos tragen nach
+  dem lokalen Aufbau eine echte `github.com`-Adresse, damit die Demo die
+  GitHub-Sicherheitsklasse zeigt. `R` und `G` sprechen sie dann auch an —
+  `fetch_remote_block_reason()` sperrt sie nicht, denn an dieser Konfiguration
+  ist nichts unsicher. Ohne Netz zeigt die Demo nach `R` also ein
+  DNS-Abzeichen, mit Netz eine „repository not found"-Antwort. Die erzeugten
+  BILDER sind davon unberührt: `docs/make-screens.py` drückt weder `R` noch `G`,
+  und `--check` bleibt gleich (Zusage präzisiert, Entscheidung Daniel
+  2026-09-10).
 - Die Bilder in `docs/` sind **generiert, keine Screenshots** (seit 2026-07-17):
   `python3 docs/make-screens.py` fährt das echte Programm in einem **Pseudo-Terminal**
   auf der `--demo`-Sandbox und baut daraus SVG. Damit entfällt das frühere Gefummel
@@ -332,6 +341,32 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   den normalisiert Git vorher auf `true`/`false`. Ein Test hält das fest. Wer
   eine weitere solche Einstellung kennt, trägt sie in
   `TRANSPORT_CONFIG_SETTINGS` ein.
+- Der gesamte Übertragungsweg — Preflight, Fetch, Push, Tracking-CAS — liest
+  mit `TRANSFER_OBJECT_ENV`, nicht mit `RAW_OBJECT_ENV`. Der Unterschied ist die
+  leere Shallow-Datei: `.git/shallow` ist genau die Datei, in der die
+  Graph-Grenze eines flachen Klons steht. Blindgestellt lief
+  `rev-list --left-right --count` über die Grenze hinaus in fehlende
+  Eltern-Objekte, endete mit Exit 128, und `inspect_transfer()` meldete
+  `inspect-failed` — in einem flachen Klon funktionierten `P` und `G` deshalb
+  NIE, ohne dass die Meldung einen Grund nannte. Beim Fetch war es schlimmer als
+  kosmetisch: Ohne die Datei handelt Git die Shallow-Grenze mit der Gegenseite
+  gar nicht erst aus. Der bewusst in Kauf genommene Preis (Entscheidung Daniel,
+  2026-09-10): Eine repo-lokale `.git/shallow` begrenzt jetzt auch die Vorschau
+  „was wird veröffentlicht". In einem echten flachen Klon ist das richtig; in
+  einem vollständigen Klon könnte eine von Hand hineingelegte Datei die Liste
+  der ausgehenden Commits kürzer aussehen lassen, als der Push überträgt.
+  Replace-Sperre und leere Graft-Datei bleiben, weil beide keinen gewöhnlichen
+  Repo-Zustand beschreiben.
+- Ein Scan ist EINE Messung und findet unter EINER Einstellung statt:
+  `BackgroundScan` bekommt beim Start eine eigene Kopie von `cfg`. Vorher lasen
+  die Arbeiter dasselbe Dict wie die Oberfläche, und wer während eines laufenden
+  `R` über `,` etwa `fetch_timeout` änderte, bekam eine Liste, deren vordere
+  Repos unter der alten und deren hintere unter der neuen Geduldsgrenze gemessen
+  wurden. Eine Änderung wirkt ab dem nächsten Scan (Entscheidung Daniel,
+  2026-09-10). Die Anzeigesprache bleibt davon ausgenommen: `t()` liest den
+  globalen `UI_LANG`, und eine Sprachumstellung mitten im Scan trifft die noch
+  nicht gemessenen Repos. Wer das ändern will, muss die Sprache durch `t()`
+  reichen — das wäre ein eigener Auftrag.
 - Die Zahlen, die gmf als Handlungsauftrag anzeigt — voraus/zurück, Größe der
   Historie, „gemergt" —, lesen den Commit-Graph mit `NO_REPLACE_ENV`
   (`branch_delta`, `upstream_delta`, `read_branches`, die beiden `rev-list`-Zeilen
@@ -522,7 +557,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `terminal_text()`. Aus demselben Grund nennt
   die Kopfzeile mit `hidden_dirty()` die ausgeblendeten Repos, die
   Aufmerksamkeit bräuchten — ein Übersichtswerkzeug darf nicht ausgerechnet die
-  verstecken.
+  verstecken. Seit 0.22.12 gilt das auch für `--list`: Dort konnte eine einzelne
+  `✔`-Zeile mit Exit-Code 0 stehen, während fünfzig dreckige Repos ausgeblendet
+  waren, also dieselbe Ausgabe wie bei einem wirklich sauberen Bestand
+  (Entscheidung Daniel, 2026-09-10). `hidden_dirty()` ist dafür eine freie
+  Funktion; die Oberfläche ruft dieselbe. Der Exit-Code beschreibt weiterhin nur
+  die gefilterten Repos. Der `--diff`-Bericht bleibt unverändert: Dort gibt die
+  Filterzeile ohnehin für BEIDE Rechner Treffer und Gesamtzahl an.
 - `--diff` filtert BEIDE Rechner mit demselben Suchtext (`filter_repo_dicts`).
   Nur eine Seite zu filtern erzeugte „nur hier"-Unterschiede, die es nicht gibt.
 - Die Vorschläge der Commit-Hilfe (`G`) wählen nur aus; committet wird weiterhin
@@ -653,46 +694,6 @@ liegengebliebene Arbeit aus.
 
 ## Offene Punkte / Ideen
 
-- **In einem flachen Klon (`git clone --depth`) funktionieren P und G nie.**
-  `RAW_OBJECT_ENV` setzt neben `GIT_NO_REPLACE_OBJECTS` auch
-  `GIT_SHALLOW_FILE=/dev/null`, und der gesamte Übertragungspfad benutzt es:
-  `inspect_transfer()` (das `rev-list --left-right --count` und die beiden
-  `log`-Aufrufe), der Netz-Fetch und `_run_approved_push()`. Mit blindgestellter
-  Shallow-Datei läuft `rev-list` über die Shallow-Grenze hinaus in fehlende
-  Eltern-Objekte und endet mit Exit 128; `inspect_transfer()` liefert dann
-  `inspect-failed`, und die Meldung nennt keinen Grund. Reproduziert am
-  2026-09-10: `git clone --depth 1`, ein lokaler Commit obendrauf, dann `P`.
-  Genau diese Falle ist bei `NO_REPLACE_ENV` schon dokumentiert und dort
-  bewusst vermieden — im Transferpfad nicht.
-  Die Abwägung gehört Daniel: `GIT_SHALLOW_FILE=/dev/null` verhindert, dass
-  eine repo-lokale `.git/shallow` die Vorschau „was wird veröffentlicht"
-  kürzer aussehen lässt, als der Push wirklich überträgt. Ein flacher Klon hat
-  seine Graph-Grenze dagegen zu Recht. Denkbare Richtungen: nur die
-  Replace-Sperre im Transferpfad und die Shallow-Frage separat beantworten
-  (etwa flache Klone von P/G mit eigenem, ehrlichem Grund ausschließen), oder
-  die Vorschau bei vorhandener `.git/shallow` ausdrücklich als unvollständig
-  kennzeichnen. Beides ist eine Verhaltensänderung an einer
-  Sicherheitszusage und deshalb hier notiert statt nebenbei entschieden.
-- Der Hintergrund-Scan teilt sich `cfg` und `UI_LANG` mit der Oberfläche.
-  Wer während eines laufenden `R` über `,` die Sprache oder `fetch_timeout`
-  ändert, bekommt eine Liste, deren vordere Repos unter der alten und deren
-  hintere unter der neuen Einstellung gemessen wurden. Kein Datenrennen, aber
-  auch keine Momentaufnahme. Ob eine Einstellungsänderung einen laufenden Scan
-  erreichen SOLL, ist eine Produktentscheidung (Review-Fund 2026-09-10).
-- **Der Demo-Modus geht bei `R` und `G` doch ins Netz.** Der AUFBAU der Sandbox
-  bleibt lokal (bare-Repos, danach nur `remote set-url`), aber die drei
-  `github`-Remotes tragen danach echte `https://github.com/example/…`-Adressen.
-  `fetch_remote_block_reason()` sperrt die nicht — Refspec und Adresse sind
-  gewöhnlich —, also setzt `R` (und `G` über `_fetch_remote`) je Remote einen
-  echten `ls-remote` ab. Belegt am 2026-09-10: Für alle drei Repos liefert die
-  Sperrprüfung `None`. Ohne Netz gibt es dafür ein DNS-Fehler-Abzeichen, mit
-  Netz eine „repository not found"-Antwort, und beides bis zu `fetch_timeout`
-  lang — die Demo sieht nach `R` also maschinen- und netzabhängig aus. Die
-  eingecheckten Bilder sind NICHT betroffen: `docs/make-screens.py` drückt nie
-  `R` oder `G`, und `--check` bleibt gleich. Eine Behebung ist keine
-  Kleinigkeit: Eine lokale Fetch-Adresse nähme der Demo genau die
-  GitHub-Sicherheitsklasse, die sie zeigen soll, und ein Demo-Sonderfall im
-  Scan gehörte in den Programmkern. Deshalb hier notiert.
 - `repo_transport_override()` liest die Repo-Config je REMOTE, und beim Fetch
   zweimal. Gemessen am 2026-09-10: Der Aufruf kostet neun `git config`-Prozesse;
   von 31 Git-Aufrufen eines Remote-Fetchs sind 20 `git config`, davon 9 reine
@@ -704,13 +705,6 @@ liegengebliebene Arbeit aus.
   Sicherheitseigenschaft gegen Tempo: Die Prüfung steht bewusst unmittelbar vor
   dem Netzaufruf, und je Remote neu gelesen fängt sie eine Config-Änderung
   mitten im Scan. Deshalb hier notiert statt nebenbei entschieden.
-- `--list` nennt die vom Filter ausgeblendeten dreckigen Repos nicht. Die TUI
-  hängt dafür `hdr_hidden_dirty` an die Kopfzeile, ausdrücklich weil ein
-  Übersichtswerkzeug nicht gerade die verstecken darf, deretwegen man es
-  startet. `--filter api` auf der Kommandozeile kann dagegen eine einzelne
-  `✔`-Zeile mit Exit-Code 0 zeigen, während fünfzig dreckige Repos
-  ausgeblendet sind (Review-Fund 2026-09-10). Der Hinweis wäre eine Änderung
-  am dokumentierten CLI-Vertrag und braucht deshalb eine Entscheidung.
 - (die Frage zu `http.proxy` und `http.sslVerify` ist am 2026-09-03
   entschieden — beide werden wie `core.gitProxy` abgelehnt, sobald die Config
   des Repos sie setzt, siehe Regel oben)

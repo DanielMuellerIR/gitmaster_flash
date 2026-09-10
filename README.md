@@ -217,7 +217,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.11 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.12 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -531,7 +531,10 @@ object in JSON (query plus matching and total repository counts), and a leading
 line in the `--diff` text report that gives both machines' counts. A filter
 without a single hit says so on stderr — on stdout an empty list,
 or "no differences", together with exit code 0 would otherwise look exactly like
-"everything is fine".
+"everything is fine". The `--list` header also counts the hidden repositories
+that would need attention (`(+7 hidden)`), the same way the UI header does: a
+single `✔` line with exit code 0 must not look like a clean estate while the
+filter is quietly hiding fifty dirty repositories.
 
 Exit code 0 means everything is clean and in sync, 1 means at least one
 repository needs attention; it is computed over the repositories that passed the

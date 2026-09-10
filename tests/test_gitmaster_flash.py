@@ -2236,6 +2236,87 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(_remote_root(Path("/srv/code"), None), "/srv/code")
 
 
+class ShallowCloneTransferTests(unittest.TestCase):
+    """In einem flachen Klon (`git clone --depth`) muessen P und G gehen.
+
+    `RAW_OBJECT_ENV` stellt mit `GIT_SHALLOW_FILE=/dev/null` genau die Datei
+    blind, in der die Graph-Grenze eines flachen Klons steht. Damit lief
+    `rev-list --left-right --count <head>...<target>` ueber die Grenze hinaus in
+    fehlende Eltern-Objekte und endete mit Exit 128: `inspect_transfer()`
+    meldete `inspect-failed`, und die Oberflaeche sagte nur "Pruefung
+    fehlgeschlagen", ohne einen Grund zu nennen. Der Transferpfad benutzt
+    deshalb `TRANSFER_OBJECT_ENV` (Replace- und Graft-Sperre, aber die echte
+    Shallow-Datei). Entscheidung Daniel, 2026-09-10.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        seed = self.root / "seed"
+        seed.mkdir()
+        git(seed, "init", "-q", "-b", "main")
+        git(seed, "config", "user.email", "t@example.invalid")
+        git(seed, "config", "user.name", "T")
+        for n in range(5):
+            (seed / f"f{n}.txt").write_text(f"{n}\n")
+            git(seed, "add", f"f{n}.txt")
+            git(seed, "commit", "-qm", f"c{n}")
+        self.bare = self.root / "upstream.git"
+        git(self.root, "init", "-q", "-b", "main", "--bare", str(self.bare))
+        git(seed, "push", "-q", str(self.bare), "main")
+        self.repo = self.root / "work"
+        git(self.root, "clone", "-q", "--depth", "1",
+            f"file://{self.bare}", str(self.repo))
+        git(self.repo, "config", "user.email", "t@example.invalid")
+        git(self.repo, "config", "user.name", "T")
+        # Ohne diese Datei ist der Klon nicht flach und der Test wertlos.
+        self.assertTrue((self.repo / ".git" / "shallow").exists())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_preflight_sees_the_outgoing_commit_instead_of_failing(self):
+        (self.repo / "neu.txt").write_text("neu\n")
+        git(self.repo, "add", "neu.txt")
+        git(self.repo, "commit", "-qm", "lokal")
+
+        check = inspect_transfer(self.repo, "origin", "main", "push")
+
+        self.assertEqual(check.reason, "ready")
+        self.assertEqual((check.ahead, check.behind), (1, 0))
+        # Die Vorschau nennt genau den einen ausgehenden Commit und seine Datei.
+        self.assertEqual(len(check.commits), 1)
+        self.assertIn("lokal", check.commits[0])
+        self.assertEqual([line.split("\t")[-1] for line in check.files],
+                         ["neu.txt"])
+
+    def test_push_fetch_and_scan_all_work_and_keep_the_shallow_boundary(self):
+        (self.repo / "neu.txt").write_text("neu\n")
+        git(self.repo, "add", "neu.txt")
+        git(self.repo, "commit", "-qm", "lokal")
+        check = inspect_transfer(self.repo, "origin", "main", "push")
+        self.assertTrue(check.ready, check.reason)
+
+        pushed = gmf_module.run_git(
+            self.repo, *safe_push_args(
+                check.transfer_url, check.branch, check.head_oid,
+                check.target_oid),
+            timeout=30, env=gmf_module.TRANSFER_OBJECT_ENV)
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        self.assertEqual(
+            gmf_module.update_tracking_after_push(self.repo, check, 10), "ok")
+
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["origin"]
+        fetched = gmf_module.fetch_remote_safely(self.repo, remote, "main", 20)
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual(st.error, "")
+        self.assertEqual((st.ahead, st.behind), (0, 0))
+        # Der Klon bleibt flach: gmf darf seine Graph-Grenze nicht einreissen.
+        self.assertTrue((self.repo / ".git" / "shallow").exists())
+
+
 class ReplaceRefCountingTests(unittest.TestCase):
     """Ein `refs/replace/*` darf die angezeigten Zahlen nicht verschieben.
 
@@ -7982,6 +8063,42 @@ class FilterCliTests(unittest.TestCase):
         self.assertNotIn("blog", out)
         self.assertIn("api", out.splitlines()[0])
 
+    def test_the_list_header_names_the_hidden_repos_that_need_attention(self):
+        """Eine `✔`-Zeile mit Exit-Code 0 sah aus wie ein sauberer Bestand.
+
+        Die Oberflaeche haengt `hdr_hidden_dirty` an ihre Kopfzeile, ausdruecklich
+        weil ein Uebersichtswerkzeug nicht gerade die Repos verstecken darf,
+        deretwegen man es startet. `--list` tat das nicht: `--filter api` konnte
+        eine einzelne saubere Zeile zeigen, waehrend daneben dreckige Repos
+        ausgeblendet waren (Entscheidung Daniel, 2026-09-10).
+        """
+        (self.root / "blog" / "schmutz.txt").write_text("offen\n")
+
+        _, out, _ = self._run("--list", "--filter", "api")
+
+        header = out.splitlines()[0]
+        self.assertIn("+1 hidden", header)
+        self.assertIn("filter", header)
+        # Das ausgeblendete Repo bleibt ausgeblendet — genannt wird nur, DASS es
+        # da ist und Aufmerksamkeit braeuchte.
+        self.assertNotIn("blog", out)
+
+    def test_the_hint_stays_away_without_a_filter_and_without_dirty_repos(self):
+        """Gegenprobe von beiden Seiten.
+
+        Ohne Filter wird nichts ausgeblendet, und ein ausgeblendetes SAUBERES
+        Repo ist kein Grund fuer den Hinweis — sonst waere die Zahl nur eine
+        zweite Trefferanzeige.
+        """
+        _, plain, _ = self._run("--list")
+        self.assertNotIn("hidden", plain.splitlines()[0])
+
+        sauber = RepoStatus(path=Path("/tmp/sauber"), rel="sauber")
+        offen = RepoStatus(path=Path("/tmp/offen"), rel="offen", modified=1)
+        self.assertTrue(sauber.clean_and_synced)
+        self.assertEqual(gmf_module.hidden_dirty([sauber, offen], [offen]), 0)
+        self.assertEqual(gmf_module.hidden_dirty([sauber, offen], [sauber]), 1)
+
     def test_json_carries_only_matching_repos(self):
         _, out, _ = self._run("--json", "--filter", "api")
         payload = json.loads(out)
@@ -8580,6 +8697,30 @@ class BackgroundScanTests(unittest.TestCase):
         leftovers = subprocess.run(["pgrep", "-f", f"{slow}/git"],
                                    capture_output=True, text=True).stdout.strip()
         self.assertEqual(leftovers, "", f"uebrige Prozesse: {leftovers}")
+
+
+class BackgroundScanSettingsTests(unittest.TestCase):
+    """Ein Scan ist EINE Messung und findet unter EINER Einstellung statt."""
+
+    def test_a_setting_changed_mid_scan_does_not_reach_the_running_workers(self):
+        """Vorher teilten Arbeiter und Oberflaeche dasselbe dict.
+
+        Wer waehrend eines laufenden `R` ueber `,` etwa `fetch_timeout`
+        aenderte, bekam eine Liste, deren vordere Repos unter der alten und
+        deren hintere unter der neuen Geduldsgrenze gemessen wurden — ohne dass
+        irgendwo stand, welches Repo unter welcher (Entscheidung Daniel,
+        2026-09-10).
+        """
+        live = {**DEFAULT_CONFIG, "fetch_timeout": 30}
+        scan = gmf_module.BackgroundScan(Path("/tmp"), live)
+
+        live["fetch_timeout"] = 5
+        live["skip_dirs"].append("nachtraeglich")
+
+        self.assertEqual(scan.cfg["fetch_timeout"], 30)
+        self.assertNotIn("nachtraeglich", scan.cfg["skip_dirs"])
+        # Auch verschachtelte Werte sind wirklich kopiert, nicht geteilt.
+        self.assertIsNot(scan.cfg["skip_dirs"], live["skip_dirs"])
 
 
 class TuiBackgroundFetchTests(unittest.TestCase):

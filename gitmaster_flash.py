@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.11"
+__version__ = "0.22.12"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -1551,7 +1551,7 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
 
     old = run_git(
         repo, "rev-parse", "--verify", "-q", destination, timeout=timeout,
-        env=RAW_OBJECT_ENV)
+        env=TRANSFER_OBJECT_ENV)
     if old.returncode not in (0, 1):
         return old
     old_oid = (old.stdout.strip() if old.returncode == 0
@@ -1574,12 +1574,13 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
     if args is None:
         return subprocess.CompletedProcess(
             ["git", "fetch"], 128, "", "unsafe fetch configuration")
-    fetched = run_git_logged(repo, *args, timeout=timeout, env=RAW_OBJECT_ENV)
+    fetched = run_git_logged(repo, *args, timeout=timeout,
+                             env=TRANSFER_OBJECT_ENV)
     if fetched.returncode != 0:
         return fetched
     present = run_git(
         repo, "cat-file", "-e", source_oid + "^{commit}", timeout=timeout,
-        env=RAW_OBJECT_ENV)
+        env=TRANSFER_OBJECT_ENV)
     if present.returncode != 0:
         return subprocess.CompletedProcess(
             present.args, 128, present.stdout, "fetched object is unavailable")
@@ -2613,6 +2614,30 @@ RAW_OBJECT_ENV = {
     **NO_REPLACE_ENV,
     "GIT_GRAFT_FILE": os.devnull,
     "GIT_SHALLOW_FILE": os.devnull,
+}
+
+# Wie RAW_OBJECT_ENV, aber OHNE die leere Shallow-Datei — für den gesamten
+# Übertragungsweg (Preflight, Fetch, Push, Tracking-CAS).
+#
+# Ein flacher Klon (`git clone --depth`) hat seine Graph-Grenze zu Recht, und
+# `.git/shallow` ist genau die Datei, in der sie steht. Blindgestellt lief
+# `rev-list --left-right --count <head>...<target>` über die Grenze hinaus in
+# fehlende Eltern-Objekte, endete mit Exit 128, und `inspect_transfer()` meldete
+# `inspect-failed`: In einem flachen Klon funktionierten P und G deshalb NIE,
+# ohne dass die Meldung einen Grund nannte (Review-Fund 2026-09-10). Beim Fetch
+# war es schlimmer als kosmetisch — ohne die Datei handelt Git die
+# Shallow-Grenze mit der Gegenseite gar nicht erst aus.
+#
+# Der bewusst in Kauf genommene Preis (Entscheidung Daniel, 2026-09-10): Eine
+# repo-lokale `.git/shallow` begrenzt jetzt auch die Vorschau „was wird
+# veröffentlicht". In einem echten flachen Klon ist das richtig — dort endet
+# die Historie wirklich dort. In einem vollständigen Klon könnte eine von Hand
+# hineingelegte Datei die Liste der ausgehenden Commits kürzer aussehen lassen,
+# als der Push überträgt. Die Replace-Sperre und die leere Graft-Datei bleiben,
+# weil beide keinen gewöhnlichen Repo-Zustand beschreiben.
+TRANSFER_OBJECT_ENV = {
+    **NO_REPLACE_ENV,
+    "GIT_GRAFT_FILE": os.devnull,
 }
 
 # Ursachen, die ein fehlgeschlagener Remote-Zugriff haben kann — in dieser Reihenfolge
@@ -4055,7 +4080,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     if branch in ("?", "(detached)"):
         return TransferCheck("detached")
     cfg = timeout_config(timeout)
-    raw_env = RAW_OBJECT_ENV
+    raw_env = TRANSFER_OBJECT_ENV
     try:
         configs = read_remote_configs(repo, cfg)
         remote_cfg = configs.get(remote)
@@ -4250,7 +4275,7 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
             # bei unserem Stand (etwa wegen einer Lockdatei) bleibt es unklar.
             current = run_git(
                 repo, "rev-parse", "--verify", check.remote_ref,
-                timeout=timeout, env=RAW_OBJECT_ENV)
+                timeout=timeout, env=TRANSFER_OBJECT_ENV)
         except (subprocess.TimeoutExpired, OSError):
             return "unknown"
         if (current.returncode == 0
@@ -4261,7 +4286,7 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
     try:
         current = run_git(
             repo, "rev-parse", "--verify", check.remote_ref, timeout=timeout,
-            env=RAW_OBJECT_ENV)
+            env=TRANSFER_OBJECT_ENV)
     except (subprocess.TimeoutExpired, OSError):
         return "unknown"
     if (current.returncode == 0
@@ -4548,7 +4573,16 @@ class BackgroundScan:
 
     def __init__(self, root: Path, cfg: dict):
         self.root = root
-        self.cfg = cfg
+        # Eigene Kopie: Ein Scan ist EINE Messung und muss unter EINER
+        # Einstellung stattfinden. Vorher lasen die Arbeiter dasselbe dict wie
+        # die Oberflaeche, und wer waehrend eines laufenden `R` ueber `,` etwa
+        # `fetch_timeout` aenderte, bekam eine Liste, deren vordere Repos unter
+        # der alten und deren hintere unter der neuen Geduldsgrenze gemessen
+        # wurden — ohne dass irgendwo stand, welches Repo unter welcher
+        # (Entscheidung Daniel, 2026-09-10). Eine Aenderung wirkt jetzt ab dem
+        # naechsten Scan. Die Anzeigesprache haengt weiterhin am globalen
+        # `UI_LANG`, den `t()` liest; sie laesst sich nicht mitkopieren.
+        self.cfg = json.loads(json.dumps(cfg))
         self.queue: queue.Queue = queue.Queue()
         self.total = 0
         self.done = 0
@@ -5007,6 +5041,26 @@ def filter_statuses(statuses: list, query: str) -> list:
     return [st for st in statuses if repo_matches_filter(st.rel, terms)]
 
 
+def hidden_dirty(all_statuses: list, statuses: list) -> int:
+    """Wie viele der ausgeblendeten Repos Aufmerksamkeit braeuchten.
+
+    gmf ist ein Uebersichtswerkzeug, und ein Filter, der stillschweigend gerade
+    die dreckigen Repos versteckt, verkehrt seinen Zweck ins Gegenteil. Die Zahl
+    gehoert deshalb in jede Kopfzeile, die man als Uebersicht liest — in der
+    Oberflaeche und seit 0.22.12 auch in `--list` (Entscheidung Daniel,
+    2026-09-10). Vorher konnte dort eine einzelne `✔`-Zeile mit Exit-Code 0
+    stehen, waehrend fuenfzig dreckige Repos ausgeblendet waren: dieselbe
+    Ausgabe wie bei einem wirklich sauberen Bestand.
+
+    Verglichen wird ueber IDENTITAET, nicht ueber Gleichheit: Zwei Repos mit
+    identischem Zustand sind als Dataclass gleich, und die sichtbare Liste
+    enthaelt dieselben Objekte wie die vollstaendige.
+    """
+    visible = {id(st) for st in statuses}
+    return sum(1 for st in all_statuses
+               if id(st) not in visible and not st.clean_and_synced)
+
+
 def filter_repo_dicts(repos: list, query: str) -> list:
     """Dasselbe für die JSON-Form eines Repos (`--diff` vergleicht Dicts).
 
@@ -5191,7 +5245,7 @@ def compact_position(index: int, rows: int) -> tuple[int, int]:
 
 
 def print_list(statuses: list[RepoStatus], root: Path | None = None,
-               query: str = "") -> None:
+               query: str = "", hidden: int = 0) -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
@@ -5204,7 +5258,10 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
     print(f"gitmaster_flash {__version__}"
           + (f" · {terminal_text(root)}" if root else "")
           + f" · {len(statuses)} {t('hdr_repos')}"
-          + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else ""))
+          + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else "")
+          # Dieselbe Zusage wie in der Oberflaeche: Ein Filter darf nicht
+          # ausgerechnet die Repos verstecken, deretwegen man gmf startet.
+          + (f" · {t('hdr_hidden_dirty', n=hidden)}" if hidden else ""))
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
@@ -5614,15 +5671,8 @@ class TUI:
         self.compact_col = 0
 
     def hidden_dirty(self) -> int:
-        """Wie viele Repos der Filter ausblendet, die Aufmerksamkeit bräuchten.
-
-        Diese Zahl gehört in die Kopfzeile: gmf ist ein Übersichtswerkzeug, und
-        ein Filter, der stillschweigend gerade die dreckigen Repos versteckt,
-        verkehrt seinen Zweck ins Gegenteil.
-        """
-        visible = {id(st) for st in self.statuses}
-        return sum(1 for st in self.all_statuses
-                   if id(st) not in visible and not st.clean_and_synced)
+        """Wie viele Repos der Filter ausblendet, die Aufmerksamkeit bräuchten."""
+        return hidden_dirty(self.all_statuses, self.statuses)
 
     def refresh_one(self, st: RepoStatus, refetched: str | None = None):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten.
@@ -6495,7 +6545,7 @@ class TUI:
         try:
             return run_git_logged(
                 st.path, *args, timeout=self.cfg["fetch_timeout"],
-                env=RAW_OBJECT_ENV)
+                env=TRANSFER_OBJECT_ENV)
         except OSError:
             # Wie beim Commit kann der Prozess bereits serverseitig gewirkt
             # haben, obwohl Python sein Ergebnis nicht mehr lesen konnte.
@@ -7426,9 +7476,15 @@ def _demo_extra_remote(root: Path, repo: Path, remote: str, branch: str = "main"
                        url: str | None = None) -> None:
     """Zweites Remote (z.B. `github`, `backup`) mit aktuellem Stand anlegen.
 
-    Es wird immer gegen ein lokales bare-Repo gepusht (kein Netz). `url` stellt die
-    Adresse danach auf eine Beispieladresse um — damit zeigt die Demo z.B. die echte
-    GitHub-Sicherheitsklasse, ohne je ins Netz zu gehen.
+    Es wird immer gegen ein lokales bare-Repo gepusht. `url` stellt die Adresse
+    danach auf eine Beispieladresse um — damit zeigt die Demo die echte
+    GitHub-Sicherheitsklasse.
+
+    Der AUFBAU der Sandbox kommt damit ohne Netz aus, der BETRIEB nicht: Ab hier
+    trägt das Remote eine echte `github.com`-Adresse, und `R` (Hintergrund-Fetch)
+    wie `G` sprechen sie an. `fetch_remote_block_reason()` sperrt sie nicht — an
+    dieser Konfiguration ist nichts unsicher. Die erzeugten Dokumentbilder sind
+    davon unberührt: `docs/make-screens.py` drückt weder `R` noch `G`.
     """
     bare = root / "_remotes" / f"{repo.name}-{remote}.git"
     bare.mkdir(parents=True)
@@ -7462,7 +7518,10 @@ def _demo_behind(repo: Path, n: int) -> None:
 def build_demo_sandbox(base: Path) -> Path:
     """Wegwerf-Sandbox mit Fake-Repos in allen Zuständen (Screenshots/Ausprobieren).
 
-    Nutzt lokale bare-Repos als Remotes (kein Netz). Deckt ab: sauber & synchron,
+    Nutzt lokale bare-Repos als Remotes; der Aufbau geht deshalb nie ins Netz.
+    Drei Repos bekommen danach eine echte `github.com`-Adresse, damit die Demo
+    die GitHub-Sicherheitsklasse zeigt — `R` und `G` sprechen sie dann auch an
+    (siehe `_demo_extra_remote`). Deckt ab: sauber & synchron,
     modified/untracked, ahead/behind/auseinandergelaufen, Merge-Konflikt + Stash, nur
     Stash, kein Sync-Remote, mehrere Remotes (origin/backup/github), Branches abseits
     von main (master, develop, feature/…, release/…) und den 'fremder Upstream'-Hinweis
@@ -7726,7 +7785,8 @@ def main(argv: list[str] | None = None) -> int:
                 }
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
-            print_list(statuses, root, query)
+            print_list(statuses, root, query,
+                       hidden_dirty(all_statuses, statuses))
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
