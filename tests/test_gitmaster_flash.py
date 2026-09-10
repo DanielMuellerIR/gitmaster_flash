@@ -2717,6 +2717,38 @@ class CommitSafetyTests(unittest.TestCase):
 
         self.assertEqual((self.repo / ".git" / "index").read_bytes(), index_before)
 
+    def test_a_killed_adoption_leaves_no_lock_file_behind_in_git(self):
+        """Git legt neben JEDEN Index eine `.lock`; nach SIGKILL bleibt sie.
+
+        Der temporaere Index der Index-Uebernahme liegt in `.git/` selbst (der
+        des Commits in einem TemporaryDirectory, das mit ihm verschwindet).
+        Das `finally` entfernte nur den Index, nie seine Lockdatei — nach
+        jedem Adoptions-Timeout blieb also eine Datei im `.git` des Benutzers
+        stehen, bei jedem Versuch eine weitere (Review-Fund 2026-09-10).
+        """
+        committed = gmf_module.current_head(self.repo, 10)
+        signature = gmf_module._real_index_signature(self.repo, 10)
+        original = gmf_module.run_git
+
+        def leave_a_lock(repo, *args, **kwargs):
+            temp = (kwargs.get("env") or {}).get("GIT_INDEX_FILE")
+            if temp and "reset" in args:
+                # So sieht der Arbeitsbaum aus, wenn Git per SIGKILL endet,
+                # bevor es seine eigene Lockdatei aufraeumen konnte.
+                Path(temp + ".lock").write_text("gmf test\n")
+                raise subprocess.TimeoutExpired(["git", "reset"], 1)
+            return original(repo, *args, **kwargs)
+
+        with mock.patch.object(gmf_module, "run_git", side_effect=leave_a_lock), \
+                self.assertRaises(subprocess.TimeoutExpired):
+            gmf_module.adopt_commit_in_real_index(
+                self.repo, ["include.txt"], committed, "refs/heads/main",
+                signature, 10)
+
+        leftovers = sorted(p.name for p in (self.repo / ".git").iterdir()
+                           if p.name.startswith("gmf-adopt-index-"))
+        self.assertEqual(leftovers, [])
+
     def test_commit_undo_refuses_a_branch_that_moved_again(self):
         before = gmf_module.current_head(self.repo, 10)
         (self.repo / "include.txt").write_text("approved\n")
@@ -3233,6 +3265,39 @@ class CommitSafetyTests(unittest.TestCase):
         self.assertNotEqual(merge.returncode, 0)
         with self.assertRaises(CommitSafetyError):
             commit_selected(self.repo, ["include.txt"], "must fail", 10)
+
+    def test_the_approval_check_measures_against_the_pinned_oid_not_head(self):
+        """Die Freigabepruefung darf HEAD nicht ein zweites Mal aufloesen.
+
+        Der temporaere Index startet bewusst vom festgehaltenen `head_before`.
+        Die Pruefung danach las aber wieder den beweglichen Namen HEAD: Ein
+        Checkout in diesem Fenster liess sie den Baum eines fremden Branches
+        messen, und der Abbruch zeigte mit "temporary index differs from
+        approved paths" auf die Dateiauswahl statt auf den Checkout
+        (Review-Fund 2026-09-10).
+        """
+        git(self.repo, "checkout", "-q", "-b", "other")
+        (self.repo / "fremd.txt").write_text("nur auf other\n")
+        git(self.repo, "add", "fremd.txt")
+        git(self.repo, "commit", "-qm", "other")
+        git(self.repo, "checkout", "-q", "main")
+        (self.repo / "include.txt").write_text("neu\n")
+        original = gmf_module._stage_approved
+
+        def checkout_between(repo, paths, timeout, env):
+            result = original(repo, paths, timeout, env)
+            git(self.repo, "checkout", "-q", "other")
+            return result
+
+        with mock.patch.object(gmf_module, "_stage_approved",
+                               side_effect=checkout_between), \
+                self.assertRaises(CommitSafetyError) as caught:
+            commit_selected(self.repo, ["include.txt"], "msg", 10)
+
+        # Der Abbruch ist richtig — es lief wirklich ein Checkout. Er darf nur
+        # nicht die Dateiauswahl beschuldigen.
+        self.assertNotIn("differs from approved paths", str(caught.exception))
+
 
 class CommitWizardSafetyTests(unittest.TestCase):
     class Screen:
@@ -7517,9 +7582,28 @@ class TransferMessageTests(unittest.TestCase):
         for reason in self.REASONS:
             with self.subTest(reason=reason):
                 check = gmf_module.TransferCheck(reason, ahead=2, behind=3)
-                message = ui._transfer_message(check, "origin", "main", Path("/tmp"))
+                message = ui._transfer_message(check, "origin", "main")
                 self.assertNotEqual(message, reason)
                 self.assertTrue(message.strip())
+
+    def test_the_blocked_transport_message_names_the_one_setting(self):
+        """Der Beleg kommt aus dem Preflight, nicht aus einer zweiten Messung.
+
+        `inspect_transfer()` verwarf den Namen der gesetzten Einstellung, und
+        die Meldung las ihn mit einem zweiten `repo_transport_override()`
+        nach — neun weitere `git config`-Aufrufe, und aenderte sich die Config
+        dazwischen, zaehlte sie alle drei Einstellungen auf statt der einen.
+        """
+        ui = TUI(None, Path("/tmp"), DEFAULT_CONFIG, None)
+        blocked = gmf_module.TransferCheck("unsafe-transport",
+                                           evidence="http.sslVerify=false")
+        named = ui._transfer_message(blocked, "origin", "main")
+        self.assertIn("http.sslVerify=false", named)
+        self.assertNotIn("core.gitProxy", named)
+        # Ohne Beleg bleibt die vollstaendige Aufzaehlung die Rueckfallebene.
+        every = ui._transfer_message(
+            gmf_module.TransferCheck("unsafe-transport"), "origin", "main")
+        self.assertIn("core.gitProxy", every)
 
     def test_the_reasons_are_exactly_the_ones_inspect_transfer_can_return(self):
         """Gegenprobe: Ein neuer Grund darf hier nicht unbemerkt fehlen."""

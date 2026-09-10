@@ -69,6 +69,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `selected_pair()` entscheidet das zentral; der Bildgenerator kann echte
   Hintergrundfarben (`ANSI_BG`), sonst zeigen die README-Bilder etwas anderes als
   das Programm.
+- Eine Regel, die schon einen Namen hat, wird über diesen Namen benutzt — nicht
+  ein zweites Mal ausgeschrieben. Am 2026-09-10 fielen vier solche Dubletten
+  auf: `_git_path()` (dreimal von Hand als `rev-parse --git-path` plus
+  Absolutmachen), `remote_push_url()` (die `is_local`-Regel noch einmal in
+  `inspect_transfer()`), `last_error_line()` (in `check_remote()` nachgebaut)
+  und `remote_failure_short()` (in `collect_status()` hart auf `changed`
+  verdrahtet). Jede war zum Fundzeitpunkt inhaltsgleich; genau das ist die
+  Gefahr — eine spätere Verschärfung erreicht nur eine der Stellen, und zwar
+  nicht die, an der jemand nachsehen würde.
 - Zwei Regeln, die mehrere Ansichten teilen, stehen je genau einmal im Code, und
   ein Test hält das fest. `scroll_window()` verschiebt den sichtbaren Ausschnitt
   von Repo-Liste, Änderungsansicht, Commit-Hilfe und Vorschlagsliste — vorher
@@ -104,6 +113,20 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   belegten Commit nur die Übernahme in den echten Index, meldet die TUI
   ausdrücklich „Commit vorhanden, Index nicht übernommen“ statt „Commit
   fehlgeschlagen“ (Entscheidung 2026-08-16).
+  Beide Prüfungen des temporären Index messen gegen die FESTGEHALTENE
+  Commit-OID, nicht gegen den beweglichen Namen `HEAD`: `read-tree` seit jeher,
+  die Freigabeprüfung (`git diff --cached <head_before>`) seit 2026-09-10. Ein
+  Checkout im Fenster dazwischen ließ sie sonst den Baum eines fremden Branches
+  messen; der Abbruch war richtig, zeigte aber mit „temporary index differs from
+  approved paths" auf die Dateiauswahl statt auf den Checkout. Ohne ersten
+  Commit gibt es keine OID — dort vergleicht Git von sich aus gegen den leeren
+  Baum.
+  Der temporäre Index der Index-Übernahme (`adopt_commit_in_real_index`) liegt
+  als einziger in `.git/` selbst; der des Commits liegt in einem
+  `TemporaryDirectory` und verschwindet mit ihm. Git legt neben JEDEN Index,
+  den es schreibt, eine `.lock`-Datei und räumt sie nur auf dem Normalweg
+  wieder weg — nach einem Timeout beendet `run_git()` die ganze Prozessgruppe
+  mit SIGKILL. Das `finally` entfernt deshalb Index UND Lockdatei.
 - Ein Timeout darf die TUI nie beenden. `run_git()` beendet dabei die ganze
   Prozessgruppe (`start_new_session=True` + `_kill_process_group`), sonst laufen
   vom pre-commit-Hook gestartete Linter/Tests verwaist weiter. Neue Aktionen
@@ -179,6 +202,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   bei `is_local` durch den aufgelösten Pfad. Aus demselben Grund lässt
   `detect_sync_remote()` leere Einträge in `sync_remote_hosts` fallen: Ein
   hostloses Ziel darf nicht auf einen versehentlich leeren Eintrag passen.
+- Ein Ablehnungsgrund, für den es einen BELEG gibt, trägt ihn mit sich.
+  `fetch_remote_block_reason()` liefert `(Grund, Beleg)`, und `TransferCheck`
+  hat seit 0.22.10 dafür das Feld `evidence`. Vorher verwarf
+  `inspect_transfer()` den Namen der gesetzten Transport-Einstellung, und die
+  Meldung las ihn mit einem zweiten `repo_transport_override()` nach — neun
+  weitere `git config`-Aufrufe, und änderte sich die Config dazwischen, zählte
+  die Meldung alle drei Einstellungen auf statt der einen.
 - Fehlgeschlagene Remote-Zugriffe laufen über `classify_remote_check()`. Die
   Trennung von „Repo weg“, „Login fehlt“, „Hostschlüssel unbekannt“ und „kein
   Netz“ ist Produktkern (Fetch-Zeile, `T`-Prüfung) — neue Fälle dort ergänzen,

@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.9"
+__version__ = "0.22.10"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -1051,6 +1051,13 @@ class TransferCheck:
     remote_config_signature: tuple = ()
     transfer_url: str = ""
     target_oid: str = ""
+    # Der Beleg zum Grund: welche EINE Einstellung die Uebertragung sperrt.
+    # Ohne ihn musste die Meldung die Pruefung ein zweites Mal ausfuehren —
+    # neun weitere `git config`-Aufrufe, und aenderte sich die Config
+    # dazwischen, zaehlte sie alle drei Einstellungen auf statt der einen.
+    # Der Fetch-Weg liefert den Beleg seit 0.22.7 mit
+    # (`fetch_remote_block_reason` -> (Grund, Beleg)).
+    evidence: str = ""
 
     @property
     def ready(self) -> bool:
@@ -1837,10 +1844,7 @@ _SIGNATURE_UNSET = object()
 
 
 def _real_index_signature(repo: Path, timeout: int) -> tuple | None:
-    index_r = _required_git(repo, "rev-parse", "--git-path", "index", timeout=timeout)
-    index = Path(index_r.stdout.strip())
-    if not index.is_absolute():
-        index = repo / index
+    index = _git_path(repo, "index", timeout)
     signature = _path_signature(index)
     if signature is None:
         return None
@@ -1868,12 +1872,7 @@ def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
     """
     for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
                    "rebase-merge", "rebase-apply", "sequencer"):
-        result = _required_git(repo, "rev-parse", "--git-path", marker,
-                               timeout=timeout)
-        path = Path(result.stdout.strip())
-        if not path.is_absolute():
-            path = repo / path
-        if path.exists():
+        if _git_path(repo, marker, timeout).exists():
             return True
     return False
 
@@ -1936,8 +1935,18 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         # Rename-Erkennung würde Ziel+Quelle eines Renames zu EINEM Eintrag
         # zusammenfassen und die approvte Quell-Löschung scheinbar verschwinden
         # lassen.
+        #
+        # Aus demselben Grund wie beim `read-tree` oben: gegen die
+        # FESTGEHALTENE OID vergleichen, nicht gegen den beweglichen Namen
+        # HEAD. Ein Checkout in genau diesem Fenster liess die Pruefung sonst
+        # den Baum eines fremden Branches messen — sie brach dann zwar ab, aber
+        # mit einer Meldung, die auf die Dateiauswahl zeigt statt auf den
+        # Checkout. Ohne ersten Commit gibt es keine OID; dort vergleicht Git
+        # von sich aus gegen den leeren Baum.
+        base = () if head_before is None else (head_before,)
         names = _required_git(repo, "diff", "--cached", "--no-renames",
-                              "--name-only", "-z", "--", timeout=timeout, env=env)
+                              "--name-only", "-z", *base, "--",
+                              timeout=timeout, env=env)
         actual = {path for path in names.stdout.split("\0") if path}
         # Die Zusage lautet: NICHTS committen, was nicht freigegeben ist. Sie
         # verlangt eine Teilmenge, keine Gleichheit. Ein freigegebener Pfad, der
@@ -2440,10 +2449,18 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str],
                    *(":(literal)" + path for path in paths)), 0)
     finally:
         if temp_index is not None:
-            try:
-                temp_index.unlink()
-            except FileNotFoundError:
-                pass
+            # Git legt neben JEDEN Index, den es schreibt, eine `.lock`-Datei.
+            # Auf dem Normalweg raeumt es sie selbst weg — nach einem Timeout
+            # aber nicht: `run_git()` beendet die ganze Prozessgruppe mit
+            # SIGKILL. Dieser temporaere Index liegt in `.git/` selbst (der des
+            # Commits liegt in einem TemporaryDirectory und verschwindet mit
+            # ihm), also blieb dort nach jedem Adoptions-Timeout eine Datei
+            # zurueck (Review-Fund 2026-09-10).
+            for leftover in (temp_index, Path(str(temp_index) + ".lock")):
+                try:
+                    leftover.unlink()
+                except FileNotFoundError:
+                    pass
         if external_guards:
             # Der Aufrufer besitzt den Index-Lock weiterhin; die hier ergänzten
             # HEAD-/Branch-Locks lösen.
@@ -2872,11 +2889,9 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     if r.returncode == 0:
         refs = [line for line in r.stdout.splitlines() if line.strip()]
         return ("ok" if refs else "empty"), len(refs), ""
-    detail = next((line.strip() for line in reversed((r.stderr or "").splitlines())
-                   if line.strip()), "")
     return classify_remote_check(
         r, keychain_helper=remote_uses_keychain_helper(repo, name, timeout)
-    ), 0, redact_remote_error(detail)[:160]
+    ), 0, last_error_line(r)[:160]
 
 
 def remote_failure_short(name: str, outcome: str) -> str:
@@ -4017,20 +4032,22 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         if (remote_cfg is None or not remote_cfg.transfer_safe
                 or not fetch_maps_branch_exactly(remote_cfg, branch)):
             return TransferCheck("remote-unsafe")
-        if repo_transport_override(repo, timeout) is not None:
-            return TransferCheck("unsafe-transport")
+        override = repo_transport_override(repo, timeout)
+        if override is not None:
+            return TransferCheck("unsafe-transport", evidence=override)
         actual_public = remote_cfg.fetch_targets[0].is_github
         if expected_public is not None and actual_public != expected_public:
             return TransferCheck("remote-unsafe")
         if action != "push":
             raise ValueError(f"unknown transfer action: {action}")
-        urls = remote_cfg.push_urls
-        if len(urls) != 1 or not _argv_safe_remote_url(urls[0]):
-            return TransferCheck("remote-unsafe")
-        transfer_url = (remote_cfg.push_targets[0].repo_id
-                        if remote_cfg.push_targets[0].is_local
-                        else urls[0])
-        if not _argv_safe_remote_url(transfer_url):
+        # Die Regel "bei is_local den aufgeloesten Pfad, sonst die
+        # konfigurierte Adresse" steht in remote_push_url(); hier stand sie
+        # ein zweites Mal ausgeschrieben. Eine spaetere Verschaerfung dort
+        # haette den Push-Pfad nicht erreicht.
+        transfer_url = remote_push_url(remote_cfg)
+        if (transfer_url is None
+                or not _argv_safe_remote_url(remote_cfg.push_urls[0])
+                or not _argv_safe_remote_url(transfer_url)):
             return TransferCheck("remote-unsafe")
         branch_r = _required_git(
             repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
@@ -4366,8 +4383,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                 name, "changed", 0, "", cfg["fetch_timeout"])
                 for name in sorted(removed_during_fetch)]
             st.error = "; ".join(filter(None, [st.error, *(
-                f"{name}: {t('short_changed')}" for name in sorted(
-                    removed_during_fetch))]))
+                remote_failure_short(name, "changed")
+                for name in sorted(removed_during_fetch))]))
             st.error_long = " ".join(filter(None, [st.error_long, *messages]))
             st.remote_state = "error"
             st.fetch_error = True
@@ -6402,14 +6419,13 @@ class TUI:
         return self.refresh_one(st, refetched=remote)
 
     def _transfer_message(self, check: TransferCheck, remote: str,
-                          branch: str, repo: Path) -> str:
+                          branch: str) -> str:
         if check.reason == "dirty":
             return t("transfer_dirty")
         if check.reason == "unsafe-transport":
             return t("transfer_unsafe_transport",
-                     k=repo_transport_override(repo, self.cfg["git_timeout"])
-                     or " / ".join(shown
-                                   for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
+                     k=check.evidence or " / ".join(
+                         shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
         if check.reason == "detached":
             return t("transfer_detached")
         if check.reason == "inspect-failed":
@@ -6473,8 +6489,8 @@ class TUI:
                                  self.cfg["git_timeout"],
                                  expected_public=expected_public)
         if not check.ready:
-            self.message = self._transfer_message(check, remote.name, fresh.branch,
-                                                  fresh.path)
+            self.message = self._transfer_message(
+                check, remote.name, fresh.branch)
             return None
         return fresh, check
 
