@@ -464,6 +464,39 @@ class LoadConfigShapeTests(unittest.TestCase):
         self.assertIsNone(cfg["lang"])
         self.assertIn(gmf_module.resolve_lang(cfg), ("en", "de"))
 
+    def test_lang_with_a_wrong_type_falls_back_like_every_other_entry(self):
+        """Ein Default `None` ist kein Freibrief fuer jeden Typ.
+
+        Die Formpruefung sprang bisher ueber jeden Eintrag mit Default `None`,
+        damit `lang: null` als "automatisch" durchkommt. Damit landete aber
+        auch `lang: ["de"]` ungeprueft in der Config, und `resolve_lang()`
+        rief darauf `.lower()` auf — AttributeError statt Rueckfallebene, auch
+        auf der Gegenseite von `--diff` (Review-Fund 2026-09-10).
+        """
+        for content in ('{"lang": 5}', '{"lang": true}', '{"lang": ["de"]}',
+                        '{"lang": {"a": 1}}'):
+            with self.subTest(inhalt=content):
+                cfg, err = self._load(content)
+                self.assertIsNone(cfg["lang"])
+                self.assertIn('"lang"', err)
+                self.assertIn(gmf_module.resolve_lang(cfg), ("en", "de"))
+
+    def test_a_config_that_cannot_be_created_still_yields_the_defaults(self):
+        """Die Erstanlage ist Komfort, keine Voraussetzung.
+
+        Ein read-only $HOME oder eine Datei an der Stelle von ~/.config
+        beendete gmf mit einem Traceback — bei `--diff` auf der befragten
+        Gegenseite, wo der lokale Lauf nur "keine Ausgabe" sieht.
+        """
+        blocker = Path(self.tmp.name) / "datei"
+        blocker.write_text("x")
+        gmf_module.CONFIG_PATH = blocker / "gitmaster_flash" / "config.json"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = gmf_module.load_config()
+        self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
+        self.assertIn("cannot create", err.getvalue())
+
     def test_a_broken_json_file_still_reports_the_read_error(self):
         cfg, err = self._load("{nope")
         self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
@@ -1282,6 +1315,63 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
         self.assertEqual(
             git_output(self.repo, "rev-parse", "refs/remotes/github/main"),
             remote_tip)
+
+    def test_a_ref_that_only_ends_in_the_branch_name_is_not_the_branch(self):
+        """`ls-remote <muster>` trifft das ENDE eines Refs, nicht seinen Namen.
+
+        Git vergleicht das Muster ab dem Anfang ODER ab einem Schraegstrich,
+        und `--refs` laesst Tags stehen. Ein Remote ohne `refs/heads/main`,
+        aber mit dem Tag `refs/tags/refs/heads/main`, lieferte deshalb genau
+        eine Zeile — und gmf schrieb deren fremde Objekt-ID in den
+        Tracking-Ref, ohne den Ref-Namen je anzusehen (an git 2.54
+        nachgemessen). Richtig ist: Der Branch ist weg, also gehoert der
+        Tracking-Ref weg.
+        """
+        stranger = git_output(self.repo, "rev-parse", "HEAD")
+        git(self.gh, "tag", "refs/heads/main", "main")
+        git(self.gh, "symbolic-ref", "HEAD", "refs/heads/other")
+        git(self.gh, "branch", "other", "main")
+        git(self.gh, "update-ref", "-d", "refs/heads/main")
+        remote = gmf_module.read_remote_configs(
+            self.repo, DEFAULT_CONFIG)["github"]
+
+        fetched = gmf_module.fetch_remote_safely(self.repo, remote, "main", 10)
+
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        missing = gmf_module.run_git(
+            self.repo, "rev-parse", "--verify", "-q",
+            "refs/remotes/github/main", timeout=10)
+        self.assertEqual(missing.returncode, 1, missing.stdout)
+        self.assertNotEqual(missing.stdout.strip(), stranger)
+
+    def test_another_ref_ending_in_the_branch_name_does_not_block_the_fetch(self):
+        """Ein zweiter Treffer des Musters ist kein mehrdeutiger Branch.
+
+        Solange nur die ZEILENZAHL geprueft wurde, machte ein Branch namens
+        `x/refs/heads/main` auf der Gegenseite jeden Fetch dieses Remotes
+        dauerhaft unmoeglich ("ambiguous remote branch"), obwohl
+        `refs/heads/main` unveraendert da war.
+        """
+        tree = git_output(self.repo, "rev-parse", "HEAD^{tree}")
+        head = git_output(self.repo, "rev-parse", "HEAD")
+        decoy = subprocess.run(
+            ["git", "-C", str(self.repo), "commit-tree", tree, "-p", head],
+            input="decoy\n", check=True, capture_output=True,
+            text=True).stdout.strip()
+        git(self.repo, "push", "-q", str(self.gh),
+            f"{decoy}:refs/heads/x/refs/heads/main")
+        remote = gmf_module.read_remote_configs(
+            self.repo, DEFAULT_CONFIG)["github"]
+
+        fetched = gmf_module.fetch_remote_safely(self.repo, remote, "main", 10)
+
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        self.assertEqual(
+            git_output(self.repo, "rev-parse", "refs/remotes/github/main"),
+            git_output(self.gh, "rev-parse", "refs/heads/main"))
+        self.assertNotEqual(
+            git_output(self.repo, "rev-parse", "refs/remotes/github/main"),
+            decoy)
 
     def test_inherited_git_namespace_cannot_redirect_a_safe_push(self):
         (self.repo / "a.md").write_text("2\n")
@@ -5650,6 +5740,35 @@ class RemoteAndCommandLogTests(unittest.TestCase):
             ui.message, gmf_module.t("fetch_outcome_unknown", r="origin"))
         self.assertIsNot(ui.statuses[0], st)
 
+    def test_a_remote_that_vanished_is_not_blamed_for_an_unsafe_refspec(self):
+        """Eine nicht belegbare Remote-Config ist keine unsichere Refspec.
+
+        `read_remote_config_or_none()` liefert `None` bei jedem Lesefehler UND
+        fuer ein geloeschtes Remote. Beides sind gewoehnliche Zustaende; die
+        TUI meldete dafuer "unsichere Fetch-Refspec" und beschuldigte damit
+        eine voellig gewoehnliche Konfiguration — dieselbe Verwechslung, die
+        der `detached`-Fall schon einmal hatte (Review-Fund 2026-09-10).
+        """
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+
+        class Screen:
+            def getmaxyx(self): return (30, 100)
+            def addstr(self, *a): pass
+            def refresh(self): pass
+
+        ui = TUI(Screen(), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        # Das Remote verschwindet zwischen Anzeige und Tastendruck.
+        git(self.repo, "remote", "remove", "origin")
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            result = ui._fetch_remote(st, "origin")
+
+        self.assertIsNone(result)
+        self.assertEqual(ui.message, remote_check_message(
+            "origin", "changed", 0, "", DEFAULT_CONFIG["fetch_timeout"]))
+        self.assertNotEqual(ui.message, remote_check_message(
+            "origin", "unsafe_refspec", 0, "", DEFAULT_CONFIG["fetch_timeout"]))
+
     def test_one_invalid_remote_does_not_hide_or_block_the_safe_remote(self):
         git(self.repo, "remote", "add", "broken",
             "https://example.invalid:not-a-port/repo.git")
@@ -7327,6 +7446,32 @@ class RepoFilterLogicTests(unittest.TestCase):
                     [s.rel for s in gmf_module.filter_statuses(statuses, query)],
                     ["arbeit/kunde/api-server"])
 
+    def test_a_query_in_the_other_unicode_normalisation_still_finds_the_repo(self):
+        """Anzeigename und Suchtext muessen dieselbe Normalform vergleichen.
+
+        `collect_status()` normalisiert `rel` bewusst auf NFC, damit die
+        Spalten stimmen. Der Suchtext kam roh von Tastatur oder Kommandozeile,
+        und macOS liefert Ordnernamen je nach Herkunft in NFD: Ein eingefuegter
+        Name sah zeichengleich aus und fand sein Repo trotzdem nie — bei
+        `--list` zusaetzlich mit Exit-Code 0 (Review-Fund 2026-09-10).
+        """
+        rel = unicodedata.normalize("NFC", "arbeit/münchen-api")
+        statuses = [self._st(rel), self._st("privat/blog")]
+        for form in ("NFC", "NFD"):
+            with self.subTest(form=form):
+                query = unicodedata.normalize(form, "München")
+                self.assertEqual(
+                    [x.rel for x in gmf_module.filter_statuses(statuses, query)],
+                    [rel])
+        # Auch andersherum: ein in NFD gespeicherter Anzeigename (etwa aus dem
+        # JSON eines aelteren Rechners) muss auf eine NFC-Eingabe passen.
+        nfd_repos = [{"rel": unicodedata.normalize("NFD", "arbeit/münchen-api")}]
+        self.assertEqual(
+            len(gmf_module.filter_repo_dicts(
+                nfd_repos, unicodedata.normalize("NFC", "münchen"))), 1)
+        # Gegenprobe: Ein wirklich anderer Begriff trifft weiterhin nichts.
+        self.assertEqual(gmf_module.filter_statuses(statuses, "hamburg"), [])
+
     def test_matching_ignores_case_including_the_german_sharp_s(self):
         statuses = [self._st("Straße"), self._st("ANDERES")]
         self.assertEqual([s.rel for s in gmf_module.filter_statuses(statuses, "STRASSE")],
@@ -8853,6 +8998,56 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
 
         self.assertEqual(payload["rel"], "repo-\\udcff")
         self.assertNotIn("\udcff", json.dumps(payload, ensure_ascii=True))
+
+    def test_the_branch_not_on_line_is_escaped_like_every_other_git_text(self):
+        """`--list` schrieb Branch- und Remotenamen als einzige Stelle roh.
+
+        Git erlaubt in Ref- und Remotenamen Bytes ohne UTF-8-Bedeutung; die
+        Leser dekodieren sie mit surrogateescape. Genau diese eine Zeile ging
+        ohne `terminal_text()` nach stdout: In einem Terminal mit UTF-8-Locale
+        brach `--list` mit UnicodeEncodeError ab, und ein `\x1b[` im Namen fuhr
+        als Steuersequenz durch (Review-Fund 2026-09-10).
+        """
+        st = RepoStatus(path=Path("/tmp/x"), rel="x",
+                        branch=os.fsdecode(b"feat/\xff") + "\x1b[31m",
+                        remote=os.fsdecode(b"orig\xfe"),
+                        remote_state="no-branch")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gmf_module.print_list([st])
+        text = out.getvalue()
+
+        # Beides muss gelten: streng nach UTF-8 kodierbar UND kein Steuerzeichen
+        # aus den NAMEN. Die Farbcodes setzt print_list selbst; nur sie duerfen
+        # als echtes Escape ueberbleiben.
+        text.encode("utf-8")
+        for colour in ("\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m"):
+            text = text.replace(colour, "")
+        self.assertNotIn("\x1b", text)
+        self.assertIn("\\x1b[31m", text)
+        self.assertIn("\\udcff", text)
+        self.assertIn("\\udcfe", text)
+
+    def test_the_json_root_is_escaped_like_every_other_field(self):
+        """`root` war das einzige unentschaerfte Feld der `--json`-Nutzlast.
+
+        `print_list()` schreibt denselben Wert seit jeher ueber
+        `terminal_text()`; nur die JSON-Form nahm ihn roh. Ein Scan-Start mit
+        einem Steuerzeichen im Ordnernamen schickte es damit ungefiltert ins
+        Terminal — und ein Byte ohne UTF-8-Bedeutung haette `print()` zerlegt.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "scan\x1b[31m"
+            root.mkdir()
+            config = Path(temp) / "config.json"
+            with mock.patch.object(gmf_module, "CONFIG_PATH", config):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    gmf_module.main([str(root), "--json"])
+            payload = json.loads(out.getvalue())
+
+        self.assertNotIn("\x1b", payload["root"])
+        self.assertIn("\\x1b[31m", payload["root"])
 
     def test_direct_cd_output_is_safe_and_shell_executable(self):
         with tempfile.TemporaryDirectory() as temp:

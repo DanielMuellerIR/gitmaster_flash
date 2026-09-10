@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.8"
+__version__ = "0.22.9"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -114,6 +114,11 @@ DEFAULT_CONFIG = {
     # brauchen. Mit dem kurzen git_timeout wäre jeder solche Commit chancenlos.
     "commit_timeout": 120,
 }
+
+# Eintraege, deren Default `None` ist: `None` bedeutet dort etwas Eigenes
+# ("automatisch"), jeder andere Wert braucht trotzdem die uebliche Formpruefung.
+# Ohne diese Tabelle waere ein Default `None` ein Freibrief fuer jeden Typ.
+NULLABLE_CONFIG_TYPES = {"lang": str}
 
 
 # ---------------------------------------------------------------------------
@@ -754,17 +759,39 @@ def load_config() -> dict:
             else:
                 warn("not a JSON object")
     else:
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n")
+        # Die Erstanlage ist ein Komfort, keine Voraussetzung. Ein read-only
+        # $HOME oder eine Datei an der Stelle von ~/.config beendete gmf sonst
+        # mit einem Traceback — bei `--diff` auf der befragten Gegenseite, wo
+        # der lokale Lauf nur "keine Ausgabe" sieht (Review-Fund 2026-09-10).
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG_PATH.write_text(
+                json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            print(f"Warning: cannot create {CONFIG_PATH} ({exc}) "
+                  "— using defaults.", file=sys.stderr)
     for key, value in loaded.items():
         default = DEFAULT_CONFIG.get(key)
-        # `lang` hat den Default None und darf deshalb alles tragen;
-        # `resolve_lang()` nimmt ohnehin nur "en"/"de" an.
-        if (key in DEFAULT_CONFIG and default is not None
-                and not isinstance(value, type(default))):
-            warn(f'entry "{key}" is a {type(value).__name__}, '
-                 f"not a {type(default).__name__}")
-            continue
+        # Ein Default `None` heisst "kein fester Typ", nicht "jeder Typ".
+        # `lang: null` bedeutet "automatisch" und muss durchkommen; ein
+        # `lang: ["de"]` ist derselbe Tippfehler wie ueberall sonst und fiel
+        # ohne Formpruefung erst in `resolve_lang()` als AttributeError auf —
+        # ein Traceback statt der zugesagten Rueckfallebene, auch auf der
+        # Gegenseite von `--diff` (Review-Fund 2026-09-10). Deshalb steht der
+        # erlaubte Typ solcher Eintraege in NULLABLE_CONFIG_TYPES, statt die
+        # Pruefung ganz auszulassen.
+        if key in DEFAULT_CONFIG:
+            nullable = NULLABLE_CONFIG_TYPES.get(key)
+            if nullable is not None:
+                shape_ok = value is None or isinstance(value, nullable)
+                wanted = f"{nullable.__name__} or null"
+            else:
+                shape_ok = isinstance(value, type(default))
+                wanted = type(default).__name__
+            if not shape_ok:
+                warn(f'entry "{key}" is a {type(value).__name__}, '
+                     f"not a {wanted}")
+                continue
         cfg[key] = value
     # App-Tasten intern immer groß (Tastendruck wird ebenfalls großgezogen).
     cfg["apps"] = {str(k).upper(): v for k, v in cfg["apps"].items()}
@@ -1493,10 +1520,24 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
         return advertised
     rows = [line.split("\t", 1) for line in advertised.stdout.splitlines()
             if line.strip()]
-    if any(len(row) != 2 for row in rows) or len(rows) > 1:
+    if any(len(row) != 2 for row in rows):
         return subprocess.CompletedProcess(
             advertised.args, 128, advertised.stdout, "ambiguous remote branch")
-    source_oid = rows[0][0] if rows else None
+    # Das zweite Argument von `ls-remote` ist KEIN Ref-Name, sondern ein Muster,
+    # das auf das ENDE eines Refs passt — ab dem Anfang oder ab einem
+    # Schraegstrich. `refs/heads/main` trifft deshalb auch `refs/tags/refs/heads/main`
+    # und `refs/heads/x/refs/heads/main`, und `--refs` filtert Tags nicht heraus.
+    # Ohne den Namensvergleich holte gmf die Objekt-ID eines fremden Refs und
+    # schrieb sie in den Tracking-Ref: Ein Remote ohne den Branch, aber mit einem
+    # Tag dieses Namens, verschob die Anzeige auf ein voellig anderes Objekt.
+    # Und ein zusaetzlicher Treffer machte jeden Fetch dieses Remotes dauerhaft
+    # unmoeglich ("ambiguous remote branch"), obwohl der gesuchte Branch da war
+    # (Review-Fund 2026-09-10, an git 2.54 nachgemessen).
+    matches = [row for row in rows if row[1] == source_ref]
+    if len(matches) > 1:
+        return subprocess.CompletedProcess(
+            advertised.args, 128, advertised.stdout, "ambiguous remote branch")
+    source_oid = matches[0][0] if matches else None
     if source_oid is not None and not re.fullmatch(
             r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid):
         return subprocess.CompletedProcess(
@@ -4884,19 +4925,30 @@ def canonical_filter_query(query: str) -> str:
     return " ".join(query.split())
 
 
-def filter_terms(query: str) -> list[str]:
-    """Suchtext in einzelne, klein geschriebene Begriffe zerlegen.
+def _search_key(text: str) -> str:
+    """Ein Text in der Form, in der Filter und Anzeigename vergleichbar sind.
 
-    `casefold()` statt `lower()`: Es normalisiert auch Fälle, die `lower()`
-    stehen lässt (deutsches ß zu ss), sonst fände "STRASSE" das Repo "straße"
-    nicht.
+    NFC, dann `casefold()`. Beide Schritte sind noetig und beide aus einem
+    konkreten Grund: `collect_status()` normalisiert den Anzeigenamen `rel`
+    bewusst auf NFC (sonst verrutschen die Spalten), waehrend der Suchtext roh
+    von der Tastatur oder aus der Kommandozeile kommt. Auf dem Mac liefern
+    Finder und Dateisystem je nach Herkunft NFD — "ö" ist dort zwei
+    Codepunkte. Ein eingefuegter Ordnername sah damit zeichengleich aus und
+    fand sein Repo trotzdem nie (Review-Fund 2026-09-10). `casefold()` statt
+    `lower()`: Es normalisiert auch Fälle, die `lower()` stehen lässt
+    (deutsches ß zu ss), sonst fände "STRASSE" das Repo "straße" nicht.
     """
-    return [term.casefold() for term in query.split()]
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def filter_terms(query: str) -> list[str]:
+    """Suchtext in einzelne, vergleichbare Begriffe zerlegen."""
+    return [_search_key(term) for term in query.split()]
 
 
 def repo_matches_filter(rel: str, terms: list[str]) -> bool:
     """Passt dieser Anzeigename auf alle Begriffe? Leere Liste = alles passt."""
-    name = rel.casefold()
+    name = _search_key(rel)
     return all(term in name for term in terms)
 
 
@@ -4941,7 +4993,7 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    here = {"version": __version__, "root": str(root),
+    here = {"version": __version__, "root": terminal_text(root),
             "repos": [status_dict(s) for s in collect_all(root, cfg, fetch=fetch)]}
     # Der Filter greift auf BEIDEN Seiten mit demselben Suchtext. Nur hier zu
     # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
@@ -5133,7 +5185,15 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
         if st.remote_state == "no-remote":
             bits.append(f"{yellow}{t('no_sync_remote')}{reset}")
         elif st.remote_state == "no-branch":
-            bits.append(f"{yellow}{t('branch_not_on', b=st.branch, r=st.remote)}{reset}")
+            # Branch- und Remotename kommen roh von Git; jede andere Git-Quelle
+            # in dieser Funktion ist entschaerft, diese eine war es nicht. Ein
+            # Ref-Byte ohne UTF-8-Bedeutung liess `--list` mit
+            # UnicodeEncodeError abbrechen, ein `\x1b[` im Namen fuhr als
+            # Steuersequenz ins Terminal (Review-Fund 2026-09-10).
+            bits.append(
+                f"{yellow}"
+                f"{terminal_text(t('branch_not_on', b=st.branch, r=st.remote))}"
+                f"{reset}")
         bits.extend(remote_bits)
         print(f"{red}✘{reset} {terminal_text(st.rel)}  {' '.join(bits)}")
 
@@ -6293,7 +6353,14 @@ class TUI:
 
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
         config = read_remote_config_or_none(st.path, self.cfg, remote)
-        blocked = (("unsafe_refspec", "") if config is None
+        # `None` heisst "die Config dieses Remotes ist gerade nicht belegbar" —
+        # es wurde geloescht, oder das Lesen scheiterte. Beides sind gewoehnliche
+        # Zustaende. Sie als "unsichere Fetch-Refspec" zu melden beschuldigt eine
+        # voellig gewoehnliche Konfiguration, genau wie es der `detached`-Fall
+        # frueher tat; `changed` ist derselbe Grund, den `collect_status()` fuer
+        # ein waehrend des Fetchs verschwundenes Remote nennt
+        # (Review-Fund 2026-09-10).
+        blocked = (("changed", "") if config is None
                    else fetch_remote_block_reason(
                        st.path, config, st.branch, self.cfg["git_timeout"]))
         if blocked is not None:
@@ -7573,7 +7640,7 @@ def main(argv: list[str] | None = None) -> int:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
             # dieselbe Fassung dahintersteht. Die Repos liegen unter "repos".
-            payload = {"version": __version__, "root": str(root),
+            payload = {"version": __version__, "root": terminal_text(root),
                        "repos": [status_dict(s) for s in statuses]}
             if query:
                 payload["filter"] = {

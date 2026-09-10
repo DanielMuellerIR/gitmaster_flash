@@ -161,6 +161,13 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `fetch_error` — eine Falschaussage über eine völlig gewöhnliche Konfiguration,
   die im Rechnervergleich zusätzlich `error` und `remote_state` aus dem
   Vergleich nahm (Review-Fund 2026-09-03).
+- Eine nicht belegbare Remote-Config ist keine unsichere Refspec.
+  `read_remote_config_or_none()` liefert `None` bei jedem Lesefehler UND für ein
+  gelöschtes Remote; beides sind gewöhnliche Zustände. Die TUI meldete dafür
+  bis 2026-09-10 `unsafe_refspec` und beschuldigte damit eine völlig
+  gewöhnliche Konfiguration — dieselbe Verwechslung wie früher beim
+  `detached`-Fall. Richtig ist `changed`, derselbe Grund, den
+  `collect_status()` für ein während des Fetchs verschwundenes Remote nennt.
 - Ein Pfad-Remote hat keinen Host, und das steht in `RemoteTarget.is_local` —
   nicht als Wort „local" im Feld `host`. `local` IST ein gültiger Hostname, etwa
   als ssh-Alias in `~/.ssh/config`. Solange der Merkwert im Hostnamensraum
@@ -229,6 +236,18 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Tags oder weiteren Refs veröffentlichen. Unsichere Remotes werden als Fehler ausgewiesen;
   sichere Remotes desselben Repos werden einzeln
   weiter aktualisiert.
+  Das zweite Argument von `git ls-remote` ist **kein Ref-Name, sondern ein
+  Muster**, das auf das ENDE eines Refs passt — ab dessen Anfang oder ab einem
+  Schrägstrich —, und `--refs` filtert Tags nicht heraus. `refs/heads/main`
+  trifft deshalb auch `refs/tags/refs/heads/main` und
+  `refs/heads/x/refs/heads/main`. `fetch_remote_safely()` vergleicht daher den
+  zurückgegebenen Ref-NAMEN mit `refs/heads/<branch>`, statt nur die Zeilenzahl
+  zu zählen. Ohne diesen Vergleich reichte auf der Gegenseite ein Tag dieses
+  Namens, um gmf die Objekt-ID eines völlig anderen Refs in den Tracking-Ref
+  schreiben zu lassen (nachgemessen an git 2.54, Review-Fund 2026-09-10) — und
+  ein zusätzlicher Treffer machte jeden Fetch dieses Remotes dauerhaft
+  unmöglich („ambiguous remote branch"), obwohl der gesuchte Branch da war.
+  Wer hier ein weiteres Muster einführt, prüft es zuerst an der Shell.
   Seit 0.18.9 gehört der Transportweg zur Bindung: Für jeden Aufruf mit gepinnter
   URL setzt `run_git()` `core.sshCommand` auf das gewöhnliche `ssh` und entfernt
   `GIT_SSH` und `GIT_SSH_COMMAND` aus der geerbten Umgebung (`TRANSPORT_GIT_ENV`).
@@ -366,7 +385,21 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `terminal_text()`). Git erlaubt Bytes ohne UTF-8-Bedeutung in Ref- und
   Remote-Namen; die Leser dekodieren sie mit `surrogateescape`, und roh
   serialisiert ergäbe das ungültiges UTF-8 oder einen `UnicodeEncodeError`.
-  Neue JSON-Felder deshalb gleich dort anschließen.
+  Neue JSON-Felder deshalb gleich dort anschließen. Dasselbe gilt für JEDE
+  Zeile, die `print_list()` oder `main()` schreibt: Der Scan-Start (`root`) und
+  die Zeile „Branch liegt nicht auf …" gingen bis 2026-09-10 als einzige roh
+  heraus. In einem Terminal mit UTF-8-Locale brach `--list` damit bei einem
+  Ref-Byte ohne UTF-8-Bedeutung mit `UnicodeEncodeError` ab, und ein `\x1b[` im
+  Branch- oder Remotenamen fuhr als Steuersequenz durch (Review-Fund
+  2026-09-10).
+- Filtertext und Anzeigename werden über `_search_key()` verglichen: erst NFC,
+  dann `casefold()`. `collect_status()` normalisiert `rel` bewusst auf NFC,
+  während der Suchtext roh von Tastatur oder Kommandozeile kommt; macOS liefert
+  Ordnernamen je nach Herkunft in NFD. Ein eingefügter Ordnername sah damit
+  zeichengleich aus und fand sein Repo trotzdem nie — bei `--list` zusätzlich
+  mit Exit-Code 0 und „nichts geprüft" (Review-Fund 2026-09-10). Beide Seiten
+  müssen durch dieselbe Funktion, auch die `rel` aus dem JSON eines anderen
+  Rechners.
 - Der Filter (`/`, `--filter`) grenzt nur die ANZEIGE ein: `all_statuses` bleibt
   der vollständige Scan, `statuses` ist die sichtbare Auswahl, und alles
   Zeichnende sowie die Auswahl arbeiten unverändert auf `statuses`. Wer eine
@@ -504,6 +537,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   einzelne Repo (Review-Fund 2026-09-03). `lang` darf `null` tragen, das heißt
   „automatisch“. Aus demselben Grund verlangen `app_label()`/`app_path()` ein
   Objekt: `"Z": 5` ist derselbe Tippfehler eine Stufe höher.
+  Ein Default `None` heißt „kein fester Typ", nicht „jeder Typ": Der erlaubte
+  Typ solcher Einträge steht in `NULLABLE_CONFIG_TYPES`. Solange die Prüfung
+  dort ganz ausgelassen wurde, kam `lang: ["de"]` ungeprüft durch, und
+  `resolve_lang()` rief darauf `.lower()` auf — ein Traceback statt der
+  zugesagten Rückfallebene (Review-Fund 2026-09-10). Auch die ERSTANLAGE der
+  Datei ist Komfort, keine Voraussetzung: Sie steht in einem `try`, weil ein
+  read-only `$HOME` oder eine Datei an der Stelle von `~/.config` gmf sonst
+  beendete — bei `--diff` auf der befragten Gegenseite, wo der lokale Lauf nur
+  „keine Ausgabe" sieht.
   Die Zahlenprüfung nutzt bewusst eine Regex und
   nicht `str.isdigit()` — letzteres hält auch „²" für eine Ziffer, `int()` aber
   nicht, und der Wert fiele erst beim nächsten Git-Aufruf auf.
@@ -549,6 +591,39 @@ liegengebliebene Arbeit aus.
 
 ## Offene Punkte / Ideen
 
-- (derzeit keine; die Frage zu `http.proxy` und `http.sslVerify` ist am
-  2026-09-03 entschieden — beide werden wie `core.gitProxy` abgelehnt, sobald
-  die Config des Repos sie setzt, siehe Regel oben)
+- **In einem flachen Klon (`git clone --depth`) funktionieren P und G nie.**
+  `RAW_OBJECT_ENV` setzt neben `GIT_NO_REPLACE_OBJECTS` auch
+  `GIT_SHALLOW_FILE=/dev/null`, und der gesamte Übertragungspfad benutzt es:
+  `inspect_transfer()` (das `rev-list --left-right --count` und die beiden
+  `log`-Aufrufe), der Netz-Fetch und `_run_approved_push()`. Mit blindgestellter
+  Shallow-Datei läuft `rev-list` über die Shallow-Grenze hinaus in fehlende
+  Eltern-Objekte und endet mit Exit 128; `inspect_transfer()` liefert dann
+  `inspect-failed`, und die Meldung nennt keinen Grund. Reproduziert am
+  2026-09-10: `git clone --depth 1`, ein lokaler Commit obendrauf, dann `P`.
+  Genau diese Falle ist bei `NO_REPLACE_ENV` schon dokumentiert und dort
+  bewusst vermieden — im Transferpfad nicht.
+  Die Abwägung gehört Daniel: `GIT_SHALLOW_FILE=/dev/null` verhindert, dass
+  eine repo-lokale `.git/shallow` die Vorschau „was wird veröffentlicht"
+  kürzer aussehen lässt, als der Push wirklich überträgt. Ein flacher Klon hat
+  seine Graph-Grenze dagegen zu Recht. Denkbare Richtungen: nur die
+  Replace-Sperre im Transferpfad und die Shallow-Frage separat beantworten
+  (etwa flache Klone von P/G mit eigenem, ehrlichem Grund ausschließen), oder
+  die Vorschau bei vorhandener `.git/shallow` ausdrücklich als unvollständig
+  kennzeichnen. Beides ist eine Verhaltensänderung an einer
+  Sicherheitszusage und deshalb hier notiert statt nebenbei entschieden.
+- Der Hintergrund-Scan teilt sich `cfg` und `UI_LANG` mit der Oberfläche.
+  Wer während eines laufenden `R` über `,` die Sprache oder `fetch_timeout`
+  ändert, bekommt eine Liste, deren vordere Repos unter der alten und deren
+  hintere unter der neuen Einstellung gemessen wurden. Kein Datenrennen, aber
+  auch keine Momentaufnahme. Ob eine Einstellungsänderung einen laufenden Scan
+  erreichen SOLL, ist eine Produktentscheidung (Review-Fund 2026-09-10).
+- `--list` nennt die vom Filter ausgeblendeten dreckigen Repos nicht. Die TUI
+  hängt dafür `hdr_hidden_dirty` an die Kopfzeile, ausdrücklich weil ein
+  Übersichtswerkzeug nicht gerade die verstecken darf, deretwegen man es
+  startet. `--filter api` auf der Kommandozeile kann dagegen eine einzelne
+  `✔`-Zeile mit Exit-Code 0 zeigen, während fünfzig dreckige Repos
+  ausgeblendet sind (Review-Fund 2026-09-10). Der Hinweis wäre eine Änderung
+  am dokumentierten CLI-Vertrag und braucht deshalb eine Entscheidung.
+- (die Frage zu `http.proxy` und `http.sslVerify` ist am 2026-09-03
+  entschieden — beide werden wie `core.gitProxy` abgelehnt, sobald die Config
+  des Repos sie setzt, siehe Regel oben)
