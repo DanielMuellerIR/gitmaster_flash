@@ -2,12 +2,12 @@
   "schema_version": 2,
   "project": "gitmaster_flash",
   "campaign": {
-    "id": "20260903T193711372060+0200",
-    "token_budget": 3315070,
+    "id": "20260910T064030267503+0200",
+    "token_budget": 4000000,
     "status": "complete",
-    "started_at": "2026-09-03T19:37:11+02:00",
-    "tokens_spent": 86496,
-    "finished_at": "2026-09-03T19:37:12+02:00",
+    "started_at": "2026-09-10T06:40:30+02:00",
+    "tokens_spent": 1174551,
+    "finished_at": "2026-09-10T08:15:42+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -81,6 +81,15 @@
       "tokens_spent": 66387,
       "finished_at": "2026-09-03T18:19:34+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260903T193711372060+0200",
+      "token_budget": 3315070,
+      "status": "complete",
+      "started_at": "2026-09-03T19:37:11+02:00",
+      "tokens_spent": 86496,
+      "finished_at": "2026-09-03T19:37:12+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -109,16 +118,18 @@
       "reason": "Datenintegritaet bei Commit, Push, Pull und Verwerfen; zentrale Scan-, Diff-, CLI- und TUI-Logik mit breiter Aufrufwirkung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T193711372060+0200",
-        "completed_at": "2026-09-03T19:37:11+02:00",
-        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
-        "content_sha256": "fd68c4da1c1a4a61ee18bc300b4f60bf99074cbd403e636476c8e5e092748fb6",
+        "campaign_id": "20260910T064030267503+0200",
+        "completed_at": "2026-09-10T08:15:13+02:00",
+        "observed_head": "216265e77319b8973f1496132924f4b30b47ddc9",
+        "content_sha256": "4f688f017c0ae63717591e4697f863afb877c9fdf63e35a00a83f3b338cba003",
         "file_count": 2,
-        "review": "delta-plus-boundaries",
+        "review": "full",
         "outcome": "improved",
-        "summary": "Zweiter Nachtrag auf Daniels Entscheidung: http.proxy (samt der adressgebundenen Form http.<url>.proxy) und http.sslVerify=false werden wie core.gitProxy abgelehnt, sobald die Config DES REPOS sie setzt. Bei sslVerify ist nur der Wert false ein Grund; gelesen wird er als Wahrheitswert, damit Git die Schreibweisen selbst aufloest, und ein unlesbarer Wert gilt als nicht belegbar. Bei den Proxy-Eintraegen vergleicht repo_transport_override() nur die Schluesselnamen, weil eine Proxy-Adresse Zugangsdaten tragen kann; ein Test prueft, dass nichts davon in Meldung, Protokoll oder JSON landet. fetch_remote_block_reason() liefert jetzt (Grund, Beleg), damit die Meldung die eine gesetzte Einstellung nennt statt alle drei.",
+        "summary": "Zweite Runde, mit der der Review jetzt wirklich das ganze Modul deckt: Nach der ersten Runde waren rund 2200 Zeilen (TUI-Zeichnen und Dialoge, Datenklassen, Info-Ansicht, Hauptschleife, Demo-Sandbox) von niemandem gelesen worden; drei weitere read-only Reviewer haben sie nachgeholt. Zwei Wege, auf denen gmf mit einem Traceback endete statt mit einer Auskunft, sind behoben und beide nachgestellt: github_web_urls() liess urllib.parse.quote() ungeschuetzt auf ein surrogateescape-Zeichen laufen, und der Aufruf steht ausserhalb des try/except von build_info_view() — ein Druck auf I beendete gmf; prompt_line() klemmte die Zeile nur nach oben, obwohl die Aufrufer h-4 bzw. h-2 rechnen, sodass ein drei Zeilen hohes Fenster den Druck auf / mit curses.error beendete (an echtem curses im Pseudo-Terminal belegt). Dazu: Protokoll und Spalten der Kompaktansicht rechneten ihr Fenster von Hand ohne die untere Hoehenschranke von scroll_window(), und der Seitenschritt im Protokoll nahm nicht die wirklich gezeichnete Hoehe; read_branches() las %(refname:short) und nannte bei gleichnamigem Tag denselben Branch heads/main; oid, date und commit 216265e77319b8973f1496132924f4b30b47ddc9\nAuthor: DanielMuellerIR <62342041+DanielMuellerIR@users.noreply.github.com>\nDate:   Thu Sep 10 08:14:51 2026 +0200\n\n    fix: two crashes in the views, and the last hand-rolled window rules (0.22.11)\n    \n    Zwei Wege, auf denen gmf mit einem Traceback endete statt mit einer Auskunft:\n    - `I` auf einem Repo, dessen Remote-Adresse ein Byte ohne UTF-8-Bedeutung\n      traegt: urllib.parse.quote() lehnt die surrogateescape-Zeichen ab,\n      github_web_urls() hatte als einzige solche Stelle keine Rueckfallebene, und\n      der Aufruf steht ausserhalb des try/except von build_info_view().\n    - `/` in einem drei Zeilen hohen Fenster: prompt_line() klemmte die Zeile nur\n      nach oben, die Aufrufer rechnen aber h-4 bzw. h-2. Echtes curses wirft bei\n      move(-1, x); an einem Pseudo-Terminal nachgestellt.\n    \n    Dazu aus demselben Review:\n    - Protokoll und Spalten der Kompaktansicht rechneten ihr Fenster von Hand,\n      ohne die untere Hoehenschranke von scroll_window(). Der Seitenschritt im\n      Protokoll nimmt jetzt die wirklich gezeichnete Hoehe: eine \"Seite\" sprang um\n      zwei Eintraege, waehrend siebzehn zu sehen waren.\n    - read_branches() liest den vollen Ref statt %(refname:short); bei einem\n      gleichnamigen Tag nannte die Info-Seite denselben Branch oben main und\n      darunter heads/main.\n    - github_web_urls, branch_block_specs (oid/date) und `git show -s` folgen jetzt\n      denselben Regeln wie ihre Nachbarn: terminal_text() und NO_REPLACE_ENV.\n    - file_diff() rief denselben --no-index-Befehl zweimal woertlich auf.\n    - confirm(extra_key) war Rest der entfernten V-Aktion; die Aenderungsansicht\n      ist ausdruecklich rein lesend. Der Rueckgabetyp bool|str war eine Fussangel\n      ohne Nutzen.\n    - Die Haertung der Demo-Repos steht in _demo_harden() statt zweimal\n      ausgeschrieben, und blendet zusaetzlich core.attributesFile aus.\n    \n    Drei offene Punkte in AGENTS.md ergaenzt, darunter: der Demo-Modus geht bei R\n    und G doch ins Netz (die eingecheckten Bilder sind nicht betroffen).\n    \n    624 Tests gruen, docs/make-screens.py --check gleich (nur die Versionszeile). folgten nicht denselben Regeln wie ihre Nachbarn (terminal_text, NO_REPLACE_ENV); file_diff() rief denselben --no-index-Befehl zweimal woertlich auf; confirm(extra_key) war toter Rest der entfernten V-Aktion samt Rueckgabetyp bool|str; die Haertung der Demo-Repos stand zweimal ausgeschrieben und liess core.attributesFile aus. Erste Runde derselben Buchung: ls-remote-Ref-Namensvergleich, Ausgabe- und Config-Grenzen, Filter-Normalform, Freigabepruefung gegen die festgehaltene OID, Lockdatei der Index-Uebernahme, vier Regeln ueber ihren Namen und TransferCheck.evidence.",
         "tests": [
-          "python3 -m unittest discover -s tests: 609 Tests gruen; RepoTransportOverrideTests auf 14 Tests erweitert, fuenf Mutationen (Muster entfernt, adressgebundene Form entfernt, sslVerify-Wert ignoriert, sslVerify blockt auch bei true) toeten sie; zsh -n install.sh; docs/make-screens.py --check"
+          "python3 -m unittest discover -s tests: 624 gruen (16 neu, 3 obsolete entfernt); die neuen Tests einzeln gegen ihre Mutation gestellt",
+          "zsh -n install.sh: passed",
+          "python3 docs/make-screens.py --check: passed; die neu erzeugten Bilder unterscheiden sich ausschliesslich in der Versionszeile, der Demo-Umbau ist also bytegleich"
         ]
       }
     },
@@ -184,16 +195,16 @@
       "reason": "Zweisprachiger Nutzervertrag fuer Sicherheitszusagen, CLI, Installation und Bedienung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T193711372060+0200",
-        "completed_at": "2026-09-03T19:37:11+02:00",
-        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
-        "content_sha256": "ab7b5e220c2309c70bda9bf8973fa65e3ba7dc2aebaceb89e61dd04aa811b590",
+        "campaign_id": "20260910T064030267503+0200",
+        "completed_at": "2026-09-10T08:15:28+02:00",
+        "observed_head": "216265e77319b8973f1496132924f4b30b47ddc9",
+        "content_sha256": "caa5572827a68072d8e7aa426f7272f5dd8d329dcac41c28e90850c5e2868acc",
         "file_count": 2,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Beide READMEs nennen im Abschnitt zum sicheren Push jetzt alle drei gesperrten Einstellungen und den Grund, warum keine per Aufruf abschaltbar ist. Versionszeile auf 0.22.7.",
+        "outcome": "reviewed-clean",
+        "summary": "Delta ist die Versionszeile (0.22.10 -> 0.22.11). Nachgeprueft, ob die zweite Reviewrunde eine Nutzerzusage beruehrt: Sie tut es nicht. confirm() hat seine dritte Antwort verloren, aber die READMEs haben sie nie beschrieben (die V-Aktion ist laengst entfernt und steht unter 'Bewusst nicht umgesetzt'); die beiden Absturzkorrekturen und die Fensterregeln aendern kein zugesagtes Verhalten. Struktur beider Fassungen weiter gleich.",
         "tests": [
-          "DocumentationContractTests; volle Suite 609 gruen"
+          "DocumentationContractTests und VersionInOutputTests gruen; Strukturvergleich beider READMEs: gleiche Ueberschriftenfolge und gleiche Zahl Codebloecke"
         ]
       }
     },
@@ -207,16 +218,16 @@
       "reason": "Regelwerk, das jede spaetere Session vor der Arbeit liest; veraltete Regeln oder Verweise auf entfernte Funktionen fuehren dort systematisch in die Irre",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T193711372060+0200",
-        "completed_at": "2026-09-03T19:37:11+02:00",
-        "observed_head": "5bc15c1a1fb2553db178a77d2eb426aad375c2f6",
-        "content_sha256": "fd40e56640c9a6956ea97987c8b5b7aa0d0f110673c379dfaf1bc0247b022cdc",
+        "campaign_id": "20260910T064030267503+0200",
+        "completed_at": "2026-09-10T08:15:28+02:00",
+        "observed_head": "216265e77319b8973f1496132924f4b30b47ddc9",
+        "content_sha256": "7d4b163edb597eb72dd55237aef102c337d4ce8949611d36548b5b357e745ac3",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Regel auf alle drei Einstellungen erweitert, samt der Begruendung fuer den Scope-Vergleich, der adressgebundenen Formen und der Datenschutzgrenze (nur Schluesselnamen bei Proxys, Wahrheitswert bei sslVerify). Der offene Punkt ist entschieden und aufgeloest.",
+        "summary": "Vier Regeln der zweiten Runde ergaenzt: scroll_window() deckt jetzt auch Protokoll und Spalten der Kompaktansicht und der Seitenschritt nimmt die gezeichnete Hoehe; jede Zeilenangabe an move() wird nach beiden Seiten geklemmt und der Sprung abgefangen; wer eine Web-Adresse aus einer Remote-URL baut, braucht dieselbe Rueckfallebene wie display_remote_url(); read_branches() liest den vollen Ref; die Haertung der Demo-Repos steht in _demo_harden() und schliesst core.attributesFile ein. Ein vierter offener Punkt aufgenommen: Der Demo-Modus geht bei R und G doch ins Netz — der Aufbau bleibt lokal, aber die drei github-Remotes tragen danach echte Adressen, und fetch_remote_block_reason() sperrt sie nicht (am 2026-09-10 fuer alle drei Repos belegt). Die eingecheckten Bilder sind nicht betroffen, eine Behebung waere keine Kleinigkeit.",
         "tests": [
-          "keine ausfuehrbaren Tests fuer Prosa; die Regel ist durch RepoTransportOverrideTests belegt"
+          "Namensabgleich AGENTS.md gegen gitmaster_flash.py, install.sh und docs/make-screens.py: kein toter Verweis"
         ]
       }
     }
@@ -274,6 +285,22 @@
           "python3 -m unittest discover -s tests: 538 passed",
           "python3 docs/make-screens.py --check: passed (Bilder byteweise gleich)"
         ]
+      }
+    },
+    {
+      "id": "transport-override-per-remote",
+      "summary": "repo_transport_override() liest die Repo-Config JE REMOTE und im Fetch zweimal: gemessen 9 git-config-Prozesse je Aufruf, 20 von 31 git-Aufrufen eines Remote-Fetchs sind git config, davon 9 reine Wiederholung. Die Einstellung ist eine Eigenschaft des REPOS, nicht des Remotes",
+      "evidence": [
+        "gitmaster_flash.py"
+      ],
+      "priority": 2,
+      "state": "dismissed",
+      "noted_at": "2026-09-10T07:40:37+02:00",
+      "campaign_id": "20260910T064030267503+0200",
+      "dismissed": {
+        "campaign_id": "20260910T064030267503+0200",
+        "dismissed_at": "2026-09-10T07:40:42+02:00",
+        "reason": "Jede Konsolidierung tauscht hier eine Sicherheitseigenschaft gegen Tempo: Die Pruefung steht bewusst unmittelbar vor dem Netzaufruf, und der Wert je Remote neu gelesen faengt eine Config-Aenderung mitten im Scan. Hoisten aus der Remote-Schleife oder Weiterreichen des Ergebnisses an fetch_remote_safely() macht daraus einen aelteren Wert. Das ist eine Produktentscheidung und braucht einen eigenen Auftrag; die Messung steht in AGENTS.md unter Offene Punkte."
       }
     }
   ]
