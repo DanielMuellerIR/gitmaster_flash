@@ -421,6 +421,12 @@ with it:
 gitmaster_flash/install.sh
 ```
 
+The repository has the same three entry points as every other project here:
+`build.sh` runs the self-test and regenerates the README pictures in `docs/`
+(`--check` only verifies them), `install.sh` registers the wrapper, and
+`release.sh` writes a versioned source archive to `dist/` — see
+[Tests](#tests) and [Release](#release).
+
 A line that already sources the same wrapper is accepted in any spelling
 (`~/…`, `$HOME/…`, quoted or not); only a genuinely different path stops the
 installer and asks you to sort it out by hand.
@@ -680,9 +686,24 @@ python3 docs/make-screens.py --check   # do the pictures still match the UI?
 ```
 
 `--check` fails when the screens in `docs/` would come out different — after a UI
-change, run `docs/make-screens.py` and commit the result. The capture waits for the
+change, run `./build.sh` (self-test, then `docs/make-screens.py`) and commit the
+result; `./build.sh --check` is the read-only variant. The capture waits for the
 complete demo header and for the command-log entry of each confirmed Git action;
 output silence alone is not treated as completion.
+
+## Release
+
+```sh
+./release.sh
+```
+
+There is no app bundle, so there is nothing to notarize: a release is a source
+archive of the committed state. The script refuses to run with uncommitted
+changes to tracked files, runs `./build.sh --check` (self-test, pictures still
+current), packs `git archive HEAD` into `dist/gitmaster_flash-<version>.tar.gz`,
+unpacks it once to confirm the program inside reports the same version, and
+writes a `.sha256` next to it. An existing artifact of the same version is never
+overwritten. Last line on success: `RELEASE OK: <path> (<version>)`.
 
 ## Name
 

@@ -446,6 +446,12 @@ ab, damit der `source`-Befehl nicht mit ihr verschmilzt:
 gitmaster_flash/install.sh
 ```
 
+Das Repo hat dieselben drei Einstiegsskripte wie jedes andere Projekt hier:
+`build.sh` führt den Selbsttest aus und erzeugt die README-Bilder in `docs/`
+neu (`--check` prüft sie nur), `install.sh` registriert den Wrapper, und
+`release.sh` legt ein versioniertes Quellarchiv unter `dist/` ab — siehe
+[Tests](#tests) und [Release](#release).
+
 Eine bereits vorhandene Zeile auf denselben Wrapper wird in jeder Schreibweise
 erkannt (`~/…`, `$HOME/…`, mit oder ohne Quotes); nur ein wirklich anderer Pfad
 hält die Installation an und verlangt Handarbeit.
@@ -717,10 +723,26 @@ python3 docs/make-screens.py --check   # passen die Bilder noch zur Oberfläche?
 ```
 
 `--check` schlägt fehl, wenn die Bilder in `docs/` anders herauskämen — nach einer
-UI-Änderung also `docs/make-screens.py` laufen lassen und das Ergebnis mitcommitten.
+UI-Änderung also `./build.sh` laufen lassen (Selbsttest, dann `docs/make-screens.py`)
+und das Ergebnis mitcommitten; `./build.sh --check` ist die nur lesende Variante.
 Die Aufnahme wartet auf die vollständige Demo-Kopfzeile und nach jeder bestätigten
 Git-Aktion auf deren Eintrag im Befehlsprotokoll; bloße Ausgaberuhe gilt nicht als
 Abschluss.
+
+## Release
+
+```sh
+./release.sh
+```
+
+Es gibt kein App-Bundle, also auch nichts zu notarisieren: Ein Release ist ein
+Quellarchiv des committeten Standes. Das Skript verweigert den Lauf bei nicht
+committeten Änderungen an versionierten Dateien, führt `./build.sh --check` aus
+(Selbsttest, Bilder aktuell), packt `git archive HEAD` nach
+`dist/gitmaster_flash-<version>.tar.gz`, entpackt es einmal zur Probe, damit das
+Programm darin dieselbe Version meldet, und schreibt eine `.sha256` daneben. Ein
+vorhandenes Artefakt derselben Version wird nie überschrieben. Schlusszeile bei
+Erfolg: `RELEASE OK: <pfad> (<version>)`.
 
 ## Name
 

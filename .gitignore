@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .commit-lock
+# Release-Archive von release.sh (tar.gz + Prüfsumme); pro Version neu erzeugbar
+dist/

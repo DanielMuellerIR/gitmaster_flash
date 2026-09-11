@@ -4,6 +4,18 @@ TUI-Übersicht über alle Git-Repos unterhalb des aktuellen Ordners, zum schnell
 Aufräumen. Typ: Skript/CLI, Plattform: macOS/Terminal, Python 3 (nur
 Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 
+## Einstiegsskripte
+
+- `build.sh` — Selbsttest, dann die README-Bilder in `docs/` neu erzeugen
+  (`--check`: nur prüfen). Es gibt keinen Übersetzungsschritt; die generierten
+  Bilder sind das, was dieses Projekt „baut".
+- `install.sh` — Selbsttest, dann `gmf.zsh` in `~/.zshrc` registrieren.
+- `release.sh` — Quellarchiv des committeten Standes nach
+  `dist/gitmaster_flash-<version>.tar.gz` + `.sha256` (kein Bundle, kein DMG,
+  keine Notarisierung). Verweigert bei nicht committeten Änderungen, ruft
+  `./build.sh --check`, prüft das Archiv per Entpacken und `--version`,
+  überschreibt nie. Nichts davon pusht nach GitHub.
+
 ## Regeln
 
 - Keine externen Abhängigkeiten einführen; alles bleibt Standardbibliothek.
