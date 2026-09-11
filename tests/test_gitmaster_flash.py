@@ -6733,22 +6733,160 @@ class RemoteAndCommandLogTests(unittest.TestCase):
         self.assertIn("github", ui.message)
         self.assertIn("no repository", ui.message)
 
-    def test_info_view_has_no_destructive_x_action(self):
-        git(self.repo, "branch", "keep-me")
-        before = collect_status(self.repo, self.root, DEFAULT_CONFIG)
-        ui = TUI(self._info_screen([ord("x"), ord("q")]), self.root,
-                 DEFAULT_CONFIG, None)
-        ui.statuses = [before]
+    def _remove_remote_ui(self, keys, answer=True):
+        """Info-Ansicht mit gefälschter Pager-Rückfrage; sammelt Titel, Zeilen, Frage.
 
-        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+        `answer` ist die Antwort auf die Rückfrage — oder ein Callable, das
+        zwischen Vorschau und Antwort noch etwas am Repo verändern darf.
+        """
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(self._info_screen(keys), self.root, DEFAULT_CONFIG, None)
+        ui.statuses = [st]
+        asked = {}
+
+        def preview(title, lines, question):
+            asked.update(title=title, lines=lines, question=question)
+            return answer() if callable(answer) else answer
+
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0), \
+                mock.patch.object(ui, "confirm_in_pager", side_effect=preview):
             ui.action_repo_info()
+        return ui, asked
+
+    def _commit_only_under(self, ref: str) -> str:
+        """Einen Commit anlegen, der danach nur noch unter `ref` erreichbar ist."""
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "nur dort")
+        oid = git_output(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "reset", "-q", "--hard", "HEAD~1")
+        git(self.repo, "update-ref", ref, oid)
+        return oid
+
+    def test_remote_removal_facts_count_what_only_the_remote_still_holds(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        only_there = self._commit_only_under("refs/remotes/github/feature")
+        git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+        git(self.repo, "symbolic-ref", "refs/remotes/github/HEAD",
+            "refs/remotes/github/main")
+        git(self.repo, "branch", "--track", "tracker", "refs/remotes/github/main")
+
+        facts = gmf_module.remote_removal_facts(self.repo, "github", DEFAULT_CONFIG)
+
+        # Die HEAD-Symref ist kein Branch und zählt nicht mit.
+        self.assertEqual(facts.tracking_refs,
+                         ["refs/remotes/github/feature", "refs/remotes/github/main"])
+        self.assertEqual(facts.tracking_branches, ["tracker"])
+        self.assertEqual(facts.orphan_commits, 1)
+        self.assertEqual(facts.remote.fetch_urls, ["https://github.com/example/demo.git"])
+        # Sobald ein lokaler Branch den Commit hält, ist nichts mehr verwaist.
+        git(self.repo, "branch", "keep", only_there)
+        self.assertEqual(gmf_module.remote_removal_facts(
+            self.repo, "github", DEFAULT_CONFIG).orphan_commits, 0)
+        self.assertIsNone(gmf_module.remote_removal_facts(
+            self.repo, "nirgends", DEFAULT_CONFIG))
+
+    def test_x_removes_the_selected_remote_after_a_typed_confirmation(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+        # Tab wählt github (origin steht als Sync-Remote vorn), X öffnet den Dialog.
+        ui, asked = self._remove_remote_ui([9, ord("x"), ord("q")])
 
         after = collect_status(self.repo, self.root, DEFAULT_CONFIG)
         self.assertEqual([remote.name for remote in after.remotes], ["origin"])
+        self.assertEqual(ui.message, gmf_module.t("remove_done", r="github"))
+        self.assertIn("✔ repo: git remote remove github", gmf_module.COMMAND_LOG)
+        # Die Tracking-Refs sind mit dem Remote weg — genau das, wovor der
+        # Dialog warnt.
+        self.assertEqual(git_output(self.repo, "for-each-ref", "refs/remotes/github/"), "")
+        self.assertEqual(asked["title"],
+                         gmf_module.t("remove_title", rel="repo", r="github"))
+        self.assertEqual(asked["question"], gmf_module.t("remove_confirm", r="github"))
+        lines = asked["lines"]
+        self.assertIn("fetch+push: https://github.com/example/demo.git",
+                      [line.lower() for line in lines])
+        self.assertIn(gmf_module.t("remove_effect_refs", r="github", n=1), lines)
+        self.assertIn(gmf_module.t("remove_no_orphans"), lines)
+        for line in gmf_module.t("remove_irreversible").splitlines():
+            self.assertIn(line, lines)
+        self.assertNotIn(gmf_module.t("remove_sync_warning", r="github"), lines)
+        self.assertEqual(lines[-1], gmf_module.t("remove_command")
+                         + " git remote remove github")
+
+    def test_x_dialog_counts_the_commits_that_would_lose_their_last_reference(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        self._commit_only_under("refs/remotes/github/feature")
+        # Der Tracking-Branch hängt an einem anderen Ref des Remotes; `feature`
+        # bleibt der einzige Halter seines Commits.
+        git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+        git(self.repo, "branch", "--track", "tracker", "refs/remotes/github/main")
+
+        ui, asked = self._remove_remote_ui([9, ord("x"), ord("q")], answer=False)
+
+        lines = asked["lines"]
+        for line in gmf_module.t("remove_orphans", n=1).splitlines():
+            self.assertIn(line, lines)
+        self.assertNotIn(gmf_module.t("remove_no_orphans"), lines)
+        self.assertIn(gmf_module.t("remove_effect_upstream", r="github", b="tracker"), lines)
+        self.assertEqual(ui.message, gmf_module.t("remove_cancelled"))
+
+    def test_x_warns_about_the_sync_remote_and_declining_removes_nothing(self):
+        ui, asked = self._remove_remote_ui([ord("x"), ord("q")], answer=False)
+
+        after = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertEqual([remote.name for remote in after.remotes], ["origin"])
+        self.assertEqual(ui.message, gmf_module.t("remove_cancelled"))
+        self.assertIn(gmf_module.t("remove_sync_warning", r="origin"), asked["lines"])
+        self.assertTrue(any(line.startswith("⊘ repo: git remote remove origin")
+                            for line in gmf_module.COMMAND_LOG))
+        self.assertFalse(any(line.startswith("✔") and "remote remove" in line
+                             for line in gmf_module.COMMAND_LOG))
+
+    def test_x_on_a_branch_block_removes_nothing(self):
+        git(self.repo, "branch", "keep-me")
+        # Shift-Tab vom ersten Block aus landet auf dem letzten: einem Branch.
+        ui, asked = self._remove_remote_ui([curses.KEY_BTAB, ord("x"), ord("q")])
+
+        self.assertEqual(asked, {})
+        self.assertEqual([remote.name for remote in collect_status(
+            self.repo, self.root, DEFAULT_CONFIG).remotes], ["origin"])
         self.assertIn("keep-me", {
             branch.name for branch in read_branches(self.repo, DEFAULT_CONFIG)})
-        self.assertFalse(any(" remote remove " in line or " branch -d " in line
+        self.assertFalse(any("remote remove" in line or "branch -d" in line
                              for line in gmf_module.COMMAND_LOG))
+        self.assertIn(gmf_module.t("info_remove_remote_only"), ui.scr.written)
+
+    def test_x_aborts_when_the_remote_changes_between_preview_and_yes(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+
+        def change_then_agree():
+            # Ein Terminal nebenan verschiebt das Remote, während die Frage offen ist.
+            git(self.repo, "remote", "set-url", "github",
+                "https://github.com/example/other.git")
+            return True
+
+        ui, asked = self._remove_remote_ui([9, ord("x"), ord("q")],
+                                           answer=change_then_agree)
+
+        self.assertEqual(ui.message, gmf_module.t("remove_changed"))
+        self.assertEqual([remote.name for remote in collect_status(
+            self.repo, self.root, DEFAULT_CONFIG).remotes], ["origin", "github"])
+        self.assertTrue(any(line.startswith("⊘ repo: git remote remove github")
+                            for line in gmf_module.COMMAND_LOG))
+        self.assertFalse(any(line.startswith("✔") for line in gmf_module.COMMAND_LOG))
+
+    def test_x_aborts_when_a_fetch_adds_tracking_refs_before_the_yes(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+
+        def fetch_lands_then_agree():
+            git(self.repo, "update-ref", "refs/remotes/github/late", "HEAD")
+            return True
+
+        ui, _ = self._remove_remote_ui([9, ord("x"), ord("q")],
+                                       answer=fetch_lands_then_agree)
+
+        self.assertEqual(ui.message, gmf_module.t("remove_changed"))
+        self.assertEqual(git_output(self.repo, "for-each-ref", "--format=%(refname)",
+                                    "refs/remotes/github/"),
+                         "refs/remotes/github/late")
 
     def test_info_view_maps_remote_blocks_to_lines(self):
         git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")

@@ -20,6 +20,7 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
   G     guarded GitHub push (preview, then Y ⏎ to confirm; branch only, no tags)
   H     explain the Git safety rules
   I     show repository details, remote addresses, and clickable GitHub URLs
+        (there: T tests a remote, X removes one after a warning — no undo)
   S     view the latest stash as a diff (read-only, scrollable)
   R     reload everything and fetch each safe remote separately (shows progress)
   Q     quit
@@ -69,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.13"
+__version__ = "0.22.14"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -530,6 +531,8 @@ TR = {
               "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
               "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
               "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
+              "I  Repository, remote and branch details. T tests the selected remote.\n"
+              "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
               "A  Shows every changed file and its diff without modifying the repository.\n"
               "   Discarding or unstaging remains an explicit terminal operation.",
         "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
@@ -538,6 +541,8 @@ TR = {
               "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
               "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
+              "I  Repo-, Remote- und Branch-Details. T prüft das gewählte Remote.\n"
+              "   X entfernt es nach Warnung: Tracking-Refs und Reflogs sind danach endgültig weg.\n\n"
               "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
               "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion."},
     # Repo-Info
@@ -593,15 +598,66 @@ TR = {
         "en": " ↑/↓ or Tab select remote/branch · PgUp/PgDn scroll · Q/Esc close",
         "de": " ↑/↓ oder Tab Remote/Branch wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
     "info_footer_actions": {
-        "en": " T test selected remote (read-only)",
-        "de": " T gewähltes Remote prüfen (rein lesend)"},
+        "en": " T test selected remote (read-only) · X remove remote (no undo)",
+        "de": " T gewähltes Remote prüfen (rein lesend) · X Remote entfernen (kein Rückgängig)"},
     "info_footer_actions_branch": {
-        "en": " Branch details are read-only",
-        "de": " Branch-Details sind rein lesend"},
+        "en": " Branch details are read-only · X removes remotes only",
+        "de": " Branch-Details sind rein lesend · X entfernt nur Remotes"},
     "info_no_remotes": {"en": "This repository has no remote.",
                         "de": "Dieses Repo hat kein Remote."},
     "info_check_remote_only": {"en": "T tests remotes; a branch is local anyway.",
                                "de": "T prüft Remotes; ein Branch ist ohnehin lokal."},
+    "info_nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
+    "info_remove_remote_only": {
+        "en": "X removes remotes only; deleting a branch remains a terminal task.",
+        "de": "X entfernt nur Remotes; einen Branch löschen bleibt eine Terminal-Aufgabe."},
+    # Remote entfernen (X). Die Texte mit Zeilenumbruch werden im Dialog per
+    # splitlines() zu einzelnen Pager-Zeilen.
+    "remove_title": {"en": "Remove remote · {rel} · {r}", "de": "Remote entfernen · {rel} · {r}"},
+    "remove_what_happens": {"en": "What this does:", "de": "Was dabei passiert:"},
+    "remove_effect_config": {
+        "en": "· the [remote \"{r}\"] section disappears from .git/config",
+        "de": "· der Abschnitt [remote \"{r}\"] verschwindet aus .git/config"},
+    "remove_effect_refs": {
+        "en": "· {n} remote-tracking branch(es) refs/remotes/{r}/* are deleted, together with their reflogs",
+        "de": "· {n} Remote-Tracking-Branch(es) refs/remotes/{r}/* werden gelöscht, samt ihren Reflogs"},
+    "remove_effect_upstream": {
+        "en": "· local branch(es) tracking {r} lose that upstream: {b}",
+        "de": "· lokale Branch(es) mit Upstream auf {r} verlieren diese Verknüpfung: {b}"},
+    "remove_effect_safe": {
+        "en": "· commits, files, local branches and stashes stay untouched — nothing is sent",
+        "de": "· Commits, Dateien, lokale Branches und Stashes bleiben unberührt — nichts wird gesendet"},
+    "remove_effect_server": {
+        "en": "· nothing changes on the server; this is purely local",
+        "de": "· auf dem Server ändert sich nichts; das ist rein lokal"},
+    "remove_orphans": {
+        "en": "{n} commit(s) on those tracking branches exist in no local branch, tag or other remote.\n"
+              "After removal only Git's garbage collector still knows them.",
+        "de": "{n} Commit(s) dieser Tracking-Branches stehen in keinem lokalen Branch, Tag oder anderen Remote.\n"
+              "Nach dem Entfernen kennt sie nur noch Gits Müllsammler."},
+    "remove_no_orphans": {
+        "en": "Every commit on those tracking branches is also reachable from a local branch, tag or another remote.",
+        "de": "Jeder Commit dieser Tracking-Branches ist auch über einen lokalen Branch, Tag oder ein anderes Remote erreichbar."},
+    "remove_irreversible": {
+        "en": "WARNING: this cannot be undone. gmf cannot restore the deleted tracking refs or their reflogs.\n"
+              "`git remote add` only re-creates the address; the refs come back only if the server still has them.",
+        "de": "ACHTUNG: Das lässt sich nicht rückgängig machen. gmf kann die gelöschten Tracking-Refs und ihre Reflogs nicht wiederherstellen.\n"
+              "`git remote add` legt nur die Adresse neu an; die Refs kommen nur zurück, wenn der Server sie noch hat."},
+    "remove_sync_warning": {
+        "en": "Careful: {r} is the sync remote of this repository — P stops working here afterwards.",
+        "de": "Achtung: {r} ist der Sync-Remote dieses Repos — P funktioniert hier danach nicht mehr."},
+    "remove_command": {"en": "Command:", "de": "Befehl:"},
+    "remove_confirm": {
+        "en": "Remove remote {r} for good? Y ⏎ = yes, anything else cancels: ",
+        "de": "Remote {r} endgültig entfernen? J ⏎ = ja, sonst Abbruch: "},
+    "remove_done": {"en": "Removed remote {r}; this cannot be undone.",
+                    "de": "Remote {r} entfernt; das lässt sich nicht rückgängig machen."},
+    "remove_failed": {"en": "Removing {r} failed (Git exit code {code}).",
+                      "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+    "remove_cancelled": {"en": "Nothing was removed.", "de": "Es wurde nichts entfernt."},
+    "remove_changed": {
+        "en": "The remote or its tracking refs changed after the preview — nothing was removed.",
+        "de": "Remote oder Tracking-Refs haben sich nach der Vorschau geändert — nichts wurde entfernt."},
     # Remote prüfen (T)
     "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
     "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
@@ -3772,6 +3828,59 @@ def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str
     return False, (r.stderr or "").strip()[:240]
 
 
+@dataclass
+class RemoteRemovalFacts:
+    """Was `git remote remove` außer der Adresse noch löscht — vorab gezählt.
+
+    Die Info-Ansicht zeigt diese Zahlen im Dialog, bevor jemand bestätigt: wie
+    viele Remote-Tracking-Branches mitsamt Reflogs verschwinden, welche lokalen
+    Branches ihren Upstream verlieren und wie viele Commits dabei ihren letzten
+    lokalen Verweis verlieren. Dieselben Werte werden unmittelbar vor dem
+    Git-Aufruf erneut erhoben; weichen sie ab, wird nichts entfernt.
+    """
+
+    remote: RemoteConfig
+    tracking_refs: list[str]        # refs/remotes/<name>/… ohne die HEAD-Symref
+    tracking_branches: list[str]    # lokale Branches mit Upstream auf dieses Remote
+    orphan_commits: int             # Commits, die nur über diese Refs erreichbar sind
+
+
+def remote_removal_facts(repo: Path, name: str,
+                         cfg: dict) -> RemoteRemovalFacts | None:
+    """Zusammentragen, was das Entfernen von Remote `name` lokal löschen würde.
+
+    Liefert None, wenn es das Remote nicht (mehr) gibt. Jeder Lesefehler kommt
+    als GitReadError/OSError beim Aufrufer an: Ein Dialog mit unvollständigen
+    Zahlen wäre schlimmer als gar keiner.
+    """
+    t_ = cfg["git_timeout"]
+    remote = read_remote_configs(repo, cfg).get(name)
+    if remote is None:
+        return None
+    prefix = f"refs/remotes/{name}/"
+    refs_r = _required_git(repo, "for-each-ref", "--format=%(refname)%00%(symref)",
+                           prefix, timeout=t_)
+    tracking_refs = []
+    for record in refs_r.stdout.splitlines():
+        refname, _, symref = record.partition("\0")
+        # refs/remotes/<name>/HEAD ist nur ein Verweis auf einen der Branches.
+        if refname and not symref:
+            tracking_refs.append(refname)
+    # Commits, die nach dem Löschen dieser Refs von keinem Ref mehr erreichbar
+    # wären: alles unter dem Remote minus alles Übrige. `--all` deckt lokale
+    # Branches, Tags, andere Remotes, Stash und HEAD ab; `--exclude` gilt für
+    # das direkt folgende `--all`.
+    orphans = 0
+    if tracking_refs:
+        count_r = _required_git(
+            repo, "rev-list", "--count", f"--glob={prefix}*", "--not",
+            f"--exclude={prefix}*", "--all", timeout=t_)
+        orphans = int(count_r.stdout.strip() or 0)
+    branches = [b.name for b in read_branches(repo, cfg, strict=True)
+                if b.upstream.startswith(name + "/")]
+    return RemoteRemovalFacts(remote, tracking_refs, branches, orphans)
+
+
 def display_remote_url(url: str) -> str:
     """Remote-Adresse für die lokale Anzeige, aber ohne eingebettete Secrets."""
     raw = url.strip()
@@ -6810,7 +6919,7 @@ class TUI:
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
     def action_repo_info(self):
-        """Repo-Details; Remotes sind mit T rein lesend prüfbar."""
+        """Repo-Details; T prüft ein Remote rein lesend, X entfernt es nach Warnung."""
         st = self.current()
         if not st:
             return
@@ -6875,6 +6984,21 @@ class TUI:
                     note = t("info_check_remote_only")
                 else:
                     note = self._check_selected_remote(fresh, block)
+            elif ch in (ord("x"), ord("X")):
+                if not block:
+                    note = t("info_nothing_selected")
+                elif block[0] == "branch":
+                    note = t("info_remove_remote_only")
+                elif self._remove_remote(fresh, block[1]):
+                    # Ein Remote weniger: Ansicht neu aufbauen und die Auswahl
+                    # auf den ersten Block setzen, sonst stünde der Balken auf
+                    # Zeilen, die es nicht mehr gibt.
+                    fresh = self.refresh_one(fresh)
+                    view = build_info_view(fresh, self.cfg)
+                    selected, top, followed = 0, 0, None
+                    note = self.message
+                else:
+                    note = self.message
 
     def _check_selected_remote(self, st: RepoStatus,
                                block: tuple[str, str, int, int] | None) -> str:
@@ -6891,6 +7015,89 @@ class TUI:
         message = remote_check_message(name, outcome, refs, detail, timeout)
         self.message = message
         return message
+
+    def _remove_remote(self, st: RepoStatus, name: str) -> bool:
+        """Remote nach Vorschau und getippter Bestätigung aus der Config nehmen.
+
+        Bis 0.18.7 stand in diesem Dialog ein „Rückgängig"-Block aus
+        `git remote add`-Zeilen. Der war eine falsche Zusage: `git remote
+        remove` löscht auch refs/remotes/<name>/* samt Reflogs, und die
+        stellt kein Befehl wieder her. 0.18.8 nahm die Aktion deshalb ganz
+        heraus. Seit 0.22.14 ist sie wieder da und sagt das Gegenteil: nicht
+        rückgängig machbar — und zählt vorher, was verloren geht
+        (Entscheidung Daniel, 2026-09-11).
+        """
+        try:
+            facts = remote_removal_facts(st.path, name, self.cfg)
+        except (GitReadError, OSError) as exc:
+            self.message = t("info_remote_error", e=terminal_text(exc))
+            return False
+        if facts is None:
+            self.message = t("info_no_remotes")
+            return False
+        args = ("remote", "remove", name)
+        lines = self._remote_removal_lines(st, name, facts, format_git_command(args))
+        if not self.confirm_in_pager(
+                t("remove_title", rel=terminal_text(st.rel), r=name),
+                lines, t("remove_confirm", r=name)):
+            log_cancelled(st.path, args)
+            self.message = t("remove_cancelled")
+            return False
+        # Zwischen Vorschau und Ja kann ein Fetch oder ein Terminal nebenan
+        # Adresse oder Refs verändert haben; dann galt das Ja für andere Zahlen.
+        try:
+            current = remote_removal_facts(st.path, name, self.cfg)
+        except (GitReadError, OSError):
+            current = None
+        if current != facts:
+            log_cancelled(st.path, args)
+            self.message = t("remove_changed")
+            return False
+        r = run_git_logged(st.path, *args, timeout=self.cfg["git_timeout"])
+        if r.returncode != 0:
+            self.message = t("remove_failed", r=name, code=r.returncode)
+            return False
+        self.message = t("remove_done", r=name)
+        return True
+
+    @staticmethod
+    def _remote_removal_lines(st: RepoStatus, name: str, facts: RemoteRemovalFacts,
+                              command: str) -> list[str]:
+        """Die Vorschau-Zeilen des Entfernen-Dialogs (Pager, getippte Rückfrage)."""
+        remote = facts.remote
+        lines: list[str] = []
+        # Adressen wie auf der Info-Seite: redigiert, Fetch und Push nur
+        # getrennt, wenn sie wirklich abweichen.
+        if remote.push_urls == remote.fetch_urls:
+            lines.extend(f"{t('info_fetch_push_url')}: {display_remote_url(url)}"
+                         for url in remote.fetch_urls)
+        else:
+            lines.extend(f"{t('info_fetch_url')}: {display_remote_url(url)}"
+                         for url in remote.fetch_urls)
+            lines.extend(f"{t('info_push_url')}: {display_remote_url(url)}"
+                         for url in remote.push_urls)
+        lines.append("")
+        lines.append(t("remove_what_happens"))
+        lines.append(t("remove_effect_config", r=name))
+        lines.append(t("remove_effect_refs", r=name, n=len(facts.tracking_refs)))
+        if facts.tracking_branches:
+            lines.append(t("remove_effect_upstream", r=name, b=", ".join(
+                terminal_text(branch) for branch in facts.tracking_branches)))
+        lines.append(t("remove_effect_safe"))
+        lines.append(t("remove_effect_server"))
+        lines.append("")
+        if facts.orphan_commits:
+            lines.extend(t("remove_orphans", n=facts.orphan_commits).splitlines())
+        elif facts.tracking_refs:
+            lines.extend(t("remove_no_orphans").splitlines())
+        lines.append("")
+        lines.extend(t("remove_irreversible").splitlines())
+        if st.remote == name:
+            lines.append("")
+            lines.append(t("remove_sync_warning", r=name))
+        lines.append("")
+        lines.append(f"{t('remove_command')} {command}")
+        return lines
 
     # -- Commit-Hilfe --------------------------------------------------------
 

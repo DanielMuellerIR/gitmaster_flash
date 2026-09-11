@@ -162,7 +162,7 @@ memorize. Case does not matter — `f` works like `F`.
 | P | safely push the current branch to the private sync remote |
 | G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
-| I | read-only repository, remote and branch details; there: `T` tests a remote |
+| I | repository, remote and branch details; there: `T` tests a remote, `X` removes one (cannot be undone) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | R | fetch every safe remote in the background; the list stays usable |
 | Q | quit |
@@ -217,7 +217,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.13 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.14 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -284,14 +284,30 @@ The answer distinguishes the cases that otherwise look identical:
 The info view also keeps Git's own error message as evidence, underneath the
 plain-language classification.
 
-The info view is deliberately read-only. `T` tests the selected remote and keeps
-Git's redacted response as evidence. Local branches are listed with their last
-commit, upstream, ahead/behind and merge state, but gmf does not remove remotes or
+**`X` removes the selected remote** — the only writing action in this view, and
+it cannot be undone. Besides the section in `.git/config`, `git remote remove`
+deletes every remote-tracking branch `refs/remotes/<name>/*` together with its
+reflog, and local branches tracking that remote lose their upstream. So gmf shows
+a preview before asking: the addresses, the number of tracking branches
+affected, the local branches that lose their upstream, and how many commits on
+those tracking branches exist in no local branch, tag or other remote — after
+removal only Git's garbage collector still knows them. Below that stands the
+warning that there is no undo: `git remote add` only re-creates the address; the
+refs come back only if the server still has them. For the sync remote the
+preview additionally warns that `P` stops working for this repository. Confirm
+with `Y ⏎` as for the GitHub push; anything else cancels and is logged as a `⊘`
+line in the command log. If the address or the set of tracking refs changes
+between preview and yes (a fetch, a terminal next door), nothing is removed.
+Commits, files, local branches and stashes stay untouched; nothing changes on
+the server.
+
+Everything else in this view stays read-only. `T` tests the selected remote and
+keeps Git's redacted response as evidence. Local branches are listed with their
+last commit, upstream, ahead/behind and merge state, but gmf does not delete
 branches: Git would also delete their reflogs, which can contain the last local
-reference to commits and cannot be reconstructed by an honest undo command.
-Removal remains an explicit terminal task after reviewing those details. Stashes
-are previewed read-only; applying or deleting them remains an explicit terminal
-task as well.
+reference to commits. Deletion remains an explicit terminal task after reviewing
+those details. Stashes are previewed read-only; applying or deleting them
+remains an explicit terminal task as well.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ

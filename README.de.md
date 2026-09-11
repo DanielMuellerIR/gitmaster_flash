@@ -174,7 +174,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | G | geschützter GitHub-Push: Vorschau der ausgehenden Commits/Dateien, Bestätigung mit J ⏎ |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
-| I | rein lesende Repo-, Remote- und Branch-Details; dort `T` Remote prüfen |
+| I | Repo-, Remote- und Branch-Details; dort `T` Remote prüfen, `X` Remote entfernen (nicht rückgängig machbar) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | R | jedes sichere Remote im Hintergrund fetchen; die Liste bleibt bedienbar |
 | Q | beenden |
@@ -234,7 +234,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.13 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.14 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -303,14 +303,31 @@ Antwort trennt die Fälle, die sonst gleich aussehen:
 Unterhalb dieser Klartext-Einordnung bewahrt die Info-Ansicht zusätzlich Gits
 eigene Fehlermeldung als Beleg auf.
 
-Die Info-Ansicht ist bewusst rein lesend. `T` prüft das gewählte Remote und
-bewahrt Gits redigierte Antwort als Beleg auf. Lokale Branches erscheinen mit
-letztem Commit, Upstream, Vorsprung/Rückstand und Merge-Zustand; gmf entfernt aber
-weder Remotes noch Branches. Git würde dabei auch ihre Reflogs löschen. Darin kann
-der letzte lokale Verweis auf Commits liegen, und ein ehrlicher
-Rückgängig-Befehl kann ihn nicht rekonstruieren. Das Entfernen bleibt deshalb
-nach Prüfung dieser Details eine ausdrückliche Terminal-Aufgabe. Stashes werden
-rein lesend angezeigt; Anwenden und Löschen bleiben ebenfalls ausdrückliche
+**`X` entfernt das ausgewählte Remote** — die einzige schreibende Aktion dieser
+Ansicht, und sie lässt sich nicht rückgängig machen. `git remote remove` löscht
+neben dem Abschnitt in `.git/config` auch alle Remote-Tracking-Branches
+`refs/remotes/<name>/*` samt ihren Reflogs, und lokale Branches mit Upstream auf
+dieses Remote verlieren die Verknüpfung. Deshalb zeigt gmf vor der Rückfrage eine
+Vorschau: die Adressen, die Zahl der betroffenen Tracking-Branches, die lokalen
+Branches, die ihren Upstream verlieren, und wie viele Commits dieser
+Tracking-Branches in keinem lokalen Branch, Tag oder anderen Remote stehen — die
+kennt nach dem Entfernen nur noch Gits Müllsammler. Darunter steht die Warnung,
+dass es kein Rückgängig gibt: `git remote add` legt nur die Adresse neu an, die
+Refs kommen nur zurück, wenn der Server sie noch hat. Beim Sync-Remote warnt die
+Vorschau zusätzlich, dass `P` für dieses Repo danach nicht mehr geht. Bestätigt
+wird wie beim GitHub-Push mit `J ⏎`; jede andere Eingabe bricht ab und landet als
+`⊘`-Zeile im Befehlsprotokoll. Ändert sich zwischen Vorschau und Ja die Adresse
+oder der Bestand der Tracking-Refs (ein Fetch, ein Terminal nebenan), wird nichts
+entfernt. Commits, Dateien, lokale Branches und Stashes bleiben unberührt; auf
+dem Server ändert sich nichts.
+
+Alles andere in dieser Ansicht bleibt rein lesend. `T` prüft das gewählte Remote
+und bewahrt Gits redigierte Antwort als Beleg auf. Lokale Branches erscheinen mit
+letztem Commit, Upstream, Vorsprung/Rückstand und Merge-Zustand; gmf löscht aber
+keine Branches. Git würde dabei auch ihre Reflogs löschen, und darin kann der
+letzte lokale Verweis auf Commits liegen. Das Löschen bleibt deshalb nach Prüfung
+dieser Details eine ausdrückliche Terminal-Aufgabe. Stashes werden rein lesend
+angezeigt; Anwenden und Löschen bleiben ebenfalls ausdrückliche
 Terminal-Aufgaben.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen

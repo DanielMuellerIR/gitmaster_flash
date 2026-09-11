@@ -454,11 +454,24 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Benutzerkonfiguration innerhalb jedes Aufrufs weitere Verbindungen öffnen. Eine
   Erhöhung braucht deshalb einen echten Kaltstart-Netztest, nicht nur Unit-Tests
   mit gemocktem Git (bestätigter Praxisbefund 2026-08-05).
-- Die Info-Ansicht entfernt weder Remotes noch Branches. Git würde dabei auch
-  ihre Reflogs löschen; darin können die letzten lokalen Verweise auf Commits
-  liegen, und diese Historie lässt sich nicht durch einen ehrlichen Undo-Befehl
-  rekonstruieren. Die Ansicht bleibt deshalb rein lesend. Auch Stashes zeigt gmf
-  nur als Diff an. Anwenden kann das Ziel nicht atomar gegen einen parallelen
+- Die Info-Ansicht entfernt seit 0.22.14 wieder Remotes (`X`), aber weiterhin
+  keine Branches. Geschichte: Bis 0.18.7 zeigte der Dialog einen
+  „Rückgängig"-Block aus `git remote add`-Zeilen. Der war eine falsche Zusage,
+  weil `git remote remove` auch `refs/remotes/<name>/*` samt Reflogs löscht und
+  kein Befehl die zurückbringt; 0.18.8 nahm die Aktion deshalb ganz heraus.
+  Daniel wollte sie am 2026-09-11 zurück — mit ehrlicher Warnung statt
+  Undo-Versprechen. `remote_removal_facts()` zählt vorher die Tracking-Refs
+  (ohne HEAD-Symref), die lokalen Branches mit Upstream auf das Remote und die
+  Commits, die danach von keinem Ref mehr erreichbar wären
+  (`rev-list --count --glob=refs/remotes/<r>/* --not --exclude=refs/remotes/<r>/* --all`;
+  `--exclude` gilt nur für das direkt folgende `--all`). `_remove_remote()`
+  zeigt das in `confirm_in_pager()` (J ⏎ wie beim G-Pfad), erhebt dieselben
+  Werte direkt vor dem Git-Aufruf erneut und bricht bei jeder Abweichung mit
+  `remove_changed` ab; Abbrüche landen als `⊘`-Zeile im Protokoll. Beim
+  Sync-Remote warnt der Dialog zusätzlich, dass `P` danach nicht mehr geht,
+  sperrt aber nicht. Branches löscht die Ansicht nicht: Dort gilt das
+  Reflog-Argument unverändert, und ein Branch ist ohnehin lokal. Auch Stashes
+  zeigt gmf nur als Diff an. Anwenden kann das Ziel nicht atomar gegen einen parallelen
   Checkout sowie Index- oder Arbeitsbaumänderungen binden; Löschen kann keinen
   einzelnen Reflog-Eintrag atomar festhalten. Beides bleibt dem Terminal
   vorbehalten.
