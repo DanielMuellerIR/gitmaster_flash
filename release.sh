@@ -92,7 +92,10 @@ print "=== 2/4 Selbsttest und README-Bilder ==="
 ./build.sh --check
 
 print "=== 3/4 Archiv packen ==="
-stage="$(mktemp -d "${TMPDIR:-/tmp}/gitmaster_flash-release.XXXXXX")"
+# Der Arbeitsordner liegt im Ziel-Dateisystem. Dadurch kann das spaetere
+# exklusive Hardlink-Ablegen nicht an einer Dateisystemgrenze scheitern.
+mkdir -p -- "$dist"
+stage="$(mktemp -d "$dist/.gitmaster_flash-release.XXXXXX")"
 pending="$stage/gitmaster_flash-$version.tar.gz"
 # --prefix: Beim Entpacken entsteht ein Ordner gitmaster_flash-<version>/,
 # nicht ein Haufen Dateien im aktuellen Verzeichnis.
@@ -119,16 +122,11 @@ done
 ( cd -- "$stage" && shasum -a 256 "gitmaster_flash-$version.tar.gz" > "$pending.sha256" )
 
 print "=== 4/4 Ablegen ==="
-mkdir -p -- "$dist"
-for ziel in "$archive_final" "$sha_final"; do
-  if [[ -e "$ziel" ]]; then
-    print -u2 -- "FEHLER: $ziel ist inzwischen entstanden — Artefakt bleibt unter $stage."
-    stage=""
-    exit 1
-  fi
-done
-mv -- "$pending" "$archive_final"
-mv -- "$pending.sha256" "$sha_final"
+# Das Hilfsprogramm reserviert die Version mit einem atomaren mkdir und legt
+# beide Dateien per Hardlink an. Ein vorhandenes Ziel wird dabei nie ersetzt,
+# selbst wenn es erst nach der Vorpruefung oben entsteht.
+python3 tools/install-release-pair.py \
+  "$pending" "$pending.sha256" "$archive_final" "$sha_final"
 
 print "    Größe:  $(du -h "$archive_final" | cut -f1)"
 print "    Prüfen: cd dist && shasum -c $(basename "$sha_final")"

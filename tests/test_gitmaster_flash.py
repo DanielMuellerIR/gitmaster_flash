@@ -6888,6 +6888,26 @@ class RemoteAndCommandLogTests(unittest.TestCase):
                                     "refs/remotes/github/"),
                          "refs/remotes/github/late")
 
+    def test_x_aborts_when_a_fetch_moves_an_existing_tracking_ref(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+
+        def fetch_moves_ref_then_agree():
+            # Gleicher Refname und gleiche Orphan-Zahl, aber ein anderer Commit:
+            # Genau dieser Wechsel muss die alte Bestaetigung ungueltig machen.
+            git(self.repo, "commit", "-q", "--allow-empty", "-m", "spaeter")
+            git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+            return True
+
+        ui, _ = self._remove_remote_ui([9, ord("x"), ord("q")],
+                                       answer=fetch_moves_ref_then_agree)
+
+        self.assertEqual(ui.message, gmf_module.t("remove_changed"))
+        self.assertIn("github", [remote.name for remote in collect_status(
+            self.repo, self.root, DEFAULT_CONFIG).remotes])
+        self.assertEqual(git_output(self.repo, "rev-parse", "refs/remotes/github/main"),
+                         git_output(self.repo, "rev-parse", "HEAD"))
+
     def test_info_view_maps_remote_blocks_to_lines(self):
         git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)

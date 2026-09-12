@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.14"
+__version__ = "0.22.15"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -3841,6 +3841,10 @@ class RemoteRemovalFacts:
 
     remote: RemoteConfig
     tracking_refs: list[str]        # refs/remotes/<name>/… ohne die HEAD-Symref
+    ref_snapshot: list[tuple[str, str, str]]
+    # Auch Objekt-ID und Symref-Ziel gehoeren zur bestaetigten Vorschau. Nur
+    # so faellt ein Fetch auf, der einen vorhandenen Namen auf einen anderen
+    # Commit verschiebt, ohne die angezeigte Anzahl zu aendern.
     tracking_branches: list[str]    # lokale Branches mit Upstream auf dieses Remote
     orphan_commits: int             # Commits, die nur über diese Refs erreichbar sind
 
@@ -3858,11 +3862,18 @@ def remote_removal_facts(repo: Path, name: str,
     if remote is None:
         return None
     prefix = f"refs/remotes/{name}/"
-    refs_r = _required_git(repo, "for-each-ref", "--format=%(refname)%00%(symref)",
+    refs_r = _required_git(
+        repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)",
                            prefix, timeout=t_)
     tracking_refs = []
+    ref_snapshot = []
     for record in refs_r.stdout.splitlines():
-        refname, _, symref = record.partition("\0")
+        fields = record.split("\0", 2)
+        if len(fields) != 3:
+            raise GitReadError("git for-each-ref returned an incomplete record")
+        refname, object_id, symref = fields
+        if refname:
+            ref_snapshot.append((refname, object_id, symref))
         # refs/remotes/<name>/HEAD ist nur ein Verweis auf einen der Branches.
         if refname and not symref:
             tracking_refs.append(refname)
@@ -3878,7 +3889,7 @@ def remote_removal_facts(repo: Path, name: str,
         orphans = int(count_r.stdout.strip() or 0)
     branches = [b.name for b in read_branches(repo, cfg, strict=True)
                 if b.upstream.startswith(name + "/")]
-    return RemoteRemovalFacts(remote, tracking_refs, branches, orphans)
+    return RemoteRemovalFacts(remote, tracking_refs, ref_snapshot, branches, orphans)
 
 
 def display_remote_url(url: str) -> str:
