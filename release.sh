@@ -75,7 +75,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   git status --short --untracked-files=no >&2
   exit 1
 fi
-commit="$(git rev-parse --short HEAD)"
+commit="$(git rev-parse --verify HEAD)"
 archive_final="$dist/gitmaster_flash-$version.tar.gz"
 sha_final="$archive_final.sha256"
 for ziel in "$archive_final" "$sha_final"; do
@@ -90,6 +90,11 @@ print "=== 2/4 Selbsttest und README-Bilder ==="
 # build.sh --check läuft als einfaches Kommando, nicht in einer Prüfliste:
 # Unter set -e bricht ein Fehler darin das Skript ab, und der EXIT-Trap räumt auf.
 ./build.sh --check
+if [[ "$(git rev-parse --verify HEAD)" != "$commit" \
+      || -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  print -u2 -- "FEHLER: Der Quellstand hat sich während der Prüfung geändert — Release erneut starten."
+  exit 1
+fi
 
 print "=== 3/4 Archiv packen ==="
 # Der Arbeitsordner liegt im Ziel-Dateisystem. Dadurch kann das spaetere
@@ -99,7 +104,7 @@ stage="$(mktemp -d "$dist/.gitmaster_flash-release.XXXXXX")"
 pending="$stage/gitmaster_flash-$version.tar.gz"
 # --prefix: Beim Entpacken entsteht ein Ordner gitmaster_flash-<version>/,
 # nicht ein Haufen Dateien im aktuellen Verzeichnis.
-git archive --format=tar.gz --prefix="gitmaster_flash-$version/" -o "$pending" HEAD
+git archive --format=tar.gz --prefix="gitmaster_flash-$version/" -o "$pending" "$commit"
 
 # Gegenprobe am Archiv selbst: entpacken und das Programm darin fragen. So
 # fällt auf, wenn HEAD eine andere Version trägt als der Arbeitsbaum (etwa

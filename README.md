@@ -217,7 +217,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.15 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.16 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -569,8 +569,9 @@ passes it; calling it by hand has no use.
 
 ## Settings in the interface (`,`)
 
-`,` opens a list of the settings, `↑`/`↓` picks one, `⏎` changes it. The line
-above the footer explains whatever you are standing on. A changed value takes
+`,` opens a list of the settings, `↑`/`↓` picks one, `⏎` changes it. The
+list scrolls in small terminals, including the read-only entries at the end.
+The line above the footer explains whatever you are standing on. A changed value takes
 effect at once and is written back to `config.json` — atomically, via a
 neighbouring temporary file, so an interrupted write cannot leave you with half
 a config and none of your settings.

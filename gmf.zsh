@@ -20,7 +20,8 @@ gmf() {
   python3 "$GMF_SCRIPT" --cd-file "$cdfile" "$@"
   local rc=$?
   target=""
-  [[ -s "$cdfile" ]] && target="$(<"$cdfile")"
+  # Kommandoersetzung entfernt abschließende Zeilenumbrüche auch aus Pfadnamen.
+  [[ -s "$cdfile" ]] && { IFS= read -r -d '' target < "$cdfile" || true; }
   rm -f -- "$cdfile"
   if [[ -n "$target" && -d "$target" ]]; then
     cd -- "$target" || return 1

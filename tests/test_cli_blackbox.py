@@ -323,6 +323,28 @@ exit "$rc"
                 self.assertIn("JSON structure", result.stderr)
 
 
+class ShellWrapperTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("zsh"), "zsh nicht vorhanden")
+    def test_cd_preserves_trailing_newlines_in_the_selected_path(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir).resolve()
+            selected = root / "repo\n\n"
+            selected.mkdir()
+            (root / "repo").mkdir()
+            fake_program = root / "selection.py"
+            fake_program.write_text(
+                "import os, pathlib, sys\n"
+                "pathlib.Path(sys.argv[2]).write_text(os.environ['GMF_TEST_TARGET'])\n")
+            wrapper = Path(SCRIPT).with_name("gmf.zsh")
+            result = subprocess.run(
+                ["zsh", "-fc", 'source "$1"; GMF_SCRIPT="$2"; gmf; print -rn -- "$PWD"',
+                 "test", str(wrapper), str(fake_program)],
+                env=dict(os.environ, GMF_TEST_TARGET=str(selected)),
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, str(selected))
+
+
 class InstallScriptTests(unittest.TestCase):
     """install.sh gegen eine echte ~/.zshrc — Idempotenz ist hier das Thema."""
 

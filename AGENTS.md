@@ -111,8 +111,8 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
 - Zwei Regeln, die mehrere Ansichten teilen, stehen je genau einmal im Code, und
   ein Test hält das fest. `scroll_window()` verschiebt den sichtbaren Ausschnitt
   von Repo-Liste, Änderungsansicht, Commit-Hilfe, Vorschlagsliste, dem
-  Befehlsprotokoll und den Spalten der Kompaktansicht — vorher sechsmal von Hand
-  gerechnet, dreimal ohne untere Schranke für die Höhe. Der Seitenschritt von
+  Befehlsprotokoll, den Spalten der Kompaktansicht und den Einstellungen — vorher
+  sechsmal von Hand gerechnet, dreimal ohne untere Schranke für die Höhe. Der Seitenschritt von
   Bild auf/ab im Protokoll nimmt die zuletzt WIRKLICH gezeichnete Höhe
   (`log_visible`): In der Kompaktansicht vergrößert `draw()` den
   Protokollbereich gegenüber `log_height()`, und eine „Seite" sprang sonst um
@@ -337,16 +337,19 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   EINE gesetzte Einstellung, nicht alle drei). Global oder systemweit gesetzt
   bleiben sie erlaubt — dort hat der Mensch sie selbst hingeschrieben, und die
   Repo-Config kann sie nicht einschleusen.
-  Verglichen wird die wirksame Einträgeliste mit der aus System und Global
-  allein; was danach noch kommt, stammt von hier. Eine Config-Datei kann nur
-  hinzufügen, nie entfernen. Das erspart Pfadarithmetik und übersieht auch
-  keinen `include.path` aus `.git/config` — eine Prüfung nur auf
-  `git config --local` täte das. Die adressgebundenen Formen
+  Die Herkunft liefert Git über `config --show-scope`: eingebundene Dateien
+  erben den Scope ihrer Quelle. Nur System und Global sind erlaubt; Local,
+  Worktree und Command werden geprüft. Das berücksichtigt auch eine über
+  `GIT_CONFIG_NOSYSTEM` deaktivierte Systemconfig, die ein ausdrückliches
+  `--system` trotzdem lesen würde. Es übersieht keinen `include.path` aus
+  `.git/config` — eine Prüfung nur auf `git config --local` täte das.
+  Unbekannte oder unvollständige Scope-Datensätze gelten als nicht belegbar.
+  Die adressgebundenen Formen
   (`http.<url>.proxy`, `http.<url>.sslVerify`) gehören mit in die Muster, sonst
   wären sie das offene Hintertürchen. Eine unlesbare Config gilt als nicht
   belegbar und damit als Ablehnungsgrund; dazu zählt ein Wahrheitswert, den Git
   nicht lesen kann.
-  Angesehen wird nur, was sein muss: Bei den Proxy-Einträgen vergleicht
+  Gespeichert wird nur, was sein muss: Bei den Proxy-Einträgen behält
   `repo_transport_override()` ausschließlich die SCHLÜSSELNAMEN, denn eine
   Proxy-Adresse kann Zugangsdaten tragen und hat in keiner Meldung und keinem
   Protokoll etwas verloren. Nur `sslVerify` wird als Wahrheitswert gelesen, und
@@ -464,7 +467,10 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   (ohne HEAD-Symref), die lokalen Branches mit Upstream auf das Remote und die
   Commits, die danach von keinem Ref mehr erreichbar wären
   (`rev-list --count --glob=refs/remotes/<r>/* --not --exclude=refs/remotes/<r>/* --all`;
-  `--exclude` gilt nur für das direkt folgende `--all`). `_remove_remote()`
+  `--exclude` gilt nur für das direkt folgende `--all`).
+  Die Zählung verwendet `NO_REPLACE_ENV`; die Remote-Zuordnung der lokalen
+  Branches stammt aus `%(upstream:remotename)`, nie aus einem gekürzten Ref,
+  den ein gleichnamiger Tag mehrdeutig machen kann. `_remove_remote()`
   zeigt das in `confirm_in_pager()` (J ⏎ wie beim G-Pfad), erhebt dieselben
   Werte direkt vor dem Git-Aufruf erneut und bricht bei jeder Abweichung mit
   `remove_changed` ab; Abbrüche landen als `⊘`-Zeile im Protokoll. Beim
@@ -732,10 +738,10 @@ liegengebliebene Arbeit aus.
 ## Offene Punkte / Ideen
 
 - `repo_transport_override()` liest die Repo-Config je REMOTE, und beim Fetch
-  zweimal. Gemessen am 2026-09-10: Der Aufruf kostet neun `git config`-Prozesse;
-  von 31 Git-Aufrufen eines Remote-Fetchs sind 20 `git config`, davon 9 reine
-  Wiederholung der vorgelagerten Prüfung in `collect_status()` beziehungsweise
-  `_fetch_remote()`. Bei drei Remotes im selben Repo läuft dieselbe
+  zweimal. Seit der Scope-Lesung kostet der Aufruf drei `git config`-Prozesse.
+  Die vorgelagerte Prüfung in `collect_status()` beziehungsweise
+  `_fetch_remote()` wird unmittelbar vor dem Fetch wiederholt.
+  Bei drei Remotes im selben Repo läuft dieselbe
   repo-weite Frage sechsmal. Die naheliegenden Konsolidierungen — den Wert aus
   der Remote-Schleife herausziehen oder das Ergebnis an
   `fetch_remote_safely()` weiterreichen — tauschen dabei eine

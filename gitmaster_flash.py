@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.15"
+__version__ = "0.22.16"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -804,8 +804,8 @@ def load_config() -> dict:
     loaded: dict = {}
     if CONFIG_PATH.exists():
         try:
-            parsed = json.loads(CONFIG_PATH.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
+            parsed = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeError, OSError) as exc:
             print(f"Warning: cannot read {CONFIG_PATH} ({exc}) — using defaults.",
                   file=sys.stderr)
         else:
@@ -1139,6 +1139,7 @@ class BranchInfo:
     date: str = ""
     subject: str = ""
     merged: bool = False          # vollständig in HEAD enthalten
+    upstream_remote: str = ""
 
 
 @dataclass(frozen=True)
@@ -1444,48 +1445,41 @@ TRANSPORT_CONFIG_SETTINGS = (
 def repo_transport_override(repo: Path, timeout: int) -> str | None:
     """Die erste Einstellung nennen, mit der DIESES Repo den Weg umlenkt.
 
-    Verglichen wird, was wirksam ist, mit dem, was global und systemweit allein
-    ergäbe. Ein Unterschied heißt: Etwas repo-seitiges hat mitgeredet —
-    `.git/config`, `.git/config.worktree` oder eine von dort eingebundene
-    Datei. Der Vergleich braucht dafür keine Pfadarithmetik und übersieht
-    deshalb auch keinen `include.path`. Eine Config-Datei kann nur hinzufügen,
-    nie entfernen; jeder repo-seitige Eintrag verlängert die Liste also.
+    Git nennt zu jedem wirksamen Eintrag dessen Scope; eingebundene Dateien
+    erben den Scope ihrer Quelle. System und Global bleiben erlaubt. Anders
+    als explizites `--system` beachtet diese Lesung auch GIT_CONFIG_NOSYSTEM.
 
-    Ist eine der Listen nicht lesbar — auch weil Git einen kaputten
+    Ist die Liste nicht lesbar — auch weil Git einen kaputten
     Wahrheitswert ablehnt —, gilt das als nicht belegbar und damit als
     Ablehnungsgrund.
     """
-    def read(pattern: str, as_bool: bool, *scope: str) -> list | None:
-        # Bei explizitem Scope deaktiviert Git Includes sonst standardmäßig.
-        args = ["config", "--includes", "-z", "--get-regexp"]
+    def read(pattern: str, as_bool: bool) -> list | None:
+        args = ["config", "--includes", "--show-scope", "-z", "--get-regexp"]
         if as_bool:
             args.append("--type=bool")
-        result = run_git(repo, *args, *scope, "--", pattern, timeout=timeout)
+        result = run_git(repo, *args, "--", pattern, timeout=timeout)
         if result.returncode == 1:      # in diesem Bereich nicht gesetzt
             return []
         if result.returncode != 0:
             return None
+        records = result.stdout.split("\0")
+        if records[-1] != "" or len(records) % 2 != 1:
+            return None
         entries = []
-        for record in result.stdout.split("\0"):
-            if not record:
-                continue
+        for scope, record in zip(records[0:-1:2], records[1:-1:2]):
+            if scope not in {"system", "global", "local", "worktree", "command"}:
+                return None
             key, _, value = record.partition("\n")
-            entries.append((key, value) if as_bool else key)
+            if not key or (as_bool and value not in {"true", "false"}):
+                return None
+            if scope not in {"system", "global"}:
+                entries.append((key, value) if as_bool else key)
         return entries
 
     for pattern, shown, as_bool in TRANSPORT_CONFIG_SETTINGS:
-        effective = read(pattern, as_bool)
-        system = read(pattern, as_bool, "--system")
-        outside = read(pattern, as_bool, "--global")
-        if effective is None or system is None or outside is None:
+        extra = read(pattern, as_bool)
+        if extra is None:
             return shown
-        # Git liest System, dann Global, dann die Repo-Seite; `--get-regexp`
-        # gibt die Einträge in genau dieser Reihenfolge zurück. Was danach noch
-        # kommt, stammt von hier.
-        outside = system + outside
-        if effective[:len(outside)] != outside:
-            return shown                # andere Reihenfolge: nicht belegbar
-        extra = effective[len(outside):]
         if not as_bool:
             if extra:
                 return shown
@@ -3726,7 +3720,8 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     # denselben Branch dann oben `main` und im Block darunter `heads/main`
     # (Review-Fund 2026-09-10).
     fields = ("%(HEAD)", "%(refname)", "%(upstream:short)", "%(upstream:track)",
-              "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)")
+              "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)",
+              "%(upstream:remotename)")
     r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_,
                 env=NO_REPLACE_ENV)
     if r.returncode != 0:
@@ -3742,18 +3737,18 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     def branch_name(ref: str) -> str:
         return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
 
-    merged = {branch_name(line.strip())
-              for line in merged_r.stdout.splitlines() if line.strip()}
+    merged = {branch_name(line)
+              for line in merged_r.stdout.split("\n") if line}
     branches = []
-    for line in r.stdout.splitlines():
+    for line in r.stdout.split("\n"):
         if not line.strip():
             continue
         parts = line.split("\0")
-        if len(parts) < 7:
+        if len(parts) < 8:
             if strict:
                 raise GitReadError("git branch returned malformed output")
             continue
-        head, ref, upstream, track, oid, date, subject = parts[:7]
+        head, ref, upstream, track, oid, date, subject, upstream_remote = parts[:8]
         name = branch_name(ref)
         # `upstream:track` ist dank LC_ALL=C stabil englisch: "[ahead 2, behind 1]",
         # "[gone]" oder leer.
@@ -3765,6 +3760,7 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
             behind=int(behind.group(1)) if behind else 0,
             upstream_gone="gone" in track,
             oid=oid, date=date, subject=subject, merged=name in merged,
+            upstream_remote=upstream_remote,
         ))
     return branches
 
@@ -3885,10 +3881,10 @@ def remote_removal_facts(repo: Path, name: str,
     if tracking_refs:
         count_r = _required_git(
             repo, "rev-list", "--count", f"--glob={prefix}*", "--not",
-            f"--exclude={prefix}*", "--all", timeout=t_)
+            f"--exclude={prefix}*", "--all", timeout=t_, env=NO_REPLACE_ENV)
         orphans = int(count_r.stdout.strip() or 0)
     branches = [b.name for b in read_branches(repo, cfg, strict=True)
-                if b.upstream.startswith(name + "/")]
+                if b.upstream_remote == name]
     return RemoteRemovalFacts(remote, tracking_refs, ref_snapshot, branches, orphans)
 
 
@@ -3943,6 +3939,8 @@ def github_web_urls(remote: RemoteConfig) -> list[str]:
             continue
         try:
             path = urllib.parse.quote(target.repo_id, safe="/-._~")
+            # Gültige URL-Escapes im kanonischen Pfad sind bereits codiert.
+            path = re.sub(r"%25([0-9A-Fa-f]{2})", r"%\1", path)
         except (UnicodeError, ValueError):
             # Dieselbe Rueckfallebene wie in display_remote_url(): Git erlaubt
             # in einer Remote-Adresse Bytes ohne UTF-8-Bedeutung, die Leser
@@ -4440,11 +4438,15 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     dieses Remotes (wir fetchen hier NICHT übers Netz nach — wie in einem Editor).
     """
     t_ = cfg["git_timeout"]
-    r = run_git(repo, "rev-parse", "--abbrev-ref", "@{upstream}", timeout=t_)
+    r = run_git(repo, "branch", "--format=%(HEAD)%00%(upstream)%00%(upstream:remotename)",
+                timeout=t_)
     if r.returncode != 0:
         return None, 0, 0
-    up = r.stdout.strip()                 # z.B. "github/main"
-    up_remote = up.split("/", 1)[0]
+    current = next((line.split("\0") for line in r.stdout.split("\n")
+                    if line.startswith("*\0")), [])
+    if len(current) != 3:
+        return None, 0, 0
+    _, up, up_remote = current
     if not up or up_remote == sync_remote:
         return None, 0, 0                 # kein Upstream oder == Sync-Remote (schon gezeigt)
     r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{up}",
@@ -4452,7 +4454,12 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     if r.returncode != 0:
         return None, 0, 0                 # Tracking-Ref (noch) nicht lokal vorhanden
     ahead, behind = r.stdout.split()
-    return up, int(ahead), int(behind)
+    display_up = up
+    for prefix in ("refs/remotes/", "refs/heads/"):
+        if up.startswith(prefix):
+            display_up = up[len(prefix):]
+            break
+    return display_up, int(ahead), int(behind)
 
 
 def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> RepoStatus:
@@ -5322,6 +5329,11 @@ COMPACT_MIN_WIDTH = 14          # darunter wird ein Name unlesbar
 COMPACT_MARK_WIDTH = 3          # Platz für "↑12"; Divergenz ist ⇅ (ein Zeichen)
 
 
+def compact_mark_width(cells: list[tuple[str, str, int]]) -> int:
+    return max(COMPACT_MARK_WIDTH, max((cell_width(mark) for mark, _, _ in cells),
+                                       default=0))
+
+
 def compact_layout(count: int, width: int, height: int,
                    cell_width_hint: int) -> tuple[int, int, int]:
     """Spaltenaufteilung für `count` Einträge: (Zeilen, Spalten, Spaltenbreite).
@@ -6026,7 +6038,8 @@ class TUI:
     def compact_geometry(self, body_h: int, w: int) -> tuple[int, int, int, bool]:
         """Zeilen, Spalten, Spaltenbreite und Hinweisbedarf der kompakten Ansicht."""
         cells = compact_cells(self.statuses)
-        longest = max((COMPACT_MARK_WIDTH + 1 + cell_width(name)
+        mark_width = compact_mark_width(cells)
+        longest = max((mark_width + 1 + cell_width(name)
                        for _, name, _ in cells), default=12)
         return compact_plan(len(cells), w, body_h, longest + 1)
 
@@ -6034,6 +6047,7 @@ class TUI:
         """Kompakte Ansicht: Marke + Name, spaltenweise wie `ls`."""
         cells = compact_cells(self.statuses)
         rows, columns, column_width, hint = self.compact_geometry(body_h, w)
+        mark_width = min(compact_mark_width(cells), max(1, column_width - 2))
         # Zeilen zuerst leeren: sonst bleiben rechts Reste des vorigen Bildes
         # stehen (die Ladeanzeige ist breiter als eine kurze Repo-Spalte).
         for row in range(rows + (1 if hint else 0)):
@@ -6055,8 +6069,8 @@ class TUI:
             # Feste Markenspalte, damit die Namen aller Zeilen auch bei Marken mit
             # Zähler fluchten. Die Breitenberechnung muss dabei dieselbe sein wie
             # die von curses; sonst verschieben ↑2/↓3 die Namen um eine Zelle.
-            name_width = max(1, column_width - COMPACT_MARK_WIDTH - 1)
-            text = (pad_cells(mark, COMPACT_MARK_WIDTH) + " "
+            name_width = max(1, column_width - mark_width - 1)
+            text = (pad_cells(ellipsize(mark, mark_width), mark_width) + " "
                     + pad_cells(ellipsize(name, name_width), name_width))
             attr = color_attr(pair, index == self.selected and self.focus == "repos")
             safe_addstr(self.scr, top + row, x, text, attr)
@@ -6287,7 +6301,7 @@ class TUI:
         return rows
 
     def _draw_settings_page(self, rows: list[tuple], selected: int,
-                            message: str) -> None:
+                            message: str, offset: int = 0) -> int:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         where = str(self.config_path) if self.config_path else t("set_not_saved")
@@ -6308,10 +6322,11 @@ class TUI:
         value_x = 4 + label_w
         value_w = min(max((cell_width(terminal_text(x)) for x in values), default=10),
                       max(10, w - value_x - 2))
+        visible = max(1, h - 5)
+        offset = scroll_window(selected, offset, visible)
         y = 2
-        for index, row in enumerate(rows):
-            if y >= h - 3:
-                break
+        for index in range(offset, min(len(rows), offset + visible)):
+            row = rows[index]
             if row[0] == "blank":
                 y += 1
                 continue
@@ -6319,7 +6334,7 @@ class TUI:
                 safe_addstr(self.scr, y, 2, row[1], curses.color_pair(C_DIM))
                 y += 1
                 continue
-            is_selected = row[0] == "edit" and index == selected
+            is_selected = index == selected
             mark = "›" if is_selected else " "
             if row[0] == "edit":
                 _, _, label, value, hint = row
@@ -6330,44 +6345,48 @@ class TUI:
                             color_attr(C_GREEN, is_selected))
             else:
                 _, key, value = row
-                safe_addstr(self.scr, y, 3, pad_cells(key, label_w),
-                            curses.color_pair(C_DIM))
+                safe_addstr(self.scr, y, 1, f"{mark} {pad_cells(key, label_w)}",
+                            color_attr(C_DIM, is_selected))
                 safe_addstr(self.scr, y, value_x,
                             ellipsize(terminal_text(value), value_w),
-                            curses.color_pair(C_DIM))
+                            color_attr(C_DIM, is_selected))
             y += 1
         # Nur die gewählte Zeile wird erklärt, dafür über die ganze Breite. Sieben
         # Hinweise nebeneinander passten in kein Fenster und standen abgeschnitten
         # da — ein halber Satz erklärt nichts.
         chosen = rows[selected] if 0 <= selected < len(rows) else None
-        hint = chosen[4] if chosen and chosen[0] == "edit" else ""
+        hint = chosen[4] if chosen and chosen[0] == "edit" else t("set_locked_head")
         safe_addstr(self.scr, h - 3, 3, hint, curses.color_pair(C_DIM))
         safe_addstr(self.scr, h - 2, 1, message, curses.color_pair(C_YELLOW))
         safe_addstr(self.scr, h - 1, 0, t("set_footer").ljust(w - 1),
                     curses.color_pair(C_DIM) | curses.A_REVERSE)
         self.scr.refresh()
+        return offset
 
     def action_settings(self) -> None:
         """Einstellungen ansehen und die unkritischen davon ändern (Taste `,`)."""
         rows = self.settings_rows()
-        editable = [i for i, row in enumerate(rows) if row[0] == "edit"]
-        selected = editable[0]
+        selectable = [i for i, row in enumerate(rows) if row[0] in {"edit", "info"}]
+        selected = selectable[0]
+        offset = 0
         message = "" if self.config_path else t("set_not_saved_hint")
         while True:
-            self._draw_settings_page(rows, selected, message)
+            offset = self._draw_settings_page(rows, selected, message, offset)
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
                 return
-            position = editable.index(selected)
+            position = selectable.index(selected)
             if ch == curses.KEY_UP:
-                selected = editable[max(0, position - 1)]
+                selected = selectable[max(0, position - 1)]
                 message = ""
                 continue
             if ch == curses.KEY_DOWN:
-                selected = editable[min(len(editable) - 1, position + 1)]
+                selected = selectable[min(len(selectable) - 1, position + 1)]
                 message = ""
                 continue
             if ch not in (10, 13, curses.KEY_ENTER):
+                continue
+            if rows[selected][0] != "edit":
                 continue
             message = self._edit_setting(rows[selected][1])
             rows = self.settings_rows()

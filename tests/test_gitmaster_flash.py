@@ -340,6 +340,19 @@ class GithubWebUrlTests(unittest.TestCase):
         self.assertEqual(gmf_module.github_web_urls(remote),
                          ["https://github.com/example/demo"])
 
+    def test_percent_escapes_in_the_github_path_are_not_encoded_twice(self):
+        for name, expected in (("my%2Erepo", "my%2Erepo"),
+                               ("my%252Erepo", "my%252Erepo"),
+                               ("my%repo", "my%25repo")):
+            with self.subTest(name=name):
+                target = gmf_module.canonical_remote_target(
+                    f"https://github.com/example/{name}.git")
+                remote = gmf_module.RemoteConfig(
+                    name="github", fetch_urls=[], push_urls=[],
+                    fetch_targets=[target], push_targets=[])
+                self.assertEqual(gmf_module.github_web_urls(remote),
+                                 [f"https://github.com/example/{expected}"])
+
 
 class SelectedLineColourTests(unittest.TestCase):
     """Die markierte Zeile darf ihre wichtigste Angabe nicht unlesbar machen."""
@@ -526,6 +539,16 @@ class LoadConfigShapeTests(unittest.TestCase):
         self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
         self.assertIn("cannot read", err)
 
+    def test_non_utf8_config_falls_back_without_rewriting_the_file(self):
+        content = b'{"lang": "\xff"}'
+        self.path.write_bytes(content)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = gmf_module.load_config()
+        self.assertEqual(cfg["skip_dirs"], DEFAULT_CONFIG["skip_dirs"])
+        self.assertIn("cannot read", err.getvalue())
+        self.assertEqual(self.path.read_bytes(), content)
+
     def test_a_missing_file_is_created_with_the_defaults(self):
         self.assertFalse(self.path.exists())
         err = io.StringIO()
@@ -641,8 +664,8 @@ class ScrollWindowTests(unittest.TestCase):
         self.assertNotIn("self.offset = sel_row - body_h + 1", source)
         self.assertNotIn("self.compact_col = sel_col - columns + 1", source)
         self.assertNotIn("self.log_top = self.log_selected - visible + 1", source)
-        # Definition + vier Listen + Protokoll + Spalten der Kompaktansicht.
-        self.assertEqual(source.count("scroll_window("), 7)
+        # Definition + vier Listen + Protokoll + Kompaktspalten + Einstellungen.
+        self.assertEqual(source.count("scroll_window("), 8)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -1285,6 +1308,24 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
         git(self.repo, "branch", "--set-upstream-to=backup/main", "main")
         up, ahead, behind = upstream_delta(self.repo, "backup", SYNC_CONFIG)
         self.assertIsNone(up)
+
+    def test_ambiguous_upstream_tag_does_not_change_the_remote_or_counts(self):
+        git(self.repo, "commit", "--allow-empty", "-qm", "ahead")
+        git(self.repo, "tag", "github/main")
+        self.assertEqual(upstream_delta(self.repo, "github", DEFAULT_CONFIG),
+                         (None, 0, 0))
+        self.assertEqual(upstream_delta(self.repo, "backup", SYNC_CONFIG),
+                         ("github/main", 1, 0))
+
+    def test_unicode_line_separator_in_a_remote_name_remains_part_of_the_ref(self):
+        name = "mirror\u2028remote"
+        git(self.repo, "remote", "rename", "github", name)
+        git(self.repo, "commit", "--allow-empty", "-qm", "ahead")
+        self.assertEqual(upstream_delta(self.repo, "backup", SYNC_CONFIG),
+                         (name + "/main", 1, 0))
+        branches = read_branches(self.repo, DEFAULT_CONFIG, strict=True)
+        self.assertEqual([(b.name, b.upstream_remote) for b in branches],
+                         [("main", name)])
 
     def test_push_preflight_and_explicit_safe_refspec(self):
         (self.repo / "a.md").write_text("2\n")
@@ -6784,6 +6825,30 @@ class RemoteAndCommandLogTests(unittest.TestCase):
         self.assertIsNone(gmf_module.remote_removal_facts(
             self.repo, "nirgends", DEFAULT_CONFIG))
 
+    def test_remote_removal_counts_the_real_graph_despite_replace_refs(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        base = git_output(self.repo, "rev-parse", "HEAD")
+        for message in ("eins", "zwei"):
+            git(self.repo, "commit", "-q", "--allow-empty", "-m", message)
+        tip = git_output(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/github/topic", tip)
+        git(self.repo, "reset", "-q", "--hard", base)
+        git(self.repo, "replace", tip, base)
+
+        facts = gmf_module.remote_removal_facts(self.repo, "github", DEFAULT_CONFIG)
+
+        self.assertEqual(facts.orphan_commits, 2)
+
+    def test_remote_removal_tracks_upstreams_even_with_an_ambiguous_tag(self):
+        git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
+        git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
+        git(self.repo, "branch", "--track", "tracker", "refs/remotes/github/main")
+        git(self.repo, "tag", "github/main")
+
+        facts = gmf_module.remote_removal_facts(self.repo, "github", DEFAULT_CONFIG)
+
+        self.assertEqual(facts.tracking_branches, ["tracker"])
+
     def test_x_removes_the_selected_remote_after_a_typed_confirmation(self):
         git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
         git(self.repo, "update-ref", "refs/remotes/github/main", "HEAD")
@@ -7161,6 +7226,19 @@ class RepoTransportOverrideTests(unittest.TestCase):
                             self.repo, 10), "http.proxy")
                         git(self.repo, "config", "--unset-all", "http.proxy")
 
+    def test_disabled_system_config_does_not_block_a_safe_repo(self):
+        system = self.root / "system.cfg"
+        system.write_text("[http]\n proxy = http://proxy.example:8080\n sslVerify = false\n")
+        for disabled in ("1", "true", "yes", "on", "2"):
+            with self.subTest(disabled=disabled), mock.patch.dict(os.environ, {
+                    "GIT_CONFIG_SYSTEM": str(system),
+                    "GIT_CONFIG_NOSYSTEM": disabled}):
+                self.assertIsNone(gmf_module.repo_transport_override(self.repo, 10))
+                git(self.repo, "config", "http.proxy", "http://repo.example:9")
+                self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                                 "http.proxy")
+                git(self.repo, "config", "--unset-all", "http.proxy")
+
     def test_a_value_reached_through_an_include_is_caught_too(self):
         """`include.path` aus `.git/config` ist genauso repo-seitig.
 
@@ -7222,6 +7300,14 @@ class RepoTransportOverrideTests(unittest.TestCase):
         with mock.patch.object(gmf_module, "run_git", return_value=broken):
             self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
                              "core.gitProxy")
+
+    def test_unknown_or_incomplete_config_scope_is_not_trusted(self):
+        for output in ("future\0core.gitproxy\nvalue\0", "local\0", "global\0\0"):
+            with self.subTest(output=output):
+                result = subprocess.CompletedProcess(["git", "config"], 0, output, "")
+                with mock.patch.object(gmf_module, "run_git", return_value=result):
+                    self.assertEqual(gmf_module.repo_transport_override(self.repo, 10),
+                                     "core.gitProxy")
 
     def test_a_proxy_value_never_leaves_the_check(self):
         """Eine Proxy-Adresse kann Zugangsdaten tragen.
@@ -7613,6 +7699,19 @@ class CompactViewTests(unittest.TestCase):
         # im ausgegebenen Text exakt dieselbe Namensspalte ergeben.
         self.assertEqual({len(prefix) for prefix in prefixes},
                          {gmf_module.COMPACT_MARK_WIDTH + 1})
+
+    def test_large_ahead_behind_counts_remain_complete_and_aligned(self):
+        ui = self._ui(3)
+        ui.statuses[0].ahead = 99
+        ui.statuses[1].ahead = 100
+        ui.statuses[2].behind = 12345
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui.draw_compact(2, 10, 100)
+        cells = [text for _, _, text in ui.scr.lines if "repo-" in text]
+        self.assertEqual(len(cells), 3)
+        for cell, mark in zip(cells, ("↑99", "↑100", "↓12345")):
+            self.assertTrue(cell.startswith(mark + " "), cell)
+        self.assertEqual(len({cell.index("repo-") for cell in cells}), 1)
 
     def _ui(self, count, keys=(), width=100, height=30):
         class Screen:
@@ -8596,6 +8695,26 @@ class TuiSettingsTests(unittest.TestCase):
         self._run(ui)
         self.assertFalse(self.path.exists())
 
+    def test_small_settings_view_keeps_the_selected_row_visible(self):
+        ui = self._ui([curses.KEY_DOWN] * 6 + [ord("q")])
+        ui.scr.getmaxyx = lambda: (10, 100)
+        ui.scr.erase = ui.scr.drawn.clear
+        self._run(ui)
+        selected = [(y, text) for y, text in ui.scr.drawn if "›" in text]
+        self.assertEqual(len(selected), 1, ui.scr.drawn)
+        self.assertIn(gmf_module.t("set_skip_dirs"), selected[0][1])
+        self.assertTrue(2 <= selected[0][0] < 7)
+
+    def test_small_settings_view_reaches_read_only_rows_without_editing(self):
+        ui = self._ui([curses.KEY_DOWN] * 20 + [10, ord("q")])
+        ui.scr.getmaxyx = lambda: (10, 100)
+        ui.scr.erase = ui.scr.drawn.clear
+        with mock.patch.object(ui, "_edit_setting") as edit:
+            self._run(ui)
+        edit.assert_not_called()
+        self.assertTrue(any("apps" in text for _, text in ui.scr.drawn))
+        self.assertFalse(self.path.exists())
+
     def test_changing_a_number_saves_it_and_takes_effect_at_once(self):
         # runter zu compact_from, Enter, "7", Enter, dann q
         ui = self._ui([curses.KEY_DOWN, 10, *self.CLEAR, "7", "\n", ord("q")])
@@ -8652,9 +8771,9 @@ class TuiSettingsTests(unittest.TestCase):
         self.assertFalse(any(gmf_module.TR["set_saved"]["en"] == text.strip()
                              for _, text in ui.scr.drawn))
 
-    def test_the_selection_never_leaves_the_editable_rows(self):
+    def test_the_selection_returns_from_read_only_rows_to_the_first_setting(self):
         # Zwanzig Mal runter, dann zwanzig Mal hoch: die Auswahl muss innerhalb
-        # der editierbaren Zeilen bleiben, sonst zeigte ⏎ auf eine Infozeile.
+        # der Liste bleiben und wieder auf der ersten Einstellung landen.
         keys = ([curses.KEY_DOWN] * 20 + [curses.KEY_UP] * 20
                 + [10, *self.CLEAR, "3", "\n", ord("q")])
         ui = self._ui(keys)

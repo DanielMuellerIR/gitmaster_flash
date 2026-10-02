@@ -234,7 +234,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.15 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.16 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -599,6 +599,7 @@ Repo-Pfad liest. Der Wrapper übergibt sie; von Hand aufgerufen bringt sie nicht
 ## Einstellungen in der Oberfläche (`,`)
 
 `,` öffnet eine Liste der Einstellungen, `↑`/`↓` wählt eine aus, `⏎` ändert sie.
+In kleinen Terminals scrollt die Liste bis zu den schreibgeschützten Einträgen am Ende.
 Die Zeile über dem Footer erklärt jeweils die Zeile, auf der man steht. Ein
 geänderter Wert gilt sofort und wird in die `config.json` zurückgeschrieben —
 atomar über eine Nachbardatei, damit ein abgebrochener Schreibvorgang nicht eine
