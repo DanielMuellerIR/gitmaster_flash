@@ -437,7 +437,7 @@ with it:
 gitmaster_flash/install.sh
 ```
 
-The repository has the same three entry points as every other project here:
+The repository provides three entry points:
 `build.sh` runs the self-test and regenerates the README pictures in `docs/`
 (`--check` only verifies them), `install.sh` registers the wrapper, and
 `release.sh` writes a versioned source archive to `dist/` — see

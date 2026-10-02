@@ -463,7 +463,7 @@ ab, damit der `source`-Befehl nicht mit ihr verschmilzt:
 gitmaster_flash/install.sh
 ```
 
-Das Repo hat dieselben drei Einstiegsskripte wie jedes andere Projekt hier:
+Das Repo bietet drei Einstiegsskripte:
 `build.sh` führt den Selbsttest aus und erzeugt die README-Bilder in `docs/`
 neu (`--check` prüft sie nur), `install.sh` registriert den Wrapper, und
 `release.sh` legt ein versioniertes Quellarchiv unter `dist/` ab — siehe

@@ -207,15 +207,16 @@
         "campaign_id": "time-review-20261002T160241+0200",
         "completed_at": "2026-10-02T16:37:08+02:00",
         "observed_head": "d55b8da182efc7ed3fc8197608a8b76de17a7c92",
-        "content_sha256": "5809854e0da95f82e01f5a89973b6b079327a25ed8c8c7c1a632106286bd96e9",
+        "content_sha256": "6e29c012efa4bb2b4c0f7fee96f89290feccd73203eff34b0a227278b622c370",
         "file_count": 3,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "CLI-, Settings-, Versions- und Sicherheitsverträge beider READMEs gegen Code und Vertragstests geprüft; Versionsbeispiele und Settings-Scrollen synchronisiert. Reviewbericht mit allen zehn Befunden, Nachweisen, Umfang und Grenzen ergänzt.",
+        "summary": "CLI-, Settings-, Versions- und Sicherheitsverträge beider READMEs gegen Code und Vertragstests geprüft; Versionsbeispiele und Settings-Scrollen synchronisiert. Reviewbericht mit allen zehn Befunden, Nachweisen, Umfang und Grenzen ergänzt. Publikationsprüfung: persönliche Formulierungen neutralisiert; technische Aussagen unverändert.",
         "tests": [
           "PYTHONDONTWRITEBYTECODE=1 ./build.sh: 658 Tests erfolgreich; sechs SVG-Dateien erzeugt",
           "PYTHONDONTWRITEBYTECODE=1 python3 docs/make-screens.py --check: erfolgreich",
-          "git diff --check: erfolgreich"
+          "git diff --check: erfolgreich",
+          "Publikationsprüfung: DocumentationContractTests, 7 Tests erfolgreich; git diff --check erfolgreich"
         ]
       }
     },
@@ -232,15 +233,16 @@
         "campaign_id": "time-review-20261002T160241+0200",
         "completed_at": "2026-10-02T16:37:08+02:00",
         "observed_head": "d55b8da182efc7ed3fc8197608a8b76de17a7c92",
-        "content_sha256": "6a3a04ea6ed93c0d2036fa7a24b67a37829cac855a34621d1161e005a278ac9a",
+        "content_sha256": "e2e85058d5723b0986958891b08bd18327a29141ec20e1e364f08ac7c9f10378",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Betroffene Projektregeln an Scope-Lesung, Settings-Scrollen und sichere Remote-Löschvorschau angepasst. Bestehende Grenzen beibehalten.",
+        "summary": "Betroffene Projektregeln an Scope-Lesung, Settings-Scrollen und sichere Remote-Löschvorschau angepasst. Bestehende Grenzen beibehalten. Publikationsprüfung: persönliche Formulierungen neutralisiert; technische Aussagen unverändert.",
         "tests": [
           "PYTHONDONTWRITEBYTECODE=1 ./build.sh: 658 Tests erfolgreich; sechs SVG-Dateien erzeugt",
           "PYTHONDONTWRITEBYTECODE=1 python3 docs/make-screens.py --check: erfolgreich",
-          "git diff --check: erfolgreich"
+          "git diff --check: erfolgreich",
+          "Publikationsprüfung: DocumentationContractTests, 7 Tests erfolgreich; git diff --check erfolgreich"
         ]
       }
     },

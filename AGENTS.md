@@ -462,8 +462,9 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   „Rückgängig"-Block aus `git remote add`-Zeilen. Der war eine falsche Zusage,
   weil `git remote remove` auch `refs/remotes/<name>/*` samt Reflogs löscht und
   kein Befehl die zurückbringt; 0.18.8 nahm die Aktion deshalb ganz heraus.
-  Daniel wollte sie am 2026-09-11 zurück — mit ehrlicher Warnung statt
-  Undo-Versprechen. `remote_removal_facts()` zählt vorher die Tracking-Refs
+  Seit 0.22.14 ist die Aktion mit ausdrücklicher Warnung vor den nicht
+  rückgängig machbaren Folgen wieder verfügbar. `remote_removal_facts()` zählt
+  vorher die Tracking-Refs
   (ohne HEAD-Symref), die lokalen Branches mit Upstream auf das Remote und die
   Commits, die danach von keinem Ref mehr erreichbar wären
   (`rev-list --count --glob=refs/remotes/<r>/* --not --exclude=refs/remotes/<r>/* --all`;
