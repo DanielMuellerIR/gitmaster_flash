@@ -18,9 +18,9 @@ def install_pair(archive_source: Path, checksum_source: Path,
     gleichzeitig halb sichtbar machen.
     """
     # Ein Signal zwischen den beiden Hardlinks darf kein halbes Paar
-    # hinterlassen. Die kurze Transaktion endet vor der Verarbeitung von SIGINT/SIGTERM;
+    # hinterlassen. Die kurze Transaktion endet vor der Verarbeitung von SIGINT/SIGTERM/SIGHUP;
     # danach gilt wieder exakt die Signalmaske des Aufrufers.
-    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
     try:
         lock = archive_target.with_name(f".{archive_target.name}.release-lock")
         os.mkdir(lock)

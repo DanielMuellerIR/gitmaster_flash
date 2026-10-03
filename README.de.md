@@ -234,7 +234,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.16 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.22.17 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -304,7 +304,9 @@ Unterhalb dieser Klartext-Einordnung bewahrt die Info-Ansicht zusätzlich Gits
 eigene Fehlermeldung als Beleg auf.
 
 **`X` entfernt das ausgewählte Remote** — die einzige schreibende Aktion dieser
-Ansicht, und sie lässt sich nicht rückgängig machen. `git remote remove` löscht
+Ansicht, und sie lässt sich nicht rückgängig machen. Die Vorschau unterstützt
+nur getrennte Standard-Fetch-Abbildungen; eigene oder geteilte Abbildungen
+sperren das Entfernen vor der Bestätigung. `git remote remove` löscht
 neben dem Abschnitt in `.git/config` auch alle Remote-Tracking-Branches
 `refs/remotes/<name>/*` samt ihren Reflogs, und lokale Branches mit Upstream auf
 dieses Remote verlieren die Verknüpfung. Deshalb zeigt gmf vor der Rückfrage eine

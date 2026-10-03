@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.16"
+__version__ = "0.22.17"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -129,6 +129,10 @@ NULLABLE_CONFIG_TYPES = {"lang": str}
 UI_LANG = "en"  # von main() gesetzt; Tests nutzen die englische Basis.
 
 TR = {
+    "remove_refspec_unsupported": {
+        "en": "Remote removal requires separate standard fetch refspecs; custom or shared mappings cannot be previewed safely.",
+        "de": "Remote-Entfernung braucht getrennte Standard-Fetch-Abbildungen; eigene oder geteilte Abbildungen lassen sich nicht sicher vorab anzeigen.",
+    },
     # Fortschritt / Kopf
     "reading": {"en": "Reading repos", "de": "Lese Repos"},
     "fetching": {"en": "Fetching from remote", "de": "Hole Stand vom Remote (fetch)"},
@@ -968,7 +972,9 @@ def save_config(cfg: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        serialized = json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+        tmp.write_text(serialized.encode("utf-8", "backslashreplace").decode("utf-8"),
+                       encoding="utf-8")
         os.replace(tmp, path)
     finally:
         # Nach `os.replace` gibt es tmp nicht mehr; das hier räumt den Fehlerweg.
@@ -3505,7 +3511,7 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
     t_ = cfg["git_timeout"]
     names_r = _required_git(repo, "remote", timeout=t_)
     result = {}
-    for name in [line for line in names_r.stdout.splitlines() if line]:
+    for name in [line for line in names_r.stdout.split("\n") if line]:
         raw_r = _required_git(
             repo, "config", "--null", "--get-regexp",
             r"^remote\.%s\." % re.escape(name), timeout=t_)
@@ -3854,16 +3860,28 @@ def remote_removal_facts(repo: Path, name: str,
     Zahlen wäre schlimmer als gar keiner.
     """
     t_ = cfg["git_timeout"]
-    remote = read_remote_configs(repo, cfg).get(name)
+    remotes = read_remote_configs(repo, cfg)
+    remote = remotes.get(name)
     if remote is None:
         return None
+    # Git entfernt anhand der Fetch-Abbildungen und behält von anderen Remotes
+    # geteilte Refs. Die bisherige Vorschau ist nur für getrennte Standardräume
+    # belastbar; bei anderen Abbildungen darf sie keine Löschung freigeben.
+    for configured in remotes.values():
+        fetch_specs = [value for key, value in configured.settings
+                       if key.lower() == "fetch"]
+        expected = f"+refs/heads/*:refs/remotes/{configured.name}/*"
+        if fetch_specs != [expected]:
+            raise GitReadError(t("remove_refspec_unsupported"))
     prefix = f"refs/remotes/{name}/"
     refs_r = _required_git(
         repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)",
                            prefix, timeout=t_)
     tracking_refs = []
     ref_snapshot = []
-    for record in refs_r.stdout.splitlines():
+    for record in refs_r.stdout.split("\n"):
+        if not record:
+            continue
         fields = record.split("\0", 2)
         if len(fields) != 3:
             raise GitReadError("git for-each-ref returned an incomplete record")
@@ -6356,7 +6374,8 @@ class TUI:
         # da — ein halber Satz erklärt nichts.
         chosen = rows[selected] if 0 <= selected < len(rows) else None
         hint = chosen[4] if chosen and chosen[0] == "edit" else t("set_locked_head")
-        safe_addstr(self.scr, h - 3, 3, hint, curses.color_pair(C_DIM))
+        if h >= 6:
+            safe_addstr(self.scr, h - 3, 3, hint, curses.color_pair(C_DIM))
         safe_addstr(self.scr, h - 2, 1, message, curses.color_pair(C_YELLOW))
         safe_addstr(self.scr, h - 1, 0, t("set_footer").ljust(w - 1),
                     curses.color_pair(C_DIM) | curses.A_REVERSE)

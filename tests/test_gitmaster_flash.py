@@ -6802,6 +6802,36 @@ class RemoteAndCommandLogTests(unittest.TestCase):
         git(self.repo, "update-ref", ref, oid)
         return oid
 
+    def test_custom_fetch_namespace_blocks_removal_and_keeps_last_ref(self):
+        git(self.repo, "config", "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/archive/*")
+        oid = self._commit_only_under("refs/remotes/archive/topic")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        ui = TUI(self._info_screen([]), self.root, DEFAULT_CONFIG, None)
+        with mock.patch.object(ui, "confirm_in_pager") as confirm:
+            self.assertFalse(ui._remove_remote(st, "origin"))
+        confirm.assert_not_called()
+        self.assertEqual(git_output(self.repo, "rev-parse", "refs/remotes/archive/topic"), oid)
+        self.assertEqual(git_output(self.repo, "remote"), "origin")
+
+    def test_shared_fetch_namespace_blocks_inaccurate_removal_preview(self):
+        git(self.repo, "remote", "add", "other", "https://example.com/other.git")
+        git(self.repo, "config", "remote.other.fetch",
+            "+refs/heads/*:refs/remotes/origin/*")
+        with self.assertRaises(gmf_module.GitReadError):
+            gmf_module.remote_removal_facts(self.repo, "origin", DEFAULT_CONFIG)
+
+    def test_unicode_line_separator_survives_full_scan_and_removal_preview(self):
+        name = "mirror\u2028remote"
+        git(self.repo, "remote", "add", name, "https://example.com/demo.git")
+        ref = f"refs/remotes/{name}/topic\u2028part"
+        git(self.repo, "update-ref", ref, "HEAD")
+        st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
+        self.assertIn(name, [remote.name for remote in st.remotes])
+        facts = gmf_module.remote_removal_facts(self.repo, name, DEFAULT_CONFIG)
+        self.assertEqual(facts.tracking_refs, [ref])
+        self.assertEqual(facts.ref_snapshot[0][0], ref)
+
     def test_remote_removal_facts_count_what_only_the_remote_still_holds(self):
         git(self.repo, "remote", "add", "github", "https://github.com/example/demo.git")
         only_there = self._commit_only_under("refs/remotes/github/feature")
@@ -8624,6 +8654,17 @@ class SaveConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text()),
                          {"lang": "de", "git_timeout": 11})
 
+    def test_unpaired_surrogate_round_trips_as_json_escape(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"lang":"en","future":"\\ud800"}')
+        with mock.patch.object(gmf_module, "CONFIG_PATH", self.path):
+            cfg = gmf_module.load_config()
+        cfg["git_timeout"] = 11
+        gmf_module.save_config(cfg, self.path)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["future"], "\ud800")
+        self.assertEqual(saved["git_timeout"], 11)
+
     def test_unknown_keys_survive_a_save(self):
         # Eine Config kann Schlüssel enthalten, die diese Fassung nicht kennt —
         # etwa von einer neueren Version auf einem anderen Mac.
@@ -8662,6 +8703,18 @@ class TuiSettingsTests(unittest.TestCase):
         def refresh(self): pass
         def getch(self): return next(self.keys)
         def get_wch(self): return next(self.keys)
+
+    def test_five_row_terminal_preserves_selected_setting(self):
+        ui = self._ui()
+        ui.scr.getmaxyx = lambda: (5, 100)
+        rows = ui.settings_rows()
+        selected = next(i for i, row in enumerate(rows)
+                        if row[0] == "edit" and row[1].key == "skip_dirs")
+        with mock.patch("gitmaster_flash.curses.color_pair", return_value=0):
+            ui._draw_settings_page(rows, selected, "", 0)
+        line = [text for y, text in ui.scr.drawn if y == 2]
+        self.assertTrue(any(gmf_module.t("set_skip_dirs") in text for text in line))
+        self.assertNotIn(rows[selected][4], line)
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="gmf-setui-"))

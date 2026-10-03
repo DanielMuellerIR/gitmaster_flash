@@ -217,7 +217,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.16 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.22.17 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -285,7 +285,8 @@ The info view also keeps Git's own error message as evidence, underneath the
 plain-language classification.
 
 **`X` removes the selected remote** — the only writing action in this view, and
-it cannot be undone. Besides the section in `.git/config`, `git remote remove`
+it cannot be undone. The preview supports separate standard fetch mappings only;
+custom or shared mappings block removal before confirmation. Besides the section in `.git/config`, `git remote remove`
 deletes every remote-tracking branch `refs/remotes/<name>/*` together with its
 reflog, and local branches tracking that remote lose their upstream. So gmf shows
 a preview before asking: the addresses, the number of tracking branches

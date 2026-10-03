@@ -44,7 +44,7 @@ dist="$repo_dir/dist"
 
 # Alles Zwischenzeitliche liegt in einem eigenen Arbeitsordner dieses Laufs.
 # Aufräumen löscht ausschließlich diesen — zusätzlich zum EXIT-Trap auch bei
-# INT und TERM, weil zsh den EXIT-Trap bei TERM nicht ausführt. Die Marke wird
+# INT, TERM und HUP, weil zsh den EXIT-Trap bei TERM nicht ausführt. Die Marke wird
 # nach dem Löschen geleert, damit ein zweiter Aufruf nichts mehr tut.
 stage=""
 aufraeumen() {
@@ -56,6 +56,7 @@ aufraeumen() {
 trap aufraeumen EXIT
 trap 'aufraeumen; exit 130' INT
 trap 'aufraeumen; exit 143' TERM
+trap 'aufraeumen; exit 129' HUP
 
 print "=== 1/4 Voraussetzungen ==="
 if ! command -v python3 >/dev/null 2>&1; then

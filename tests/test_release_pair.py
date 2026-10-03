@@ -48,6 +48,37 @@ module.install_pair(*(Path(value) for value in sys.argv[2:]))
             self.assertEqual(target_checksum.read_bytes(), b"checksum")
             self.assertFalse(target.with_name(f".{target.name}.release-lock").exists())
 
+    def test_hangup_during_install_leaves_a_complete_pair_and_no_lock(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            source = root / "new.tar.gz"
+            checksum = root / "new.sha256"
+            target = root / "release.tar.gz"
+            target_checksum = root / "release.sha256"
+            source.write_bytes(b"archive")
+            checksum.write_bytes(b"checksum")
+            code = '''import importlib.util, os, signal, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("pair", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+real_link = os.link
+def interrupted_link(source, target):
+    real_link(source, target)
+    if str(target).endswith("release.tar.gz"):
+        os.kill(os.getpid(), signal.SIGHUP)
+module.os.link = interrupted_link
+module.install_pair(*(Path(value) for value in sys.argv[2:]))
+'''
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(SCRIPT), str(source), str(checksum),
+                 str(target), str(target_checksum)], capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, -signal.SIGHUP, result.stderr)
+            self.assertEqual(target.read_bytes(), b"archive")
+            self.assertTrue(target_checksum.exists(), "Prüfsumme fehlt nach SIGHUP")
+            self.assertEqual(target_checksum.read_bytes(), b"checksum")
+            self.assertFalse(target.with_name(f".{target.name}.release-lock").exists())
+
     def test_existing_archive_is_never_replaced(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
