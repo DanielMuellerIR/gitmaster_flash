@@ -16,6 +16,7 @@ Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F)
   F/…   open the repo in a configured app (see config.json)
   A     inspect the changes file by file (read-only)
   C     commit helper: select exactly which changed files to commit
+  L     choose a pull source (or fetch all first), preview and fast-forward
   P     safely push the current branch to the private sync remote
   G     guarded GitHub push (preview, then Y ⏎ to confirm; branch only, no tags)
   H     explain the Git safety rules
@@ -70,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.22.17"
+__version__ = "0.23.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -254,12 +255,37 @@ TR = {
                   "I info · H help"),
            "de": (" ↑/↓/←/→ wählen · ⏎ cd & Exit · / Filter · M Ansicht · Tab Log · "
                   "I Info · H Hilfe")},
-    "f2": {"en": " {apps} · A changes · C commit · S stash view",
-           "de": " {apps} · A Änderungen · C Commit · S Stash-Blick"},
+    "f2": {"en": " {apps} · A changes · C commit · L pull · S stash view",
+           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stash-Blick"},
     "f3": {"en": (" R fetch in background · P sync push · G GitHub push · , settings"
                   " · Q quit"),
            "de": (" R Fetch im Hintergrund · P Sync-Push · G GitHub-Push ·"
                   " , Einstellungen · Q Beenden")},
+    "pull_choose": {"en": "Pull source · {rel} · local branch {b}",
+                    "de": "Pull-Quelle · {rel} · lokaler Branch {b}"},
+    "pull_all": {"en": "Fetch all remotes, then choose one pull source",
+                 "de": "Alle Remotes abrufen, danach eine Pull-Quelle wählen"},
+    "pull_choose_footer": {"en": " ↑/↓ select · ⏎ continue · Q/Esc cancel",
+                           "de": " ↑/↓ wählen · ⏎ weiter · Q/Esc abbrechen"},
+    "pull_title": {"en": "Pull {r}/{b} → {rel}", "de": "Pull {r}/{b} → {rel}"},
+    "pull_effect": {"en": "Fast-forward: {n} incoming commit(s). Upstream stays unchanged.",
+                    "de": "Fast-Forward: {n} eingehende Commit(s). Der Upstream bleibt erhalten."},
+    "pull_caution": {"en": "Do not edit or switch this repository in another program during the pull.",
+                     "de": "Während des Pulls dieses Repo nicht in einem anderen Programm bearbeiten oder wechseln."},
+    "pull_confirm": {"en": "Apply this fast-forward? Type Y then ⏎; anything else cancels.",
+                     "de": "Diesen Fast-Forward anwenden? J tippen, dann ⏎; alles andere bricht ab."},
+    "pull_done": {"en": "Pulled {r}/{b}: {n} commit(s).", "de": "Pull von {r}/{b}: {n} Commit(s)."},
+    "pull_nothing": {"en": "No incoming commits from {r}.", "de": "Keine eingehenden Commits von {r}."},
+    "pull_operation": {"en": "A Git operation is already in progress; finish it before pulling.",
+                       "de": "Ein Git-Vorgang läuft bereits; vor dem Pull abschließen."},
+    "pull_changed": {"en": "Repository or pull source changed after approval; review and retry.",
+                     "de": "Repo oder Pull-Quelle haben sich nach der Freigabe geändert; prüfen und erneut starten."},
+    "pull_failed": {"en": "Pull failed (exit {code}): {e}", "de": "Pull fehlgeschlagen (Exit {code}): {e}"},
+    "pull_unknown": {"en": "Pull outcome is unclear; repository refreshed. Inspect it before retrying.",
+                     "de": "Pull-Ausgang unklar; Repo neu eingelesen. Vor erneutem Versuch prüfen."},
+    "pull_no_remotes": {"en": "No remotes configured.", "de": "Keine Remotes konfiguriert."},
+    "pull_fetch_failures": {"en": "Some remotes could not be fetched; no pull applied: {r}",
+                            "de": "Einige Remotes konnten nicht abgerufen werden; kein Pull angewendet: {r}"},
     # Hintergrund-Fetch (Taste R)
     "scan_started": {"en": "Fetching in the background — the list stays usable.",
                      "de": "Fetch läuft im Hintergrund — die Liste bleibt bedienbar."},
@@ -534,6 +560,9 @@ TR = {
               "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
               "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
               "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
+              "L  Choose a remote, or fetch all first and then choose a pull source.\n"
+              "   Preview incoming commits/files, confirm with Y ⏎; clean tree, fast-forward only.\n"
+              "   Keep other programs from editing/checking out this repo during the pull.\n\n"
               "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
               "I  Repository, remote and branch details. T tests the selected remote.\n"
               "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
@@ -544,6 +573,9 @@ TR = {
               "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
               "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
               "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
+              "L  Remote wählen, oder alle abrufen und danach eine Pull-Quelle wählen.\n"
+              "   Vorschau von Commits/Dateien, J ⏎ bestätigt; sauberer Tree, nur Fast-Forward.\n"
+              "   Währenddessen das Repo nicht in anderen Programmen bearbeiten/wechseln.\n\n"
               "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
               "I  Repo-, Remote- und Branch-Details. T prüft das gewählte Remote.\n"
               "   X entfernt es nach Warnung: Tracking-Refs und Reflogs sind danach endgültig weg.\n\n"
@@ -4222,12 +4254,14 @@ def render_info_blocks(view: InfoView, specs: list, width: int) -> None:
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
                      timeout: int = 10, *,
                      expected_public: bool | None = None) -> TransferCheck:
-    """Prüft einen Push, ohne etwas zu verändern.
+    """Prüft einen Push oder Fast-Forward-Pull, ohne etwas zu verändern.
 
     Bewusst eng: sauberer Tree, vorhandener Remote-Branch und verwandte,
     fast-forward-fähige History. Neue Branches und Divergenzen gehören ins
     Terminal, wo der Mensch den Sonderfall ausdrücklich auflöst.
     """
+    if action not in ("push", "pull"):
+        raise ValueError(f"unknown transfer action: {action}")
     if branch in ("?", "(detached)"):
         return TransferCheck("detached")
     cfg = timeout_config(timeout)
@@ -4235,7 +4269,8 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     try:
         configs = read_remote_configs(repo, cfg)
         remote_cfg = configs.get(remote)
-        if (remote_cfg is None or not remote_cfg.transfer_safe
+        if (remote_cfg is None or not remote_fetch_url_safe(remote_cfg)
+                or (action == "push" and not remote_cfg.transfer_safe)
                 or not fetch_maps_branch_exactly(remote_cfg, branch)):
             return TransferCheck("remote-unsafe")
         override = repo_transport_override(repo, timeout)
@@ -4244,17 +4279,19 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         actual_public = remote_cfg.fetch_targets[0].is_github
         if expected_public is not None and actual_public != expected_public:
             return TransferCheck("remote-unsafe")
-        if action != "push":
-            raise ValueError(f"unknown transfer action: {action}")
+
         # Die Regel "bei is_local den aufgeloesten Pfad, sonst die
         # konfigurierte Adresse" steht in remote_push_url(); hier stand sie
         # ein zweites Mal ausgeschrieben. Eine spaetere Verschaerfung dort
         # haette den Push-Pfad nicht erreicht.
-        transfer_url = remote_push_url(remote_cfg)
-        if (transfer_url is None
-                or not _argv_safe_remote_url(remote_cfg.push_urls[0])
-                or not _argv_safe_remote_url(transfer_url)):
+        transfer_url = (remote_push_url(remote_cfg) if action == "push"
+                        else remote_fetch_url(remote_cfg))
+        if transfer_url is None or not _argv_safe_remote_url(transfer_url):
             return TransferCheck("remote-unsafe")
+        if action == "pull" and any(_git_path(repo, marker, timeout).exists()
+                                    for marker in ("MERGE_HEAD", "rebase-merge", "rebase-apply",
+                                                   "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG")):
+            return TransferCheck("operation-in-progress")
         branch_r = _required_git(
             repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
             env=raw_env)
@@ -4299,13 +4336,15 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     ahead, behind = int(ahead_s), int(behind_s)
     if ahead and behind:
         return TransferCheck("divergent", ahead=ahead, behind=behind, remote_ref=ref)
-    if behind:
+    if action == "push" and behind:
         return TransferCheck("behind", ahead=ahead, behind=behind, remote_ref=ref)
-    if not ahead:
-        return TransferCheck("nothing-push", remote_ref=ref)
+    if (action == "push" and not ahead) or (action == "pull" and not behind):
+        return (TransferCheck("nothing-push", remote_ref=ref) if action == "push"
+                else TransferCheck("nothing-pull", remote_ref=ref))
+    commit_range = f"{target_oid}..{head}" if action == "push" else f"{head}..{target_oid}"
     commits_r = run_git(
         repo, "log", "--oneline", "--no-decorate",
-        f"{target_oid}..{head}", timeout=timeout, env=raw_env)
+        commit_range, timeout=timeout, env=raw_env)
     # Nicht nur die beiden Endbaeume vergleichen: Eine Datei kann in einem
     # ausgehenden Commit hinzugefuegt und in einem spaeteren wieder geloescht
     # worden sein. Sie waere trotzdem Teil der veroeffentlichten Historie. `-m`
@@ -4315,7 +4354,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         repo, "log", "-m", "--root", "--format=", "--name-status",
         "--no-renames", "--no-ext-diff", "--no-textconv",
         "--ignore-submodules=none",
-        f"{target_oid}..{head}", timeout=timeout, env=raw_env)
+        commit_range, timeout=timeout, env=raw_env)
     if commits_r.returncode != 0 or files_r.returncode != 0:
         return TransferCheck("inspect-failed", ahead, behind, ref)
     try:
@@ -4345,7 +4384,8 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         branch=branch, head_oid=head, index_oid=index_oid,
         worktree_fingerprint=worktree_fingerprint,
         fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
-        push_fingerprint=remote_cfg.push_targets[0].fingerprint,
+        push_fingerprint=(remote_cfg.push_targets[0].fingerprint
+                          if action == "push" else ""),
         remote_name=remote,
         remote_config_signature=(tuple(remote_cfg.fetch_urls),
                                  tuple(remote_cfg.push_urls),
@@ -4353,6 +4393,14 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         transfer_url=transfer_url,
         target_oid=target_oid,
     )
+
+
+def safe_pull_args(target_oid: str) -> list[str]:
+    """Nur die freigegebene Commit-ID integrieren, ohne Hooks oder Autostash."""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", target_oid):
+        raise ValueError("invalid pull object ID")
+    return [*NO_GIT_HOOKS_ARGS, "-c", "submodule.recurse=false",
+            "merge", "--ff-only", "--no-autostash", "--no-edit", "--no-stat", target_oid]
 
 
 def safe_push_args(destination: str, branch: str, source_oid: str,
@@ -6708,6 +6756,10 @@ class TUI:
             return t("transfer_behind", n=check.behind, r=remote)
         if check.reason == "nothing-push":
             return t("nothing_to_push", r=remote)
+        if check.reason == "nothing-pull":
+            return t("pull_nothing", r=remote)
+        if check.reason == "operation-in-progress":
+            return t("pull_operation")
         return check.reason
 
     def _run_approved_push(self, st: RepoStatus,
@@ -6818,6 +6870,105 @@ class TUI:
             self.message = t("transfer_auth_missing", r=remote.name)
         else:
             self.message = t("push_outcome_unknown", code=r.returncode)
+
+    def choose_pull_remote(self, st: RepoStatus, allow_all: bool = True) -> str | None:
+        options = ([(None, t("pull_all"))] if allow_all else []) + [
+            (remote.name, remote.badge()) for remote in st.remotes]
+        if not st.remotes:
+            self.message = t("pull_no_remotes")
+            return None
+        selected = 1 if allow_all else 0
+        offset = 0
+        while True:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            safe_addstr(self.scr, 0, 0, " " + t("pull_choose", rel=st.rel, b=st.branch),
+                        curses.A_BOLD)
+            height = max(1, h - 3)
+            offset = scroll_window(selected, offset, height)
+            for y, i in enumerate(range(offset, min(len(options), offset + height)), 1):
+                safe_addstr(self.scr, y, 1, terminal_text(options[i][1]),
+                            color_attr(C_CYAN, i == selected))
+            safe_addstr(self.scr, h - 1, 0, t("pull_choose_footer"), curses.color_pair(C_DIM))
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(options) - 1, selected + 1)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                return options[selected][0] or ""
+            elif ch in (27, ord("q"), ord("Q")):
+                self.message = t("cancelled")
+                return None
+
+    def action_pull(self):
+        st = self.current()
+        if not st:
+            return
+        if self.scan:
+            self.message = t("scan_already_running")
+            return
+        # Die Auswahl liest den aktuellen lokalen Zustand, nicht den alten Scan.
+        st = self.refresh_one(st)
+        selected = self.choose_pull_remote(st)
+        if selected is None:
+            return
+        if selected == "":
+            failures = []
+            for name in [remote.name for remote in st.remotes]:
+                fresh = self._fetch_remote(st, name)
+                if fresh is None:
+                    failures.append(name)
+                    st = self.current() or st
+                else:
+                    st = fresh
+            if failures:
+                self.message = t("pull_fetch_failures", r=", ".join(failures))
+                return
+            selected = self.choose_pull_remote(st, allow_all=False)
+            if selected is None:
+                return
+        fresh = self._fetch_remote(st, selected)
+        if fresh is None:
+            return
+        if fresh.branch != st.branch:
+            self.message = t("pull_changed")
+            return
+        check = inspect_transfer(fresh.path, selected, fresh.branch, "pull", self.cfg["git_timeout"])
+        if not check.ready:
+            self.message = self._transfer_message(check, selected, fresh.branch)
+            return
+        args = safe_pull_args(check.target_oid)
+        lines = [t("pull_effect", n=check.behind), t("pull_caution"), "",
+                 display_remote_url(check.transfer_url), "", *check.commits, "", *check.files,
+                 "", format_git_command(args)]
+        if not self.confirm_in_pager(t("pull_title", r=selected, b=fresh.branch, rel=fresh.rel),
+                                     lines, t("pull_confirm")):
+            log_cancelled(fresh.path, args)
+            self.message = t("cancelled")
+            return
+        newest = self._fetch_remote(fresh, selected)
+        if newest is None:
+            return
+        final = inspect_transfer(newest.path, selected, newest.branch, "pull", self.cfg["git_timeout"])
+        if not final.ready or final.approval_signature() != check.approval_signature():
+            self.message = t("pull_changed")
+            return
+        self.show_busy(t("pull_title", r=selected, b=check.branch, rel=newest.rel))
+        try:
+            result = run_git_logged(newest.path, *args, timeout=self.cfg["git_timeout"],
+                                    env=TRANSFER_OBJECT_ENV)
+        except OSError:
+            self.refresh_one(newest)
+            self.message = t("pull_unknown")
+            return
+        finally:
+            curses.flushinp()
+        self.refresh_one(newest)
+        self.message = (t("pull_done", r=selected, b=check.branch, n=check.behind)
+                        if result.returncode == 0 else
+                        t("pull_failed", code=result.returncode, e=last_error_line(result)))
 
     def action_sync_push(self):
         """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
@@ -7464,6 +7615,8 @@ class TUI:
             self.action_commit_wizard()
         elif key == "R":
             self.start_background_scan()
+        elif key == "L":
+            self.action_pull()
         elif key == "P":
             self.action_sync_push()
         elif key == "G":

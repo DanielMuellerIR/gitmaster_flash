@@ -159,6 +159,7 @@ memorize. Case does not matter — `f` works like `F`.
 | E | open the repository in a configured app (add your own in `config.json`) |
 | A | inspect changes file by file in a read-only diff viewer |
 | C | commit helper with selection suggestions (see below) |
+| L | choose a pull remote (or fetch all first), preview and confirm a fast-forward |
 | P | safely push the current branch to the private sync remote |
 | G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
@@ -217,7 +218,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.22.17 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.23.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -651,10 +652,16 @@ global Git config all three stay allowed: there you wrote them yourself, and a
 repository cannot slip them in. Its fetch
 refspec must map `refs/heads/<branch>` to that remote's matching tracking ref.
 
-Pull remains a terminal operation. Moving a branch, index and working tree cannot
-be atomically tied to the state approved by this TUI across concurrent Git
-processes; gmf therefore does not risk fast-forwarding a branch checked out in
-the race window.
+Press `L` to choose a pull remote. “Fetch all remotes” first refreshes every safe
+remote of this repository, then opens the source chooser again. Only the
+**remote branch with the same name** is integrated into the current local branch;
+the existing upstream stays unchanged. gmf previews incoming commits and file names
+before **Y ⏎** confirmation. Only fast-forward with a clean working tree is allowed;
+divergence, conflicts and active Git operations stop the pull. Immediately before
+applying, gmf rechecks the approved state and integrates the fixed commit ID without
+hooks, autostash or recursive submodules. Do not edit or switch this repository in
+another program meanwhile: branch, index and working tree cannot be bound atomically
+against a concurrent checkout. Merge and rebase remain terminal special cases.
 
 GitHub uses the separate `G` path. It works only when the same branch already
 exists on exactly one GitHub remote and the histories are related. Before

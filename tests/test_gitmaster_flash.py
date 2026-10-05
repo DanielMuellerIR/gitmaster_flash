@@ -664,8 +664,8 @@ class ScrollWindowTests(unittest.TestCase):
         self.assertNotIn("self.offset = sel_row - body_h + 1", source)
         self.assertNotIn("self.compact_col = sel_col - columns + 1", source)
         self.assertNotIn("self.log_top = self.log_selected - visible + 1", source)
-        # Definition + vier Listen + Protokoll + Kompaktspalten + Einstellungen.
-        self.assertEqual(source.count("scroll_window("), 8)
+        # Definition + fünf Listen + Protokoll + Kompaktspalten + Einstellungen.
+        self.assertEqual(source.count("scroll_window("), 9)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -8028,7 +8028,7 @@ class TransferMessageTests(unittest.TestCase):
 
     REASONS = ("dirty", "detached", "inspect-failed", "remote-unsafe",
                "unsafe-transport", "missing-branch", "divergent", "behind",
-               "nothing-push")
+               "nothing-push", "nothing-pull", "operation-in-progress")
 
     def test_every_reason_becomes_a_sentence(self):
         ui = TUI(None, Path("/tmp"), DEFAULT_CONFIG, None)

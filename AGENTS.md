@@ -482,10 +482,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Checkout sowie Index- oder Arbeitsbaumänderungen binden; Löschen kann keinen
   einzelnen Reflog-Eintrag atomar festhalten. Beides bleibt dem Terminal
   vorbehalten.
-- Pull bleibt vollständig dem Terminal vorbehalten. Ein Fast-forward müsste
-  Branch-Ref, Index und Arbeitsbaum gemeinsam gegen den freigegebenen Stand
-  binden; Git bietet dafür gegenüber einem parallelen Checkout keine portable
-  atomare Operation. Die frühere `L`-Aktion wurde deshalb entfernt.
+- Pull (`L`) bietet einen Remote oder zuerst Fetch aller Remotes mit anschließender
+  Quellenwahl. Nur Fast-Forward bei sauberem Tree; eingehende Commits und Dateinamen
+  werden vor J/Y ⏎ gezeigt. Branch, HEAD, Index, Arbeitsbaum, Ziel-OID und Remote-Config
+  direkt vor dem Anwenden erneut prüfen, nur die freigegebene OID integrieren.
+  Hooks, Autostash und rekursive Submodule bleiben beim Anwenden aus. Gegen einen
+  parallelen Checkout gibt es keine portable atomare Bindung von Branch, Index und
+  Arbeitsbaum; die Vorschau nennt deshalb die Grenze ausdrücklich. Keine automatische
+  Mehr-Remote-Integration, kein Merge-/Rebase-Fallback, keine Behauptung vollständiger
+  Absicherung gegenüber anderen Programmen.
 - Die Änderungsansicht (`A`) ist vollständig rein lesend. gmf verwirft keine
   Arbeitsbaumdatei, entfernt nichts aus der Vormerkung und bietet auch kein
   „alle stashen“ an: Zwischen letzter Inhaltsprüfung und `git restore`, `git rm`

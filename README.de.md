@@ -171,6 +171,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | E | Repo in einer konfigurierten App öffnen (eigene in `config.json` eintragen) |
 | A | Änderungen Datei für Datei in einem rein lesenden Diff-Betrachter prüfen |
 | C | Commit-Hilfe mit Auswahl-Vorschlägen (siehe unten) |
+| L | Pull-Remote wählen (oder erst alle fetchen), Vorschau und bestätigter Fast-Forward |
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | G | geschützter GitHub-Push: Vorschau der ausgehenden Commits/Dateien, Bestätigung mit J ⏎ |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
@@ -234,7 +235,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.22.17 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.23.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -688,10 +689,17 @@ Git-Config bleiben alle drei erlaubt: Dort hat man sie selbst hingeschrieben,
 und ein Repo kann sie nicht einschleusen. Die Fetch-Refspec muss
 `refs/heads/<Branch>` auf den passenden Tracking-Ref dieses Remotes abbilden.
 
-Pull bleibt eine Terminal-Aktion. Branch, Index und Arbeitsbaum lassen sich
-gegenüber parallelen Git-Prozessen nicht atomar an den in dieser TUI freigegebenen
-Stand binden. gmf riskiert deshalb keinen Fast-forward auf einen Branch, der im
-Race-Fenster ausgecheckt wurde.
+Mit `L` wählst du einen Pull-Remote. „Alle Remotes abrufen“ aktualisiert zuerst
+alle sicheren Remotes dieses Repos und öffnet danach erneut die Quellenwahl.
+Es wird nur der **gleichnamige Remote-Branch** in den aktuellen lokalen Branch
+übernommen, der bisherige Upstream bleibt erhalten. gmf zeigt die eingehenden
+Commits und Dateinamen vor der Bestätigung mit **J ⏎**. Nur Fast-Forward bei sauberem
+Arbeitsbaum ist erlaubt; Divergenzen, Konflikte und laufende Git-Vorgänge stoppen Pull.
+Vor dem Anwenden wird der freigegebene Stand erneut geprüft und die feste Commit-ID
+integriert, ohne Hooks, Autostash oder rekursive Submodule. Bearbeite das Repo und
+wechsle seinen Branch währenddessen nicht in einem anderen Programm: Gegen einen
+parallelen Checkout lassen sich Branch, Index und Arbeitsbaum nicht atomar binden.
+Merge und Rebase bleiben Terminal-Sonderfälle.
 
 Für GitHub gibt es den getrennten `G`-Pfad. Er funktioniert nur, wenn derselbe
 Branch auf genau einem GitHub-Remote bereits existiert und die Historien verbunden
