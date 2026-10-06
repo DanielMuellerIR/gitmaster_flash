@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.23.0"
+__version__ = "0.23.1"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -281,6 +281,8 @@ TR = {
     "pull_changed": {"en": "Repository or pull source changed after approval; review and retry.",
                      "de": "Repo oder Pull-Quelle haben sich nach der Freigabe geändert; prüfen und erneut starten."},
     "pull_failed": {"en": "Pull failed (exit {code}): {e}", "de": "Pull fehlgeschlagen (Exit {code}): {e}"},
+    "pull_local_collision": {"en": "Pull stopped: incoming files would overwrite local untracked or ignored files. Move those files before retrying.",
+                             "de": "Pull gestoppt: Eingehende Dateien würden lokale unversionierte oder ignorierte Dateien überschreiben. Diese Dateien vor dem nächsten Versuch verschieben."},
     "pull_unknown": {"en": "Pull outcome is unclear; repository refreshed. Inspect it before retrying.",
                      "de": "Pull-Ausgang unklar; Repo neu eingelesen. Vor erneutem Versuch prüfen."},
     "pull_no_remotes": {"en": "No remotes configured.", "de": "Keine Remotes konfiguriert."},
@@ -1956,10 +1958,10 @@ def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
     Ein konfliktfrei vorbereiteter Merge hat keine ungemergten Indexeintraege,
     aber `git commit` erzeugt trotzdem einen Merge-Commit. Der temporaere
     Teilbaum der Commit-Hilfe darf einen solchen Commit niemals abschliessen.
-    Dasselbe gilt fuer Cherry-Pick, Revert, Rebase und den Sequencer.
+    Dasselbe gilt fuer Cherry-Pick, Revert, Rebase, Sequencer und Bisect.
     """
     for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                   "rebase-merge", "rebase-apply", "sequencer"):
+                   "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG"):
         if _git_path(repo, marker, timeout).exists():
             return True
     return False
@@ -4288,9 +4290,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
                         else remote_fetch_url(remote_cfg))
         if transfer_url is None or not _argv_safe_remote_url(transfer_url):
             return TransferCheck("remote-unsafe")
-        if action == "pull" and any(_git_path(repo, marker, timeout).exists()
-                                    for marker in ("MERGE_HEAD", "rebase-merge", "rebase-apply",
-                                                   "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG")):
+        if action == "pull" and repository_operation_in_progress(repo, timeout):
             return TransferCheck("operation-in-progress")
         branch_r = _required_git(
             repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
@@ -4396,11 +4396,16 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
 
 
 def safe_pull_args(target_oid: str) -> list[str]:
-    """Nur die freigegebene Commit-ID integrieren, ohne Hooks oder Autostash."""
+    """Nur die freigegebene Commit-ID integrieren, ohne Hooks oder Autostash.
+
+    Explizites no-squash überstimmt Branch-Konfiguration; ignorierte lokale
+    Dateien bleiben bei Namenskollisionen geschützt.
+    """
     if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", target_oid):
         raise ValueError("invalid pull object ID")
     return [*NO_GIT_HOOKS_ARGS, "-c", "submodule.recurse=false",
-            "merge", "--ff-only", "--no-autostash", "--no-edit", "--no-stat", target_oid]
+            "merge", "--ff-only", "--no-squash", "--no-overwrite-ignore",
+            "--no-autostash", "--no-edit", "--no-stat", target_oid]
 
 
 def safe_push_args(destination: str, branch: str, source_oid: str,
@@ -6814,19 +6819,19 @@ class TUI:
             return None
         return fresh, check
 
-    def _reapproved_transfer(self, fresh: RepoStatus, remote: RemoteStatus,
+    def _reapproved_transfer(self, fresh: RepoStatus, remote_name: str,
                              check: TransferCheck, changed_key: str, *,
-                             expected_public: bool):
-        """Unmittelbar vor dem Push noch einmal fetchen und die Freigabe prüfen.
+                             action: str, expected_public: bool | None = None):
+        """Vor der Übertragung erneut fetchen und die Freigabe prüfen.
 
-        Ändert sich der ausgehende Satz zwischen Rückfrage und Push, wird nicht
-        mit einer veralteten Freigabe gepusht. Liefert `(newest, final)` oder
+        Ändert sich der freigegebene Zustand nach der Rückfrage, wird die
+        Übertragung abgebrochen. Liefert `(newest, final)` oder
         `None`.
         """
-        newest = self._fetch_remote(fresh, remote.name)
+        newest = self._fetch_remote(fresh, remote_name)
         if not newest:
             return None
-        final = inspect_transfer(newest.path, remote.name, newest.branch, "push",
+        final = inspect_transfer(newest.path, remote_name, newest.branch, action,
                                  self.cfg["git_timeout"],
                                  expected_public=expected_public)
         if (not final.ready
@@ -6948,13 +6953,11 @@ class TUI:
             log_cancelled(fresh.path, args)
             self.message = t("cancelled")
             return
-        newest = self._fetch_remote(fresh, selected)
-        if newest is None:
+        reapproved = self._reapproved_transfer(fresh, selected, check, "pull_changed",
+                                               action="pull")
+        if not reapproved:
             return
-        final = inspect_transfer(newest.path, selected, newest.branch, "pull", self.cfg["git_timeout"])
-        if not final.ready or final.approval_signature() != check.approval_signature():
-            self.message = t("pull_changed")
-            return
+        newest, final = reapproved
         self.show_busy(t("pull_title", r=selected, b=check.branch, rel=newest.rel))
         try:
             result = run_git_logged(newest.path, *args, timeout=self.cfg["git_timeout"],
@@ -6966,9 +6969,21 @@ class TUI:
         finally:
             curses.flushinp()
         self.refresh_one(newest)
+        if result.returncode != 0:
+            self.message = (t("pull_local_collision")
+                            if "untracked working tree files would be overwritten" in result.stderr
+                            else t("pull_failed", code=result.returncode, e=last_error_line(result)))
+            return
+        branch_result = run_git(newest.path, "symbolic-ref", "-q", "HEAD",
+                                timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+        head_result = run_git(newest.path, "rev-parse", "--verify", f"refs/heads/{final.branch}",
+                              timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+        # Ein erfolgreicher Git-Prozess allein belegt noch keinen Fast-Forward.
+        applied = (branch_result.returncode == 0 and head_result.returncode == 0
+                   and branch_result.stdout.strip() == f"refs/heads/{final.branch}"
+                   and head_result.stdout.strip() == final.target_oid)
         self.message = (t("pull_done", r=selected, b=check.branch, n=check.behind)
-                        if result.returncode == 0 else
-                        t("pull_failed", code=result.returncode, e=last_error_line(result)))
+                        if applied else t("pull_unknown"))
 
     def action_sync_push(self):
         """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
@@ -6997,9 +7012,9 @@ class TUI:
                 check.target_oid))
             self.message = t("cancelled")
             return
-        reapproved = self._reapproved_transfer(fresh, remote, check,
+        reapproved = self._reapproved_transfer(fresh, remote.name, check,
                                                "transfer_changed",
-                                               expected_public=False)
+                                               action="push", expected_public=False)
         if not reapproved:
             return
         newest, final = reapproved
@@ -7050,9 +7065,9 @@ class TUI:
             self.message = t("github_cancelled")
             return
 
-        reapproved = self._reapproved_transfer(fresh, remote, check,
+        reapproved = self._reapproved_transfer(fresh, remote.name, check,
                                                "github_changed",
-                                               expected_public=True)
+                                               action="push", expected_public=True)
         if not reapproved:
             return
         newest, final = reapproved

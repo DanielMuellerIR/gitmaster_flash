@@ -1,8 +1,8 @@
 """Echte lokale Remotes: Pull-Quelle, Freigabe und abweichender Sync-Upstream."""
 import os
+import importlib.util
 import pty
 import select
-import signal
 import sys
 import time
 from pathlib import Path
@@ -12,6 +12,24 @@ import unittest
 from unittest import mock
 
 import gitmaster_flash as gmf
+
+
+spec = importlib.util.spec_from_file_location(
+    "gmf_pull_screens", Path(gmf.__file__).parent / "docs/make-screens.py")
+screens = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(screens)
+
+
+def cleanup_pty(pid, fd):
+    # Git hat eine eigene Sitzung; seine Nachfahren vor dem PTY-Schließen merken.
+    descendants = screens._descendant_pids(pid)
+    try:
+        os.close(fd)
+    finally:
+        descendants += [later for later in screens._descendant_pids(pid)
+                        if later not in descendants]
+        screens._terminate_pty_child(pid)
+        screens._terminate_descendants(descendants)
 
 
 class PullTests(unittest.TestCase):
@@ -83,6 +101,99 @@ class PullTests(unittest.TestCase):
         preview = "\n".join(self.ui.confirm_in_pager.call_args.args[1])
         self.assertIn("incoming", preview)
         self.assertIn("incoming.txt", preview)
+
+    def test_ignored_incoming_file_is_preserved(self):
+        (self.repo / ".git/info/exclude").write_text("incoming.txt\n")
+        incoming = self.repo / "incoming.txt"
+        incoming.write_text("private local data\n")
+        before = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.git(self.repo, "status", "--porcelain"), "")
+        self.pull()
+        self.assertEqual(incoming.read_text(), "private local data\n")
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.ui.message, gmf.t("pull_local_collision"))
+
+    def test_squash_config_cannot_change_fast_forward(self):
+        self.git(self.repo, "config", "branch.main.mergeOptions", "--squash")
+        self.pull()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"),
+                         self.git(self.peer, "rev-parse", "HEAD"))
+        self.assertEqual(self.git(self.repo, "status", "--porcelain"), "")
+        self.assertEqual(self.ui.message, gmf.t("pull_done", r="origin", b="main", n=1))
+
+    def test_success_without_target_head_is_not_reported_as_pull(self):
+        original = gmf.run_git_logged
+        def no_merge(repo, *args, **kwargs):
+            if "merge" in args:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return original(repo, *args, **kwargs)
+        with mock.patch.object(gmf, "run_git_logged", side_effect=no_merge):
+            self.pull()
+        self.assertFalse((self.repo / "incoming.txt").exists())
+        self.assertEqual(self.ui.message, gmf.t("pull_unknown"))
+
+    def test_clean_cherry_pick_sequence_blocks_pull(self):
+        # Nach eigenständigem Konflikt-Commit bleibt nur der Sequencer als Beleg.
+        self.git(self.peer, "switch", "-c", "sequence", "HEAD~1")
+        (self.peer / "base.txt").write_text("first\n")
+        self.git(self.peer, "add", "base.txt")
+        self.git(self.peer, "commit", "-m", "first")
+        first = self.git(self.peer, "rev-parse", "HEAD")
+        self.commit("second")
+        second = self.git(self.peer, "rev-parse", "HEAD")
+        (self.repo / "base.txt").write_text("local\n")
+        self.git(self.repo, "add", "base.txt")
+        self.git(self.repo, "commit", "-m", "local")
+        self.git(self.peer, "push", "origin", "sequence")
+        self.git(self.repo, "fetch", "origin")
+        result = subprocess.run(["git", "-C", str(self.repo), "cherry-pick", first, second],
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        (self.repo / "base.txt").write_text("resolved\n")
+        self.git(self.repo, "add", "base.txt")
+        self.git(self.repo, "commit", "-m", "resolved")
+        self.assertFalse((self.repo / ".git/CHERRY_PICK_HEAD").exists())
+        self.assertTrue((self.repo / ".git/sequencer").exists())
+        self.assertEqual(self.git(self.repo, "status", "--porcelain"), "")
+        before = self.git(self.repo, "rev-parse", "HEAD")
+        self.pull()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertFalse(self.ui.confirm_in_pager.called)
+        self.assertEqual(gmf.inspect_transfer(self.repo, "origin", "main", "pull").reason,
+                         "operation-in-progress")
+
+    def test_aborted_pty_terminates_running_git_session(self):
+        wrapper = self.root / "bin"
+        wrapper.mkdir()
+        pid_file = self.root / "git.pid"
+        script = wrapper / "git"
+        script.write_text(f"#!{sys.executable}\nimport os,time\n"
+                          f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                          "time.sleep(120)\n")
+        script.chmod(0o755)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["PATH"] = str(wrapper) + os.pathsep + os.environ["PATH"]
+            gmf.run_git(self.repo, "ls-remote", "origin", timeout=120)
+            os._exit(0)
+        git_pid = None
+        try:
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists())
+            git_pid = int(pid_file.read_text())
+            self.assertEqual(os.getpgid(git_pid), git_pid)
+        finally:
+            cleanup_pty(pid, fd)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(git_pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        self.fail("Git session survived PTY cleanup")
 
     def test_all_fetches_both_remotes_then_integrates_only_selected_source(self):
         self.ui.choose_pull_remote.side_effect = ["", "origin"]
@@ -196,13 +307,7 @@ class PullTests(unittest.TestCase):
             self.assertTrue((self.repo / "incoming.txt").exists())
             os.write(fd, b"q")
         finally:
-            os.close(fd)
-            # Eigener Kindprozess, auch bei fehlgeschlagener Prüfung aufräumen.
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            os.waitpid(pid, 0)
+            cleanup_pty(pid, fd)
 
     def test_oid_argument_rejects_options_and_mutable_refs(self):
         for value in ("HEAD", "--force", "a" * 40 + ":refs/heads/other"):

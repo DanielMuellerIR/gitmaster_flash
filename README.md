@@ -218,7 +218,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.23.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.23.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -657,7 +657,9 @@ remote of this repository, then opens the source chooser again. Only the
 **remote branch with the same name** is integrated into the current local branch;
 the existing upstream stays unchanged. gmf previews incoming commits and file names
 before **Y ⏎** confirmation. Only fast-forward with a clean working tree is allowed;
-divergence, conflicts and active Git operations stop the pull. Immediately before
+divergence, conflicts and active Git operations stop the pull. Local ignored files
+are preserved if incoming files use the same paths; branch squash settings cannot
+change the fast-forward. Immediately before
 applying, gmf rechecks the approved state and integrates the fixed commit ID without
 hooks, autostash or recursive submodules. Do not edit or switch this repository in
 another program meanwhile: branch, index and working tree cannot be bound atomically

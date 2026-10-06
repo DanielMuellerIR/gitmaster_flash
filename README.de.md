@@ -235,7 +235,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.23.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.23.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -695,6 +695,8 @@ Es wird nur der **gleichnamige Remote-Branch** in den aktuellen lokalen Branch
 übernommen, der bisherige Upstream bleibt erhalten. gmf zeigt die eingehenden
 Commits und Dateinamen vor der Bestätigung mit **J ⏎**. Nur Fast-Forward bei sauberem
 Arbeitsbaum ist erlaubt; Divergenzen, Konflikte und laufende Git-Vorgänge stoppen Pull.
+Lokale ignorierte Dateien bleiben bei gleichnamigen eingehenden Pfaden erhalten;
+Squash-Einstellungen des Branches ändern den Fast-Forward nicht.
 Vor dem Anwenden wird der freigegebene Stand erneut geprüft und die feste Commit-ID
 integriert, ohne Hooks, Autostash oder rekursive Submodule. Bearbeite das Repo und
 wechsle seinen Branch währenddessen nicht in einem anderen Programm: Gegen einen
