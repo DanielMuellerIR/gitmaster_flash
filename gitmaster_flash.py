@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.23.1"
+__version__ = "0.23.2"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -6970,14 +6970,24 @@ class TUI:
             curses.flushinp()
         self.refresh_one(newest)
         if result.returncode != 0:
-            self.message = (t("pull_local_collision")
-                            if "untracked working tree files would be overwritten" in result.stderr
-                            else t("pull_failed", code=result.returncode, e=last_error_line(result)))
+            collision = any(marker in result.stderr for marker in (
+                "untracked working tree files would be overwritten",
+                "Updating the following directories would lose untracked files in them"))
+            if collision:
+                self.message = t("pull_local_collision")
+                COMMAND_LOG.extend("  " + terminal_text(line) for line in result.stderr.splitlines() if line.strip())
+                del COMMAND_LOG[:-COMMAND_LOG_MAX]
+            else:
+                self.message = t("pull_failed", code=result.returncode, e=last_error_line(result))
             return
-        branch_result = run_git(newest.path, "symbolic-ref", "-q", "HEAD",
-                                timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
-        head_result = run_git(newest.path, "rev-parse", "--verify", f"refs/heads/{final.branch}",
-                              timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+        try:
+            branch_result = run_git(newest.path, "symbolic-ref", "-q", "HEAD",
+                                    timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+            head_result = run_git(newest.path, "rev-parse", "--verify", f"refs/heads/{final.branch}",
+                                  timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+        except OSError:
+            self.message = t("pull_unknown")
+            return
         # Ein erfolgreicher Git-Prozess allein belegt noch keinen Fast-Forward.
         applied = (branch_result.returncode == 0 and head_result.returncode == 0
                    and branch_result.stdout.strip() == f"refs/heads/{final.branch}"

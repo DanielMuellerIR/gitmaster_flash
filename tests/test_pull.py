@@ -113,6 +113,50 @@ class PullTests(unittest.TestCase):
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
         self.assertEqual(self.ui.message, gmf.t("pull_local_collision"))
 
+    def test_ignored_incoming_directory_is_preserved_and_paths_are_logged(self):
+        (self.repo / ".git/info/exclude").write_text("incoming.txt/\n")
+        incoming = self.repo / "incoming.txt"
+        incoming.mkdir()
+        local = incoming / "private.txt"
+        local.write_text("private local data\n")
+        before = self.git(self.repo, "rev-parse", "HEAD")
+        log_start = len(gmf.COMMAND_LOG)
+        self.pull()
+        self.assertEqual(local.read_text(), "private local data\n")
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.ui.message, gmf.t("pull_local_collision"))
+        self.assertIn("incoming.txt", "\n".join(gmf.COMMAND_LOG[log_start:]))
+
+    def assert_postmerge_reader_failure(self, reader):
+        original_reader = gmf.run_git
+        original_writer = gmf.run_git_logged
+        merged = False
+
+        def write(repo, *args, **kwargs):
+            nonlocal merged
+            result = original_writer(repo, *args, **kwargs)
+            if "merge" in args and result.returncode == 0:
+                merged = True
+            return result
+
+        def read(repo, *args, **kwargs):
+            if merged and args == reader and kwargs.get("env") == gmf.TRANSFER_OBJECT_ENV:
+                raise OSError(24, "Too many open files")
+            return original_reader(repo, *args, **kwargs)
+
+        with mock.patch.object(gmf, "run_git_logged", side_effect=write), \
+             mock.patch.object(gmf, "run_git", side_effect=read):
+            self.pull()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"),
+                         self.git(self.peer, "rev-parse", "HEAD"))
+        self.assertEqual(self.ui.message, gmf.t("pull_unknown"))
+
+    def test_branch_reader_oserror_after_successful_merge_is_reported(self):
+        self.assert_postmerge_reader_failure(("symbolic-ref", "-q", "HEAD"))
+
+    def test_head_reader_oserror_after_successful_merge_is_reported(self):
+        self.assert_postmerge_reader_failure(("rev-parse", "--verify", "refs/heads/main"))
+
     def test_squash_config_cannot_change_fast_forward(self):
         self.git(self.repo, "config", "branch.main.mergeOptions", "--squash")
         self.pull()

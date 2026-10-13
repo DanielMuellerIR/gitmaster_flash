@@ -861,8 +861,6 @@ class TestAgainstRealRepo(unittest.TestCase):
         branch = git_output(self.repo, "symbolic-ref", "--short", "HEAD")
         before = git_output(self.repo, "rev-parse", "HEAD")
         git(self.repo, "branch", "victim", before)
-        git(self.repo, "symbolic-ref", f"refs/remotes/origin/{branch}",
-            "refs/heads/victim")
         tree = git_output(self.repo, "rev-parse", "HEAD^{tree}")
         remote_tip = subprocess.run(
             ["git", "-C", str(self.repo), "commit-tree", tree, "-p", before],
@@ -870,6 +868,11 @@ class TestAgainstRealRepo(unittest.TestCase):
             capture_output=True, text=True).stdout.strip()
         git(self.repo, "push", "-q", str(remote),
             f"{remote_tip}:refs/heads/{branch}")
+        # Auch der Fixture-Push aktualisiert passende Tracking-Refs. Den
+        # Symref erst danach setzen, damit wirklich der Fetch geprüft wird.
+        git(self.repo, "symbolic-ref", f"refs/remotes/origin/{branch}",
+            "refs/heads/victim")
+        self.assertEqual(git_output(self.repo, "rev-parse", "refs/heads/victim"), before)
         config = gmf_module.read_remote_configs(
             self.repo, DEFAULT_CONFIG)["origin"]
 
