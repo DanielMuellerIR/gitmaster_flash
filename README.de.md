@@ -181,6 +181,9 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | I | Repo-, Remote- und Branch-Details; dort `T` Remote prüfen, `X` Remote entfernen (nicht rückgängig machbar) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | R | jedes sichere Remote im Hintergrund fetchen; die Liste bleibt bedienbar |
+| N | ausgewähltes Repo nur lokal neu lesen |
+| U | ein Remote des ausgewählten Repos abrufen |
+| X | laufenden Hintergrund-Fetch stoppen; fertige Ergebnisse behalten |
 | Q | beenden |
 
 Die Stash-Vorschau enthält auch unversionierte und binäre Dateien; ein
@@ -208,9 +211,26 @@ und wird verworfen. Seine Remote-Zahlen können dann bis zum nächsten `R`
 hinterherhinken — der umgekehrte Fehler wäre schlimmer, nämlich einen fertigen
 Commit wieder als offene Änderung zu zeigen.
 
-Ein Beenden während des Fetch lässt nichts zurück. gmf beendet die Prozessgruppe
-jedes noch laufenden Git-Aufrufs und startet keine neuen mehr; weder Git noch das
-von ihm gestartete ssh läuft weiter, wenn die Oberfläche weg ist.
+`X` stoppt den Hintergrundscan und behält bereits eingetragene Ergebnisse.
+Nur seine eigenen Git-Prozessgruppen werden beendet; unabhängige Aktionen
+bleiben unberührt. Beenden der Oberfläche stoppt ebenfalls den laufenden Scan.
+`N` liest das ausgewählte Repo lokal neu ein, auch während eines Scans. `U`
+wählt genau ein Remote zum Fetch aus; ein laufender Gesamtscan muss dafür erst
+mit `X` beendet werden. Branch, Index und Arbeitsverzeichnis bleiben beim Fetch
+unverändert.
+
+Die Zeile über den Tasten zeigt das Alter der lokalen Messung und des letzten
+**belegt erfolgreichen Fetches je Remote für den aktuellen Branch**. `I` zeigt
+die ISO-8601-Zeitpunkte. Nach Programmstart ist das Fetch-Alter unbekannt; gmf
+rät es nicht aus Git-Dateizeiten. Ein lokaler Refresh erneuert nur die lokale
+Messung. Ein fehlgeschlagener Fetch behält die letzte Erfolgszeit samt Fehler.
+Branch- oder Remote-Konfigurationswechsel verwerfen übernommene Fetch-Zeiten.
+Diese Angaben ersetzen keine unmittelbare Sicherheitsprüfung vor Übertragungen.
+JSON enthält `measured_at` je Repo und `fetched_at` je Remote; ein leerer String
+bedeutet unbekannt. Zeitunterschiede allein zählen im Rechnervergleich nicht
+als Drift. Nicht interaktiv: `gmf --json --fetch-remote origin /path/to/repo`
+ruft nur dieses Remote ab; bei einer Scan-Wurzel gilt die Auswahl je Repo,
+fehlende Remotes werden ausdrücklich als Fehler gemeldet.
 
 ## Repo-Liste filtern (`/`)
 
@@ -238,7 +258,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.25.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.26.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter

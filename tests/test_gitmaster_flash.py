@@ -7757,6 +7757,7 @@ class CompactViewTests(unittest.TestCase):
             def getmaxyx(self): return (height, width)
             def addstr(self, y, x, text, *rest): self.lines.append((y, x, text))
             def refresh(self): pass
+            def timeout(self, *_args): pass
             def getch(self): return next(self.keys)
 
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
@@ -9372,14 +9373,13 @@ class TuiBackgroundFetchTests(unittest.TestCase):
             ui.run()
         self.assertTrue(any("wichtig" in text for _, text in ui.scr.drawn))
 
-    def test_without_a_scan_the_wait_stays_unbounded(self):
-        # Nur waehrend eines Scans darf getch() begrenzt warten: Die
-        # Unteransichten lesen mit get_wch(), das bei Zeitablauf wirft.
+    def test_without_a_scan_measurement_age_is_redrawn_and_timeout_is_reset(self):
         ui = self._ui(["alpha"])
         ui.scr.timeout = mock.Mock()
         ui.scr.keys = iter([ord("x")])
         ui._wait_for_key()
-        ui.scr.timeout.assert_not_called()
+        self.assertEqual([call.args[0] for call in ui.scr.timeout.call_args_list],
+                         [gmf_module.MEASUREMENT_POLL_MS, -1])
 
     def test_during_a_scan_the_wait_is_bounded_and_reset_right_after(self):
         ui = self._ui(["alpha"])
@@ -9635,6 +9635,8 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
 
             def getch(self):
                 return next(self.keys)
+
+            def timeout(self, *_args): pass
 
         ui = TUI(Screen(), Path("/tmp"), DEFAULT_CONFIG, None)
         with mock.patch("gitmaster_flash.curses.curs_set"), \

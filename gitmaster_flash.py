@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import curses
+import datetime
 import hashlib
 import json
 import math
@@ -71,7 +72,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -298,12 +299,10 @@ TR = {
                   "I info · H help"),
            "de": (" ↑/↓/←/→ wählen · ⏎ cd & Exit · / Filter · M Ansicht · Tab Log · "
                   "I Info · H Hilfe")},
-    "f2": {"en": " {apps} · A changes · C commit · L pull · S stash view",
-           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stash-Blick"},
-    "f3": {"en": (" R fetch in background · P sync push · G GitHub push · , settings"
-                  " · Q quit"),
-           "de": (" R Fetch im Hintergrund · P Sync-Push · G GitHub-Push ·"
-                  " , Einstellungen · Q Beenden")},
+    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · N reread",
+           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · N neu lesen"},
+    "f3": {"en": " R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings · Q quit",
+           "de": " R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einstellungen · Q Ende"},
     "pull_choose": {"en": "Pull source · {rel} · local branch {b}",
                     "de": "Pull-Quelle · {rel} · lokaler Branch {b}"},
     "pull_all": {"en": "Fetch all remotes, then choose one pull source",
@@ -342,6 +341,22 @@ TR = {
                   "de": "Fetch fertig — {n} Repos neu eingelesen."},
     "scan_failed": {"en": "Background fetch stopped: {e}",
                     "de": "Hintergrund-Fetch abgebrochen: {e}"},
+    "scan_stopped": {"en": "Background fetch stopped; completed results retained.",
+                     "de": "Hintergrund-Fetch gestoppt; fertige Ergebnisse erhalten."},
+    "scan_not_running": {"en": "No background fetch is running.",
+                         "de": "Kein Hintergrund-Fetch läuft."},
+    "local_refreshed": {"en": "{rel}: local state read again; no fetch.",
+                        "de": "{rel}: lokalen Stand neu gelesen; kein Fetch."},
+    "fetch_one_title": {"en": "Fetch remote · {rel} · {b}",
+                        "de": "Remote abrufen · {rel} · {b}"},
+    "fetch_one_done": {"en": "{r}: fetched; local state read again.",
+                       "de": "{r}: abgerufen; lokalen Stand neu gelesen."},
+    "age_unknown": {"en": "unknown", "de": "unbekannt"},
+    "age_clock": {"en": "clock changed", "de": "Uhr geändert"},
+    "measurement_summary": {"en": "Local: {local} · Successful fetch: {remote} · I details",
+                            "de": "Lokal: {local} · Erfolgreicher Fetch: {remote} · I Details"},
+    "info_measured": {"en": "Local measurement", "de": "Lokale Messung"},
+    "info_fetched": {"en": "Successful fetch", "de": "Erfolgreicher Fetch"},
     # Einstellungen (Taste ,)
     "set_title": {"en": "Settings · {p}", "de": "Einstellungen · {p}"},
     "set_footer": {"en": " ↑/↓ select · ⏎ change · Q/Esc back",
@@ -1121,6 +1136,7 @@ class RepoStatus:
     branches: list = field(default_factory=list)  # BranchInfo; vollständiges lokales Inventar
     branches_scanned: bool = False
     branches_error: str = ""
+    measured_at: str = ""
 
     @property
     def branch_review_count(self) -> int:
@@ -1181,6 +1197,7 @@ class RemoteStatus:
     fetch_outcome: str = ""
     fetch_error_long: str = ""
     fetch_error_detail: str = ""
+    fetched_at: str = ""
 
     @property
     def transfer_safe(self) -> bool:
@@ -3177,6 +3194,32 @@ _LIVE_PROCESSES: set = set()
 # sieht. Sie serialisiert nur fork/exec (Bruchteile einer Millisekunde), nicht
 # das Warten auf Git.
 _LIVE_LOCK = threading.Lock()
+_GIT_CONTEXT = threading.local()
+
+
+class GitCallScope:
+    """Abbruchgrenze eines Scans; unabhängige Vordergrundaktionen bleiben aktiv."""
+
+    def __init__(self):
+        self.cancelled = threading.Event()
+        self.processes: set = set()
+
+    def cancel(self) -> None:
+        with _LIVE_LOCK:
+            self.cancelled.set()
+            live = list(self.processes)
+        for proc in live:
+            _kill_process_group(proc)
+
+    def call(self, function, *args):
+        previous = getattr(_GIT_CONTEXT, "scope", None)
+        _GIT_CONTEXT.scope = self
+        try:
+            if self.cancelled.is_set():
+                raise GitCancelled("scan cancelled")
+            return function(*args)
+        finally:
+            _GIT_CONTEXT.scope = previous
 
 
 def cancel_git_calls() -> None:
@@ -3246,11 +3289,12 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
     ssh kommt nicht an unser /dev/tty, um dort nach einer Passphrase zu fragen;
     der ssh-agent funktioniert davon unberührt weiter.
     """
+    scope = getattr(_GIT_CONTEXT, "scope", None)
     with _LIVE_LOCK:
         # Nach einem Abbruch gar nicht erst starten: Ein Fetch, der jetzt noch
         # losliefe, haenge bis zu seinem eigenen Timeout und hielte das Beenden
         # der Oberflaeche genauso lange auf.
-        if _CANCEL.is_set():
+        if _CANCEL.is_set() or (scope is not None and scope.cancelled.is_set()):
             raise GitCancelled(" ".join(str(part) for part in cmd[:3]))
         proc = subprocess.Popen(
             cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -3259,6 +3303,8 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
             start_new_session=True,
         )
         _LIVE_PROCESSES.add(proc)
+        if scope is not None:
+            scope.processes.add(proc)
     with proc:
         try:
             out, err = proc.communicate(timeout=timeout)
@@ -3279,6 +3325,8 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
         finally:
             with _LIVE_LOCK:
                 _LIVE_PROCESSES.discard(proc)
+                if scope is not None:
+                    scope.processes.discard(proc)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -3774,6 +3822,38 @@ def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
     return int(values[0]), int(values[1])
 
 
+def remote_status_from_config(remote: RemoteConfig, sync_remote: str | None,
+                              branch: str) -> RemoteStatus:
+    name = remote.name
+    targets = remote.fetch_targets + remote.push_targets
+    public_classes = {target.is_github for target in targets}
+    fetch_fingerprints = endpoint_fingerprints(
+        remote.fetch_urls, remote.fetch_targets)
+    state = RemoteStatus(
+        name=name,
+        public=True in public_classes,
+        mixed_public=len(public_classes) > 1,
+        is_sync=name == sync_remote,
+        fetch_fingerprint=(fetch_fingerprints[0]
+                           if len(fetch_fingerprints) == 1 else ""),
+        fetch_fingerprints=fetch_fingerprints,
+        push_fingerprints=endpoint_fingerprints(
+            remote.push_urls, remote.push_targets),
+        target_mismatch=not remote.transfer_safe,
+        multiple_pushurls=len(remote.push_targets) != 1,
+        fetch_refspecs_safe=fetch_refspecs_safe(remote),
+        fetch_refspec_fingerprint=hashlib.sha256("\0".join(
+            value for key, value in remote.settings
+            if key.lower() == "fetch").encode(
+                "utf-8", "surrogateescape")).hexdigest()[:20],
+        branch_mapping_safe=(branch not in ("?", "(detached)")
+                             and fetch_maps_branch_exactly(remote, branch)),
+        fetch_url_safe=remote_fetch_url_safe(remote),
+        push_url_safe=remote_push_url_safe(remote),
+    )
+    return state
+
+
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
                             configs: dict[str, RemoteConfig] | None = None,
@@ -3789,37 +3869,10 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
     configs = configs if configs is not None else read_remote_configs(repo, cfg)
     failures = fetch_failures or {}
     for name, remote in configs.items():
-        targets = remote.fetch_targets + remote.push_targets
-        public_classes = {target.is_github for target in targets}
+        state = remote_status_from_config(remote, sync_remote, branch)
         failure = failures.get(name, ("", "", ""))
-        fetch_fingerprints = endpoint_fingerprints(
-            remote.fetch_urls, remote.fetch_targets)
-        state = RemoteStatus(
-            name=name,
-            public=True in public_classes,
-            mixed_public=len(public_classes) > 1,
-            is_sync=name == sync_remote,
-            fetch_fingerprint=(fetch_fingerprints[0]
-                               if len(fetch_fingerprints) == 1 else ""),
-            fetch_fingerprints=fetch_fingerprints,
-            push_fingerprints=endpoint_fingerprints(
-                remote.push_urls, remote.push_targets),
-            target_mismatch=not remote.transfer_safe,
-            multiple_pushurls=len(remote.push_targets) != 1,
-            fetch_refspecs_safe=fetch_refspecs_safe(remote),
-            fetch_refspec_fingerprint=hashlib.sha256("\0".join(
-                value for key, value in remote.settings
-                if key.lower() == "fetch").encode(
-                    "utf-8", "surrogateescape")).hexdigest()[:20],
-            branch_mapping_safe=(branch not in ("?", "(detached)")
-                                 and fetch_maps_branch_exactly(remote, branch)),
-            fetch_url_safe=remote_fetch_url_safe(remote),
-            push_url_safe=remote_push_url_safe(remote),
-            fetch_failed=name in failures,
-            fetch_outcome=failure[0],
-            fetch_error_long=failure[1],
-            fetch_error_detail=failure[2],
-        )
+        state.fetch_failed = name in failures
+        state.fetch_outcome, state.fetch_error_long, state.fetch_error_detail = failure
         if branch not in ("?", "(detached)"):
             ref = f"refs/remotes/{name}/{branch}"
             r = run_git(repo, "show-ref", "--verify", "--quiet", ref,
@@ -4241,6 +4294,7 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     head_rows: list[tuple[str, str]] = [
         (t("info_path"), path),
         (t("info_branch"), branch),
+        (t("info_measured"), st.measured_at or t("age_unknown")),
     ]
 
     # Dieselbe Historie wie die Zahl direkt darunter: Ein repo-lokales
@@ -4355,6 +4409,10 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             rows.extend((t("info_fetch_url"), url) for url in fetch_shown)
             rows.extend((t("info_push_url"), url) for url in push_shown)
         rows.extend((t("info_web_url"), url) for url in web_urls)
+        known = (state is not None and remote_approval_signature(state)
+                 == remote_approval_signature(remote_status_from_config(remote, st.remote, st.branch)))
+        rows.append((t("info_fetched"),
+                     state.fetched_at if known and state.fetched_at else t("age_unknown")))
         if state and st.branch not in ("?", "(detached)"):
             value = (t("info_delta", a=state.ahead, b=state.behind)
                      if state.branch_exists else t("info_branch_missing_value"))
@@ -4720,7 +4778,45 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     return display_up, int(ahead), int(behind)
 
 
-def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> RepoStatus:
+def utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def valid_timestamp(value) -> bool:
+    if value == "":
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.datetime.fromisoformat(value).utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def measurement_age(value: str) -> str:
+    if not value or not valid_timestamp(value):
+        return t("age_unknown")
+    seconds = (datetime.datetime.now(datetime.timezone.utc)
+               - datetime.datetime.fromisoformat(value)).total_seconds()
+    if seconds < 0:
+        return t("age_clock")
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def measurement_summary(st: RepoStatus) -> str:
+    remotes = ", ".join(f"{r.name} {measurement_age(r.fetched_at)}" for r in st.remotes)
+    return t("measurement_summary", local=measurement_age(st.measured_at),
+             remote=remotes or t("none_label"))
+
+
+def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
+                   fetch_remote: str | None = None) -> RepoStatus:
     """Kompletten Zustand eines Repos einsammeln (läuft parallel in Threads)."""
     rel = str(repo.relative_to(root)) if repo != root else repo.name
     # macOS liefert Dateinamen je nach Herkunft in NFD ("ö" = "o" + kombinierender
@@ -4765,6 +4861,10 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         configs = read_remote_configs(repo, cfg)
         st.remote = detect_sync_remote(repo, cfg, configs)
         fetch_failures: dict[str, tuple[str, str, str]] = {}
+        fetch_times: dict[str, str] = {}
+        if fetch and fetch_remote is not None and fetch_remote not in configs:
+            fetch_failures[fetch_remote] = (
+                "changed", remote_check_message(fetch_remote, "changed", 0, "", t_), "")
         # Ohne ausgecheckten Branch gibt es keinen Tracking-Ref zu holen. Der
         # Fetch entfaellt dann ganz, statt jedes Remote als gescheitert zu
         # melden: Das ueberschriebe den ehrlichen Zustand "detached" mit einem
@@ -4775,6 +4875,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             # Fetch verändert weder Branch noch Working Tree. Als bewusst
             # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
             for name, remote in configs.items():
+                if fetch_remote is not None and name != fetch_remote:
+                    continue
                 blocked = fetch_remote_block_reason(
                     repo, remote, st.branch, t_)
                 if blocked is not None:
@@ -4802,6 +4904,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                     outcome, detail = "outcome_unknown", ""
                 else:
                     if fetched.returncode == 0:
+                        fetch_times[name] = utc_now()
                         continue
                     outcome = classify_remote_check(
                         fetched,
@@ -4822,6 +4925,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
             configs = read_remote_configs(repo, cfg)
             for name in set(fetched_configs) | set(configs):
                 if fetched_configs.get(name) != configs.get(name):
+                    fetch_times.pop(name, None)
                     fetch_failures[name] = (
                         "changed",
                         remote_check_message(
@@ -4832,6 +4936,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         st.remotes = collect_remote_statuses(
             repo, st.branch, st.remote, cfg, configs,
             fetch_failures=fetch_failures)
+        for remote in st.remotes:
+            remote.fetched_at = fetch_times.get(remote.name, "")
         try:
             st.branches = read_branch_inventory(repo, cfg)
             current = next((b for b in st.branches if b.is_head), None)
@@ -4879,7 +4985,34 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
     except Exception as exc:  # Ein kaputtes Repo darf die Übersicht nicht killen.
         st.error = str(exc)
         st.remote_state = "error"
+    finally:
+        st.measured_at = utc_now()
     return st
+
+
+def remote_approval_signature(remote: RemoteStatus | None) -> tuple | None:
+    if remote is None:
+        return None
+    return (
+        tuple(remote.fetch_fingerprints), tuple(remote.push_fingerprints),
+        remote.public, remote.mixed_public, remote.target_mismatch,
+        remote.multiple_pushurls, remote.fetch_refspecs_safe,
+        remote.fetch_refspec_fingerprint, remote.branch_mapping_safe,
+        remote.fetch_url_safe, remote.push_url_safe,
+    )
+
+
+def carry_fetch_times(old: RepoStatus, new: RepoStatus,
+                      refetched: str | None = None) -> None:
+    previous = {remote.name: remote for remote in old.remotes}
+    for remote in new.remotes:
+        before = previous.get(remote.name)
+        if (old.branch == new.branch and before is not None
+                and remote_approval_signature(before) == remote_approval_signature(remote)):
+            if remote.name == refetched:
+                remote.fetched_at = utc_now()
+            elif not remote.fetched_at:
+                remote.fetched_at = before.fetched_at
 
 
 def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
@@ -4899,43 +5032,21 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
     Indexfehler wird vom frischen Lauf entweder erneut festgestellt oder er ist
     repariert.
     """
+    carry_fetch_times(old, new, refetched)
     failed = {remote.name: remote for remote in old.remotes
               if remote.fetch_failed and remote.name != refetched}
     if not failed:
         return
     for remote in new.remotes:
         previous = failed.get(remote.name)
-        same_endpoint = previous and (
-            tuple(previous.fetch_fingerprints),
-            tuple(previous.push_fingerprints),
-            previous.public,
-            previous.mixed_public,
-            previous.target_mismatch,
-            previous.multiple_pushurls,
-            previous.fetch_refspecs_safe,
-            previous.fetch_refspec_fingerprint,
-            previous.branch_mapping_safe,
-            previous.fetch_url_safe,
-            previous.push_url_safe,
-        ) == (
-            tuple(remote.fetch_fingerprints),
-            tuple(remote.push_fingerprints),
-            remote.public,
-            remote.mixed_public,
-            remote.target_mismatch,
-            remote.multiple_pushurls,
-            remote.fetch_refspecs_safe,
-            remote.fetch_refspec_fingerprint,
-            remote.branch_mapping_safe,
-            remote.fetch_url_safe,
-            remote.push_url_safe,
-        )
+        same_endpoint = (previous and old.branch == new.branch
+                         and remote_approval_signature(previous) == remote_approval_signature(remote))
         if same_endpoint:
             remote.fetch_failed = True
             remote.fetch_outcome = previous.fetch_outcome
             remote.fetch_error_long = previous.fetch_error_long
             remote.fetch_error_detail = previous.fetch_error_detail
-    if not new.error:
+    if not new.error or new.fetch_error:
         # Neu aus den tatsächlich verbleibenden Remotes zusammensetzen. Der alte
         # Sammeltext könnte noch ein inzwischen erfolgreich refetchtes Remote
         # nennen und wäre dann ebenso veraltet wie sein rotes Badge.
@@ -4943,13 +5054,14 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
 
 
 def collect_all(root: Path, cfg: dict, fetch: bool = False,
-                progress=None) -> list[RepoStatus]:
+                progress=None, fetch_remote: str | None = None) -> list[RepoStatus]:
     """Alle Repos parallel einsammeln; optional Fortschritts-Callback (done, total)."""
     repos = find_repos(root, cfg["skip_dirs"])
     results: list[RepoStatus] = []
     workers = FETCH_SCAN_WORKERS if fetch else LOCAL_SCAN_WORKERS
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(collect_status, r, root, cfg, fetch) for r in repos]
+        futures = [pool.submit(collect_status, r, root, cfg, fetch, fetch_remote)
+                   for r in repos]
         for done, fut in enumerate(concurrent.futures.as_completed(futures), 1):
             results.append(fut.result())
             if progress:
@@ -4964,9 +5076,9 @@ def sort_statuses(statuses: list) -> list:
 
 # Wie lange die Oberflaeche waehrend eines Hintergrund-Scans hoechstens auf eine
 # Taste wartet, bevor sie neu zeichnet. 200 ms sind fluessig genug fuer eine
-# mitlaufende Anzeige und selten genug, um im Leerlauf nichts zu kosten — im
-# Leerlauf wartet getch() ohnehin unbegrenzt.
+# mitlaufende Anzeige. Ohne Scan genügt ein seltener Takt für das Messalter.
 BACKGROUND_POLL_MS = 200
+MEASUREMENT_POLL_MS = 30000
 
 
 class BackgroundScan:
@@ -4998,6 +5110,7 @@ class BackgroundScan:
         self.queue: queue.Queue = queue.Queue()
         self.total = 0
         self.done = 0
+        self.scope = GitCallScope()
         self._thread = threading.Thread(target=self._work, daemon=True)
 
     def start(self) -> None:
@@ -5010,10 +5123,12 @@ class BackgroundScan:
             results = []
             with concurrent.futures.ThreadPoolExecutor(
                     max_workers=FETCH_SCAN_WORKERS) as pool:
-                futures = [pool.submit(collect_status, repo, self.root, self.cfg,
-                                       True) for repo in repos]
+                futures = [pool.submit(self.scope.call, collect_status, repo,
+                                       self.root, self.cfg, True) for repo in repos]
                 for fut in concurrent.futures.as_completed(futures):
                     st = fut.result()
+                    if self.scope.cancelled.is_set():
+                        raise GitCancelled("scan cancelled")
                     results.append(st)
                     self.queue.put(("one", st))
             self.queue.put(("done", sort_statuses(results)))
@@ -5026,12 +5141,12 @@ class BackgroundScan:
     def stop(self) -> None:
         """Abbrechen und kurz auf das Auslaufen der Arbeiter warten.
 
-        `cancel_git_calls()` toetet die laufenden Git-Prozessgruppen und
+        Der eigene Scope beendet nur die Git-Prozessgruppen dieses Scans und
         verhindert neue; die Arbeiter laufen danach binnen Sekundenbruchteilen
         aus. Das Warten ist begrenzt — ein haengender Thread darf das Beenden der
         Oberflaeche nicht aufhalten, und die Prozesse sind da bereits tot.
         """
-        cancel_git_calls()
+        self.scope.cancel()
         if self._thread.is_alive():
             self._thread.join(timeout=5)
 
@@ -5060,6 +5175,7 @@ def status_dict(st: RepoStatus) -> dict:
         "path": terminal_text(st.path), "rel": terminal_text(st.rel),
         "branch": json_text(st.branch),
         "head_oid": st.head_oid, "operation": st.operation,
+        "measured_at": st.measured_at,
         "remote": json_text(st.remote), "remote_state": st.remote_state,
         "ahead": st.ahead, "behind": st.behind,
         "upstream": json_text(st.upstream),
@@ -5082,6 +5198,7 @@ def status_dict(st: RepoStatus) -> dict:
              # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
              # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
              "fetch_failed": r.fetch_failed,
+             "fetched_at": r.fetched_at,
              "fetch_outcome": r.fetch_outcome,
              "fetch_error_long": json_text(r.fetch_error_long),
              "fetch_error_detail": json_text(r.fetch_error_detail)}
@@ -5169,6 +5286,8 @@ def _valid_remote_payload(payload) -> bool:
         if "operation" in repo and repo["operation"] not in (
                 "", *(operation for _, operation in OPERATION_MARKERS)):
             return False
+        if not valid_timestamp(repo.get("measured_at", "")):
+            return False
         if "branches_error" in repo and not isinstance(repo["branches_error"], str):
             return False
         if "branch_coverage_basis" in repo and repo["branch_coverage_basis"] != BRANCH_COVERAGE_BASIS:
@@ -5206,6 +5325,8 @@ def _valid_remote_payload(payload) -> bool:
             return False
         for remote in remotes:
             if not isinstance(remote, dict) or not isinstance(remote.get("name"), str):
+                return False
+            if not valid_timestamp(remote.get("fetched_at", "")):
                 return False
             for field_name in ("ahead", "behind"):
                 if field_name in remote and type(remote[field_name]) is not int:
@@ -6070,8 +6191,8 @@ class TUI:
         # ersetzte dann den Zustand des einen durch den des anderen
         # (Review-Fund 2026-08-25).
         self.locally_refreshed: set[Path] = set()
-        # curses wartet standardmaessig unbegrenzt auf eine Taste. Nur waehrend
-        # eines Hintergrund-Scans wird daraus ein begrenztes Warten.
+        # Die Hauptliste wacht für Scanfortschritt und Messalter regelmäßig auf.
+        # Unteransichten bekommen danach wieder unbegrenzte Eingabewartezeit.
 
     # -- Datenbeschaffung ---------------------------------------------------
 
@@ -6152,6 +6273,7 @@ class TUI:
         for bucket in (self.all_statuses, self.statuses):
             for i, entry in enumerate(bucket):
                 if entry.path == new.path:
+                    carry_fetch_times(entry, new)
                     bucket[i] = new
                     break
 
@@ -6163,6 +6285,10 @@ class TUI:
         # die Liste wieder als offene Aenderung zeigt.
         keep = {st.path: st for st in self.all_statuses
                 if st.path in self.locally_refreshed}
+        previous = {st.path: st for st in self.all_statuses}
+        for st in results:
+            if st.path in previous:
+                carry_fetch_times(previous[st.path], st)
         merged = [keep.get(st.path, st) for st in results]
         self.all_statuses = sort_statuses(merged)
         self.apply_filter(keep_selection=True)
@@ -6194,15 +6320,25 @@ class TUI:
         """Wie viele Repos der Filter ausblendet, die Aufmerksamkeit bräuchten."""
         return hidden_dirty(self.all_statuses, self.statuses)
 
-    def refresh_one(self, st: RepoStatus, refetched: str | None = None):
+    def refresh_one(self, st: RepoStatus, refetched: str | None = None,
+                    fetch_remote: str | None = None):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten.
 
         `refetched` nennt ein Remote, dessen Fetch soeben nachweislich gelang —
         dessen alter Fehlerzustand wird dann nicht mitgeschleppt (sonst bliebe
         ein längst reparierter Fetch-Fehler bis zum kompletten Reload rot).
         """
-        new = collect_status(st.path, self.root, self.cfg)
-        carry_fetch_failure(st, new, refetched)
+        if fetch_remote is None:
+            new = collect_status(st.path, self.root, self.cfg)
+            carry_fetch_failure(st, new, refetched)
+        else:
+            new = collect_status(st.path, self.root, self.cfg, True, fetch_remote)
+            carry_fetch_times(st, new)
+            # Nur das gewählte Remote wurde neu geprüft. Fehler der anderen
+            # bleiben erhalten; ein neuer Fehler des gewählten hat Vorrang.
+            untouched = RepoStatus(st.path, st.rel, branch=st.branch,
+                                   remotes=[r for r in st.remotes if r.name != fetch_remote])
+            carry_fetch_failure(untouched, new)
         # Ab jetzt ist der lokale Stand dieses Repos juenger als alles, was ein
         # laufender Hintergrund-Fetch dazu noch liefern kann.
         if self.scan:
@@ -6354,7 +6490,8 @@ class TUI:
         if log_h:
             self.draw_log(1 + body_h, min(log_h, available - body_h), w)
 
-        safe_addstr(self.scr, h - 4, 1, self.message, curses.color_pair(C_YELLOW))
+        note = self.message or (measurement_summary(self.current()) if self.current() else "")
+        safe_addstr(self.scr, h - 4, 1, note, curses.color_pair(C_YELLOW))
         # Footer dreizeilig, damit auch in schmalen Fenstern nichts abgeschnitten wird.
         # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
         app_hints = " · ".join(f"{key.upper()} {app_label(app)}"
@@ -6985,15 +7122,7 @@ class TUI:
     @staticmethod
     def _remote_approval_signature(remote: RemoteStatus | None) -> tuple | None:
         """Die im Listen-Screen sichtbare Remote- und Sicherheitsidentitaet."""
-        if remote is None:
-            return None
-        return (
-            tuple(remote.fetch_fingerprints), tuple(remote.push_fingerprints),
-            remote.public, remote.mixed_public, remote.target_mismatch,
-            remote.multiple_pushurls, remote.fetch_refspecs_safe,
-            remote.fetch_refspec_fingerprint, remote.branch_mapping_safe,
-            remote.fetch_url_safe, remote.push_url_safe,
-        )
+        return remote_approval_signature(remote)
 
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
         config = read_remote_config_or_none(st.path, self.cfg, remote)
@@ -7182,7 +7311,8 @@ class TUI:
         else:
             self.message = t("push_outcome_unknown", code=r.returncode)
 
-    def choose_pull_remote(self, st: RepoStatus, allow_all: bool = True) -> str | None:
+    def choose_pull_remote(self, st: RepoStatus, allow_all: bool = True,
+                           fetch_only: bool = False) -> str | None:
         options = ([(None, t("pull_all"))] if allow_all else []) + [
             (remote.name, remote.badge()) for remote in st.remotes]
         if not st.remotes:
@@ -7193,7 +7323,8 @@ class TUI:
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0, " " + t("pull_choose", rel=st.rel, b=st.branch),
+            safe_addstr(self.scr, 0, 0, " " + t("fetch_one_title" if fetch_only else "pull_choose",
+                                               rel=st.rel, b=st.branch),
                         curses.A_BOLD)
             height = max(1, h - 3)
             offset = scroll_window(selected, offset, height)
@@ -7212,6 +7343,37 @@ class TUI:
             elif ch in (27, ord("q"), ord("Q")):
                 self.message = t("cancelled")
                 return None
+
+    def action_refresh_local(self):
+        st = self.current()
+        if st:
+            self.refresh_one(st)
+            self.message = t("local_refreshed", rel=st.rel)
+
+    def action_fetch_one(self):
+        st = self.current()
+        if not st:
+            return
+        if self.scan:
+            self.message = t("scan_already_running")
+            return
+        st = self.refresh_one(st)
+        remote = self.choose_pull_remote(st, allow_all=False, fetch_only=True)
+        if remote is not None:
+            if st.branch in ("?", "(detached)"):
+                self.message = remote_check_message(remote, "detached", 0, "", 0)
+                return
+            self.show_busy(t("fetch_busy", r=remote))
+            fresh = self.refresh_one(st, fetch_remote=remote)
+            self.message = fresh.error_long or fresh.error or t("fetch_one_done", r=remote)
+
+    def action_stop_scan(self):
+        if self.scan:
+            self.drain_background_scan()
+            self.stop_background_scan()
+            self.message = t("scan_stopped")
+        else:
+            self.message = t("scan_not_running")
 
     def action_pull(self):
         st = self.current()
@@ -7946,6 +8108,12 @@ class TUI:
             self.action_commit_wizard()
         elif key == "R":
             self.start_background_scan()
+        elif key == "N":
+            self.action_refresh_local()
+        elif key == "U":
+            self.action_fetch_one()
+        elif key == "X":
+            self.action_stop_scan()
         elif key == "L":
             self.action_pull()
         elif key == "P":
@@ -7983,16 +8151,14 @@ class TUI:
             self.stop_background_scan()
 
     def _wait_for_key(self) -> int:
-        """Auf eine Taste warten — waehrend eines Hintergrund-Scans nur begrenzt.
+        """Auf Eingabe warten; Scanfortschritt und Messalter regelmäßig nachzeichnen.
 
         Danach sofort wieder unbegrenzt: Die Unteransichten lesen mit
         `get_wch()`, und das wirft bei abgelaufenem Zeitgeber eine
         `curses.error`, statt einfach zu warten. Das begrenzte Warten bleibt
         deshalb strikt auf diese eine Stelle beschraenkt.
         """
-        if not self.scan:
-            return self.scr.getch()
-        self.scr.timeout(BACKGROUND_POLL_MS)
+        self.scr.timeout(BACKGROUND_POLL_MS if self.scan else MEASUREMENT_POLL_MS)
         try:
             return self.scr.getch()
         finally:
@@ -8004,7 +8170,7 @@ class TUI:
             self.draw()
             ch = self._wait_for_key()
             if ch == -1:
-                # Nur der Zeitgeber des Hintergrund-Scans. Keine Eingabe heisst
+                # Nur der Zeitgeber für Scanfortschritt oder Messalter. Keine Eingabe heisst
                 # auch: die Meldung stehen lassen, sonst waere sie nach 200 ms weg.
                 continue
             self.message = ""
@@ -8462,6 +8628,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="non-interactive JSON output (machine-readable)")
     ap.add_argument("--fetch", action="store_true",
                     help="`git fetch` each repo before output (with --list/--json)")
+    ap.add_argument("--fetch-remote", metavar="NAME",
+                    help="with --list/--json, fetch only this remote in each scanned repo; "
+                         "implies --fetch. Pass a repo as root to refresh one repo.")
     ap.add_argument("--diff", metavar="HOST[:PATH]",
                     help="compare this machine's repos with HOST over ssh and print "
                          "only the differences. Branches, index, and working trees stay "
@@ -8482,6 +8651,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="(internal, for the gmf wrapper) write the ⏎ target path here")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
+    if args.fetch_remote is not None:
+        if args.diff or (sys.stdout.isatty() and not (args.list or args.json)):
+            ap.error("--fetch-remote requires non-interactive --list/--json output")
+        if not args.fetch_remote or args.fetch_remote.startswith("-"):
+            ap.error("--fetch-remote requires a remote name")
+        args.fetch = True
 
     global UI_LANG
 
@@ -8525,7 +8700,8 @@ def main(argv: list[str] | None = None) -> int:
                         query=query)
 
     if args.list or args.json or not sys.stdout.isatty():
-        all_statuses = collect_all(root, cfg, fetch=args.fetch)
+        all_statuses = collect_all(root, cfg, fetch=args.fetch,
+                                   fetch_remote=args.fetch_remote)
         statuses = filter_statuses(all_statuses, query)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und

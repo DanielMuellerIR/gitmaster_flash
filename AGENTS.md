@@ -769,3 +769,5 @@ liegengebliebene Arbeit aus.
 - (die Frage zu `http.proxy` und `http.sslVerify` ist am 2026-09-03
   entschieden — beide werden wie `core.gitProxy` abgelehnt, sobald die Config
   des Repos sie setzt, siehe Regel oben)
+
+- Messzeiten: `measured_at` bezeichnet die lokale Messung, `fetched_at` nur den belegten erfolgreichen Fetch dieses Remotes für den aktuellen Branch. Keine Zeit aus `FETCH_HEAD` oder Dateizeiten erfinden. `carry_fetch_times()` bindet übernommene Zeiten an Branch und `remote_approval_signature()`. Scan-Abbruch läuft ausschließlich über den eigenen `GitCallScope`; der globale Abbruch bleibt dem gesamten Prozess vorbehalten.

@@ -169,6 +169,9 @@ memorize. Case does not matter — `f` works like `F`.
 | I | repository, remote and branch details; there: `T` tests a remote, `X` removes one (cannot be undone) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | R | fetch every safe remote in the background; the list stays usable |
+| N | reread the selected repo locally, without fetching |
+| U | fetch one remote of the selected repo |
+| X | stop the background fetch; retain completed results |
 | Q | quit |
 
 The stash preview includes untracked and binary files; a failed or unexpectedly
@@ -194,9 +197,24 @@ state you are looking at: the scan's result for it is older and is dropped. Its
 remote counters can then lag until the next `R` — the opposite mistake would be
 worse, showing a finished commit as an open change again.
 
-Quitting during a fetch does not leave anything behind. gmf kills the process
-group of every git call still running and refuses to start new ones, so neither
-git nor the ssh it started keeps going once the interface is gone.
+`X` stops the background scan and keeps results already entered. It ends only
+that scan's Git process groups; independent actions remain untouched. Quitting
+also stops the active scan. `N` rereads the selected repo locally, even during
+a scan. `U` chooses exactly one remote to fetch; first stop an active full scan
+with `X`. Fetch leaves the branch, index and working tree unchanged.
+
+The line above the keys shows the age of the local measurement and the last
+**proven successful fetch of each remote for the current branch**. `I` shows
+ISO-8601 timestamps. Fetch age starts unknown on launch; gmf does not guess it
+from Git file times. A local refresh renews only the local measurement. A failed
+fetch keeps the last successful time alongside the failure. Branch or remote
+configuration changes discard inherited fetch times. These measurements never
+replace immediate safety checks before transfers.
+JSON includes `measured_at` per repo and `fetched_at` per remote; an empty string
+means unknown. Time differences alone do not count as machine drift.
+Non-interactively, `gmf --json --fetch-remote origin /path/to/repo` fetches only
+that remote; with a scan root the choice applies to each repo, and missing
+remotes are explicitly reported as errors.
 
 ## Filtering the repo list (`/`)
 
@@ -221,7 +239,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.25.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.26.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
