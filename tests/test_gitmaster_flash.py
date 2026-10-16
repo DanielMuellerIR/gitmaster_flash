@@ -6719,6 +6719,7 @@ class RemoteAndCommandLogTests(unittest.TestCase):
             gmf_module.format_git_command(("commit", "-m", "zwei Wörter")),
             "git commit -m 'zwei Wörter'")
 
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
     def test_log_preserves_control_characters_as_executable_zsh_escapes(self):
         name = "line\ncontrol\x1b\u0085.txt"
         (self.repo / name).write_text("content\n")
@@ -9726,6 +9727,7 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         self.assertNotIn("\x1b", payload["root"])
         self.assertIn("\\x1b[31m", payload["root"])
 
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
     def test_direct_cd_output_is_safe_and_shell_executable(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "line\n;echo nope\x1b\u0085\u202e"
@@ -9798,7 +9800,8 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
         for key in gmf_module.TRANSPORT_GIT_ENV:
             self.assertNotIn(key, seen)
         actual = {key: value for key, value in seen.items()
-                  if key.startswith("GIT_CONFIG")}
+                  if key == "GIT_CONFIG_COUNT"
+                  or re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", key)}
         self.assertEqual(len(assignments), len(actual))
         for key, value in actual.items():
             self.assertEqual(assignments[key], value, key)

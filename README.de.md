@@ -300,7 +300,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.29.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.30.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -526,7 +526,8 @@ der Messung verändertes Inventar wird ausdrücklich als nicht verfügbar gemeld
 
 ## Installation
 
-Vorausgesetzt werden Python 3 und ein Terminal. Sonst nichts.
+Vorausgesetzt werden Python ab 3.9, Git ab 2.36 und ein UTF-8-Terminal mit curses.
+Zusätzliche Python-Pakete sind nicht nötig.
 
 ```sh
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
@@ -952,3 +953,50 @@ beide Beispiele; ihr Aufbau nutzt nur lokale Repos. Die lokale Messzeit steht
 vor einem späteren Fetch fest, damit ein langsamer Fetch alten Dateistatus nicht
 frisch aussehen lässt. NUL-getrennte Git-Pfade behalten CR, LF und nicht
 dekodierbare Bytes intern; die Anzeige maskiert sie.
+
+## Diff-Ebenen und Vorschau per Kommandozeile
+
+In `A` wählt `1` alle Änderungen, `2` vorgemerkte Änderungen (HEAD → Index) und
+`3` übrige Änderungen (Index → Arbeitsbaum einschließlich neuer Dateien). Die
+Kopfzeile nennt die Ebene, die Dateiliste folgt ihr. Leere Ebenen bleiben
+umschaltbar. Eine vorgemerkte und danach bearbeitete Datei kann je Ebene andere
+Änderungen zeigen. Vor dem ersten Commit vergleicht vorgemerkt gegen den leeren
+Ausgangsbaum. Submodule zeigen Gitlink-Verweise und eine Marke für schmutzigen
+Inhalt; `O` erklärt die Inhalte. Die Vorschau führt keine externen Diff- oder
+Textkonvertierungsprogramme aus. Index-Einträge und Dateiinhalt bleiben erhalten;
+Git darf seinen Index-Stat-Cache erneuern.
+
+Derselbe Leser ist ohne Scan oder Config-Erzeugung verfügbar:
+
+```sh
+gmf /pfad/zum/repo --file-diff src/main.py --diff-mode staged
+gmf /pfad/zum/repo --file-diff src/main.py --diff-mode unstaged --json
+```
+
+Root muss die Arbeitsbaum-Wurzel sein, der Dateipfad relativ dazu. `--diff-mode`
+akzeptiert `combined` (Standard), `staged` oder `unstaged` und benötigt
+`--file-diff`. Fetches, Vergleiche und Scan-Filter lassen sich damit nicht
+verbinden. Text maskiert Terminal-Steuerzeichen und erhält Zeilenumbrüche.
+JSON ist ein eigener `kind: "file_diff"`-Datensatz mit `schema_version`, `version`,
+`root`, `path`, `mode`, `ok`, `diff` und `error`, kein gespeicherter Repo-Snapshot.
+`diff` enthält maskierten Vorschautext, der sich nicht für `git apply` eignet.
+Git-Verwaltungspfade wie `.git/config` sind ausgeschlossen. Exit-Codes: 0 ohne
+Unterschied, 1 mit Unterschied, 2 bei Fehler.
+
+## Laufzeitprüfungen und Scan-Messung
+
+Die unterstützte Untergrenze ist Python 3.9 und Git 2.36 auf macOS oder Linux,
+für die TUI mit curses und UTF-8-Terminal. App-Öffnen nutzt macOS `open`; Installer,
+Wrapper und Release-/Build-Skripte benötigen zsh. Windows ist nicht abgedeckt.
+Siehe [Laufzeitgrenzen und wiederholbare Prüfungen](docs/runtime-support.de.md).
+
+`python3 tools/check-compatibility.py` prüft die Gesamtsuite mit aktuellem
+Python/Git. Wiederholte `--python`- und `--git`-Argumente wählen eine installierte
+Matrix; `--suite core` wählt Funktionsverträge, `--screens` ergänzt die Bildprüfung.
+Es wird nichts installiert. `python3 tools/benchmark-scan.py` misst je Fixture
+fünf Läufe ausschließlich mit temporären lokalen Remotes. Siehe die
+[aufgezeichnete Messung](docs/scan-benchmark.json). Bei 25 Branches auf demselben
+Commit und drei Remotes braucht der optimierte Scan lokal 33 statt 57 Git-Aufrufe,
+mit Fetch 136 statt 160. Nur identische OID-Abdeckungszahlen innerhalb einer
+Ref-Messung werden geteilt; alle Ref-/HEAD-Nachprüfungen und Transfer-Preflights
+bleiben erhalten. Laufzeiten hängen von der Last ab.

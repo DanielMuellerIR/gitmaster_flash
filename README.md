@@ -277,7 +277,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.29.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.30.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -491,7 +491,8 @@ An unreadable or concurrently changed inventory is labelled as unavailable.
 
 ## Installation
 
-Requires Python 3 and a terminal. Nothing else.
+Requires Python 3.9+, Git 2.36+ and a UTF-8 terminal with curses.
+No third-party Python packages.
 
 ```sh
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
@@ -895,3 +896,48 @@ demo builds both examples using local repositories. Local measurement time is
 captured before a later fetch, so a slow fetch does not make old file status
 look newly measured. NUL-delimited Git paths preserve CR, LF and undecodable
 bytes internally; displays escape them.
+
+## Diff layers and command-line previews
+
+Within `A`, use `1` for all changes, `2` for staged changes (HEAD → index),
+and `3` for unstaged changes (index → working tree, including new files). The
+header names the active layer and the file list follows it. Empty layers remain
+switchable. A staged-and-edited file can show different changes in each layer.
+Before the first commit, staged compares against the empty starting tree.
+Submodules show Gitlink references and a dirty-content marker; `O` explains the
+contents. Diff previews do not run external diff or text-conversion programs.
+They preserve index entries and file contents; Git may update its index stat cache.
+
+The same reader is available without a scan or config creation:
+
+```sh
+gmf /path/to/repo --file-diff src/main.py --diff-mode staged
+gmf /path/to/repo --file-diff src/main.py --diff-mode unstaged --json
+```
+
+The root must be the working-tree root, and the file path relative to it.
+`--diff-mode` accepts `combined` (default), `staged` or `unstaged` and requires
+`--file-diff`. This command cannot be combined with fetches, comparisons or scan
+filters. Text escapes terminal controls while retaining line breaks. JSON is a
+separate `kind: "file_diff"` result containing `schema_version`, `version`,
+`root`, `path`, `mode`, `ok`, `diff` and `error`; it is not a saved repo snapshot.
+The `diff` field contains escaped preview text; it is unsuitable for `git apply`.
+Git administration paths such as `.git/config` are excluded. Exit codes: 0 for
+no difference, 1 for a difference, 2 for failure.
+
+## Runtime checks and scan measurements
+
+The supported runtime floor is Python 3.9 and Git 2.36 on macOS or Linux, with
+curses and a UTF-8 terminal for the TUI. App opening uses macOS `open`; the
+installer, wrapper and release/build scripts require zsh. Windows is not covered.
+See [runtime support and repeatable checks](docs/runtime-support.md).
+
+`python3 tools/check-compatibility.py` runs the full suite with the current
+Python/Git. Repeat `--python` and `--git` to check an installed matrix; `--suite core`
+selects feature-contract tests and `--screens` adds image verification. It installs
+nothing. `python3 tools/benchmark-scan.py` measures five runs per fixture, using
+only temporary local remotes. See [the recorded measurement](docs/scan-benchmark.json).
+With 25 branches pointing to the same commit and three remotes, the optimized
+scan uses 33 rather than 57 Git calls locally and 136 rather than 160 with fetch.
+Only identical OID coverage counts within one ref measurement are shared; every
+ref/HEAD recheck and transfer preflight remains in place. Timings depend on load.

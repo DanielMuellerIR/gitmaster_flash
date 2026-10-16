@@ -5,6 +5,8 @@ aus. Damit pruefen diese Tests die Grenze, die Unit-Tests mit gemocktem subproce
 nicht sehen: Remote-JSON, Remote-Exit-Code und lokale Diff-Auswertung gemeinsam.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shlex

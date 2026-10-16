@@ -6,7 +6,7 @@ Green = clean and in sync with the configured remote; red/yellow = needs
 attention (modified/deleted/untracked files, merge conflicts, stashes, commits
 ahead/behind). Problem repos sort to the top.
 
-Keys (wide footer lists them; H has full help; case-insensitive — f == F):
+Keys (common actions in the footer; H has full help; case-insensitive — f == F):
   ↑/↓   select a repo
   →     expand (shows files with M/D/U/C and stashes)
   ←     collapse
@@ -14,7 +14,8 @@ Keys (wide footer lists them; H has full help; case-insensitive — f == F):
         (needs the shell wrapper `gmf` from gmf.zsh — a child process cannot
         change the parent shell's working directory)
   F/…   open the repo in a configured app (see config.json)
-  A     inspect the changes file by file (read-only)
+  A     inspect changes: 1 combined, 2 staged, 3 unstaged (read-only)
+  W/O   inspect the worktree family / submodule references and contents
   C     commit helper: select exactly which changed files to commit
   L     choose a pull source (or fetch all first), preview and fast-forward
   P     safely push the current branch to the private sync remote
@@ -72,8 +73,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 JSON_SCHEMA_VERSION = 1
+DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_DEPTH = 128
 
@@ -403,16 +405,30 @@ TR = {
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
+    "changes_modes": {"en": "1 all · 2 staged · 3 unstaged + new", "de": "1 gesamt · 2 Index · 3 übrig + neu"},
+    "diff_mode_combined": {"en": "all changes", "de": "gesamt"},
+    "diff_mode_staged": {"en": "staged", "de": "vorgemerkt"},
+    "diff_mode_unstaged": {"en": "unstaged + new", "de": "übrig + neu"},
+    "diff_mode_empty": {"en": "No changed files in this mode. Use 1/2/3 to switch.", "de": "Keine geänderten Dateien in dieser Ansicht. Mit 1/2/3 wechseln."},
+    "diff_title_mode": {"en": "Diff · {mode} · {p}", "de": "Diff · {mode} · {p}"},
+    "cli_file_diff_options": {"en": "--file-diff cannot be combined with scans, fetches, comparisons, filters or list colors.", "de": "--file-diff lässt sich nicht mit Scans, Fetches, Vergleichen, Filtern oder Listenfarben verbinden."},
+    "cli_file_diff_mode": {"en": "--diff-mode requires --file-diff.", "de": "--diff-mode benötigt --file-diff."},
+    "cli_file_diff_path": {"en": "Use a relative Git path inside the repository root.", "de": "Einen relativen Git-Pfad innerhalb der Repo-Wurzel verwenden."},
+    "cli_file_diff_root": {"en": "The root argument must be the repository's working-tree root.", "de": "Das root-Argument muss die Arbeitsbaum-Wurzel des Repos sein."},
     "changes_footer": {
         "en": " ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back",
         "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück"},
+    "changes_footer_short": {"en": " ↑↓/Tab file · ⏎ diff · Q/Esc back",
+                             "de": " ↑↓/Tab Datei · ⏎ Diff · Q/Esc zurück"},
     "no_changes_to_show": {"en": "Nothing changed in this repository.",
                            "de": "In diesem Repo hat sich nichts geändert."},
     "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
-    "diff_empty": {"en": "(no textual difference — binary or mode change only)",
-                   "de": "(kein Textunterschied — nur binär oder Rechte geändert)"},
+    "diff_empty": {"en": "(no differences in this mode)",
+                   "de": "(keine Unterschiede in dieser Ansicht)"},
     "diff_failed": {"en": "Diff for {p} failed: {e}",
                     "de": "Diff für {p} fehlgeschlagen: {e}"},
+    "diff_failed_exit": {"en": "Git diff failed (exit {c}, no error message).",
+                         "de": "Git-Diff fehlgeschlagen (Exit {c}, keine Fehlermeldung)."},
     # Footer
     "f1": {"en": " ↑↓←→ select · ⏎ cd/quit · / search · M layout · B work view · Tab log · Q quit",
            "de": " ↑↓←→ wählen · ⏎ cd/Exit · / Suche · M Layout · B Arbeitsansicht · Tab Log · Q Ende"},
@@ -552,6 +568,8 @@ TR = {
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
     "app_open_failed": {"en": "Failed to open {name}: {e}",
                         "de": "{name} öffnen fehlgeschlagen: {e}"},
+    "app_mac_only": {"en": "Configured app shortcuts require macOS. Use Enter to change to the repository.",
+                     "de": "Konfigurierte App-Tasten benötigen macOS. Mit Enter ins Repo wechseln."},
     "app_over_ssh": {
         "en": "This is an SSH session — {name} can only open on the Mac you sit at.",
         "de": "Das ist eine SSH-Sitzung — {name} öffnet nur auf dem Mac vor dir."},
@@ -4241,14 +4259,19 @@ def read_branch_inventory(repo: Path, cfg: dict) -> list[BranchInfo]:
     if shallow_value not in ("true", "false"):
         raise GitReadError("git rev-parse returned malformed shallow state")
     shallow = shallow_value == "true"
+    # Nur identische OIDs unter DIESEM Ref-Snapshot teilen ihre Graph-Zählung.
+    # Die Ref-/HEAD-Nachprüfungen bleiben nötig; kein Cache über Scans hinweg.
+    counts = {}
     for branch in branches:
-        counted = _required_git(repo, "rev-list", "--count", branch.oid,
-                                *(('--not', *remote_oids) if remote_oids else ()),
-                                timeout=timeout, env=NO_REPLACE_ENV)
-        value = counted.stdout.strip()
-        if not _NUMBER_RE.fullmatch(value):
-            raise GitReadError("git rev-list returned malformed branch coverage")
-        count = int(value)
+        if branch.oid not in counts:
+            counted = _required_git(repo, "rev-list", "--count", branch.oid,
+                                    *(('--not', *remote_oids) if remote_oids else ()),
+                                    timeout=timeout, env=NO_REPLACE_ENV)
+            value = counted.stdout.strip()
+            if not _NUMBER_RE.fullmatch(value):
+                raise GitReadError("git rev-list returned malformed branch coverage")
+            counts[branch.oid] = int(value)
+        count = counts[branch.oid]
         branch.coverage = "covered" if not count else ("unknown" if shallow else "uncovered")
         branch.uncovered_commits = None if branch.coverage == "unknown" else count
     if read_ref_snapshot(repo, timeout) != refs:
@@ -4280,48 +4303,94 @@ def repo_has_head(repo: Path, timeout: int) -> bool:
     raise GitReadError("git rev-parse HEAD failed (exit %d)" % result.returncode)
 
 
-def file_diff(repo: Path, code: str, path: str, timeout: int) -> tuple[bool, str]:
-    """Diff einer einzelnen Datei, ohne Index-Eintrag oder Arbeitsbaum zu ändern.
+def files_for_diff_mode(files: list[ChangedFile], mode: str) -> list[ChangedFile]:
+    if mode not in DIFF_MODES:
+        raise ValueError("unknown diff mode")
+    if mode == "combined":
+        return list(files)
+    return [entry for entry in files if entry.code == "C" or len(entry.xy) != 2
+            or (mode == "staged" and entry.xy[0] not in (" ", "?"))
+            or (mode == "unstaged" and (entry.code == "U" or entry.xy[1] not in (" ", "?")))]
 
-    Unversionierte Dateien kennt `git diff` nicht — sie werden über `--no-index`
-    gegen /dev/null gezeigt, damit auch neue Dateien sichtbar sind.
 
-    Eine bytegenaue Einschränkung: `git diff` frischt den Stat-Cache im Index
-    (die gespeicherten Zeitstempel) auch mit `GIT_OPTIONAL_LOCKS=0` auf und
-    schreibt `.git/index` dann neu. Modus, Objekt-ID, Stufe und Pfad der
-    Einträge bleiben dabei gleich; an Vormerkung und Inhalt ändert sich nichts.
+def file_diff(repo: Path, code: str, path: str, timeout: int,
+              mode: str = "combined") -> tuple[bool, str]:
+    """Gesamt: HEAD/Arbeitsbaum; staged: HEAD/Index; unstaged: Index/Arbeitsbaum.
+
+    Unversionierte Dateien erscheinen außerhalb von staged gegen /dev/null.
+    Git darf seinen Stat-Cache erneuern, aber keine Index-Einträge oder Dateien.
+    Externe Diff-/Textconv-Treiber bleiben in jeder Ebene ausgeschaltet.
     """
-    safe_diff = ("diff", "--no-ext-diff", "--no-textconv",
+    if mode not in DIFF_MODES:
+        raise ValueError("unknown diff mode")
+    safe_diff = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--submodule=short",
                  "--ignore-submodules=none")
+    env = {**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"}
 
     def against_nothing() -> subprocess.CompletedProcess:
-        """Die ganze Datei zeigen, ohne einen Vergleichspunkt im Repo."""
         return run_git(repo, *safe_diff, "--no-index", "--", os.devnull, path,
-                       timeout=timeout)
+                       timeout=timeout, env=env)
 
-    if code == "U":
+    if mode == "unstaged":
+        r = (against_nothing() if code == "U" else
+             run_git(repo, *safe_diff, "--", path, timeout=timeout, env=env))
+    elif mode == "combined" and code == "U":
         r = against_nothing()
-    elif repo_has_head(repo, timeout):
-        # Gegen HEAD, damit gestagte UND ungestagte Änderungen zusammen erscheinen.
-        r = run_git(
-            repo, *safe_diff, "HEAD", "--", path, timeout=timeout,
-            env={**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"})
     else:
-        # Vor dem ersten Commit ist der Index kein ehrlicher Vergleichspunkt:
-        # bei Status `AM` kann dort eine ältere Fassung liegen, während die
-        # Commit-Hilfe anschließend absichtlich den aktuellen Arbeitsbaum stagt.
-        # Deshalb genau den jetzigen Pfad vollständig gegen /dev/null zeigen.
-        if not os.path.lexists(repo / path):
+        head = current_head(repo, timeout)
+        if head is not None and not is_object_id(head):
+            raise GitReadError("HEAD identity unknown during diff")
+        if mode == "staged":
+            r = run_git(repo, *safe_diff, "--cached", *((head,) if head else ()),
+                        "--", path, timeout=timeout, env=env)
+            if head is None and current_head(repo, timeout) is not None:
+                raise GitReadError("HEAD changed during unborn staged diff")
+        elif head is not None:
+            r = run_git(repo, *safe_diff, head, "--", path, timeout=timeout, env=env)
+        elif not os.path.lexists(repo / path):
             return True, ""
-        r = against_nothing()
-    # `git diff` meldet mit Unterschieden je nach Modus 0 oder 1 — beides ist
-    # Erfolg. Exit 1 mit leerer Ausgabe und einer Fehlermeldung ist dagegen ein
-    # echter Fehler: `--no-index` gegen ein unversioniertes VERZEICHNIS (Status
-    # fasst dessen Dateien zu "dir/" zusammen) endet genau so — ein leerer Diff
-    # wäre dann gelogen.
+        else:
+            r = against_nothing()
     if r.returncode == 0 or (r.returncode == 1 and (r.stdout or not r.stderr)):
         return True, r.stdout
-    return False, (r.stderr or "").strip()[:240]
+    return False, last_error_line(r)[:240] or t("diff_failed_exit", c=r.returncode)
+
+
+def print_file_diff(root: str, path: str, mode: str, *, as_json: bool = False) -> int:
+    """Ein einzelner lokaler Diff ohne Config-Erzeugung, Scan oder Netz."""
+    text, error = "", ""
+    repo = Path(root)
+    try:
+        repo = repo.expanduser().resolve()
+        if not valid_relative_git_path(path):
+            raise ValueError(t("cli_file_diff_path"))
+        if any(part.casefold() == ".git" for part in path.split("/")):
+            raise ValueError(t("cli_file_diff_path"))
+        timeout = DEFAULT_CONFIG["git_timeout"]
+        actual = _git_reported_path(repo, "--show-toplevel", timeout=timeout)
+        if path_identity(actual) != path_identity(repo):
+            raise ValueError(t("cli_file_diff_root"))
+        tracked = run_git(repo, "ls-files", "--error-unmatch", "--", path, timeout=timeout,
+                          env={"GIT_LITERAL_PATHSPECS": "1"})
+        if tracked.returncode not in (0, 1):
+            raise GitReadError(last_error_line(tracked))
+        ok, text = file_diff(repo, "U" if tracked.returncode == 1 else "M", path, timeout, mode)
+        if not ok:
+            error, text = text or t("diff_failed_exit", c="?"), ""
+    except (GitReadError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        error = str(exc)
+    text = "\n".join(terminal_text(line) for line in text.split("\n"))
+    error = terminal_text(redact_remote_error(error))
+    if as_json:
+        print(json.dumps({"schema_version": JSON_SCHEMA_VERSION, "kind": "file_diff",
+                          "version": __version__, "root": terminal_text(repo),
+                          "path": json_text(path), "mode": mode, "ok": not bool(error),
+                          "diff": text, "error": error}, indent=2, ensure_ascii=False))
+    elif error:
+        print(t("diff_failed", p=terminal_text(path), e=error), file=sys.stderr)
+    elif text:
+        print(text, end="" if text.endswith("\n") else "\n")
+    return 2 if error else 1 if text else 0
 
 
 @dataclass
@@ -8112,6 +8181,9 @@ class TUI:
             # tun. Das ehrlich sagen, statt einen kryptischen macOS-Fehler zu zeigen.
             self.message = t("app_over_ssh", name=name)
             return
+        if sys.platform != "darwin":
+            self.message = t("app_mac_only")
+            return
         # `open -a <App> <Ordner>` öffnet den Repo-Ordner in der App. Fehler (z.B.
         # App kann Ordner nicht öffnen) sichtbar machen, statt still zu schlucken.
         r = subprocess.run(["open", "-a", path, str(st.path)],
@@ -8743,41 +8815,50 @@ class TUI:
             return
         sel = 0
         off = 0
+        mode = "combined"
+        files = files_for_diff_mode(st.files, mode)
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             safe_addstr(self.scr, 0, 0,
-                        (" " + t("changes_title", rel=terminal_text(st.rel))).ljust(w - 1),
-                        curses.A_BOLD)
-            body_h = max(1, h - 3)
+                        (" " + t("changes_title", rel=terminal_text(st.rel)) + " · "
+                         + t("diff_mode_" + mode)).ljust(w - 1), curses.A_BOLD)
+            safe_addstr(self.scr, 1, 1, t("changes_modes"), curses.color_pair(C_CYAN))
+            body_h = max(1, h - 4)
             off = scroll_window(sel, off, body_h)
-            for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
-                                      start=1):
-                entry = st.files[index]
+            if not files:
+                safe_addstr(self.scr, 2, 1, t("diff_mode_empty"), curses.color_pair(C_DIM))
+            for y, index in enumerate(range(off, min(len(files), off + body_h)), start=2):
+                entry = files[index]
                 text, pair = file_row(entry.code, entry.path, any(
                     module.path == entry.path for module in st.submodules))
-                safe_addstr(self.scr, y, 1, text,
-                            color_attr(pair, index == sel))
-            safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
+                safe_addstr(self.scr, y, 1, text, color_attr(pair, index == sel))
+            footer = "changes_footer" if w >= 65 else "changes_footer_short"
+            safe_addstr(self.scr, h - 1, 0, t(footer).ljust(w - 1),
                         curses.color_pair(C_DIM) | curses.A_REVERSE)
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
                 return
-            elif ch == curses.KEY_UP:
+            elif ch in (ord("1"), ord("2"), ord("3")):
+                selected = files[sel].path if files else None
+                mode = DIFF_MODES[ch - ord("1")]
+                files = files_for_diff_mode(st.files, mode)
+                sel = next((i for i, entry in enumerate(files) if entry.path == selected), 0)
+                off = 0
+            elif files and ch == curses.KEY_UP:
                 sel = max(0, sel - 1)
-            elif ch == curses.KEY_DOWN:
-                sel = min(len(st.files) - 1, sel + 1)
-            elif ch == 9:                      # Tab wie ↓, ohne Escape-Sequenz
-                sel = (sel + 1) % len(st.files)
-            elif ch in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT):
-                entry = st.files[sel]
-                path = entry.path
-                ok, text = file_diff(st.path, entry.code, path, self.cfg["git_timeout"])
+            elif files and ch == curses.KEY_DOWN:
+                sel = min(len(files) - 1, sel + 1)
+            elif files and ch == 9:
+                sel = (sel + 1) % len(files)
+            elif files and ch in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT):
+                entry = files[sel]
+                ok, text = file_diff(st.path, entry.code, entry.path, self.cfg["git_timeout"], mode)
                 if not ok:
-                    self.message = t("diff_failed", p=path, e=text)
+                    self.message = t("diff_failed", p=terminal_text(entry.path), e=terminal_text(text))
                     return
-                self.show_pager(t("diff_title", p=terminal_text(path)),
+                self.show_pager(t("diff_title_mode", p=terminal_text(entry.path), mode=t("diff_mode_" + mode)),
                                 (text or t("diff_empty")).splitlines())
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
@@ -9831,6 +9912,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="non-interactive text list")
     ap.add_argument("--json", action="store_true",
                     help="non-interactive JSON output (machine-readable)")
+    ap.add_argument("--file-diff", metavar="PATH",
+                    help="read one relative file diff; root must be its repository root")
+    ap.add_argument("--diff-mode", choices=DIFF_MODES,
+                    help="with --file-diff: combined (default), staged or unstaged")
     ap.add_argument("--compare", nargs=2, metavar=("HERE_JSON", "THERE_JSON"),
                     help="compare two saved --json snapshots without scanning, SSH or fetch")
     ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
@@ -9865,6 +9950,13 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     global UI_LANG
     UI_LANG = resolve_lang(DEFAULT_CONFIG, args.lang)
+    if args.file_diff is not None:
+        if (args.compare or args.diff or args.demo or args.fetch or args.fetch_remote is not None
+                or args.list or args.filter or args.view != "all" or args.cd_file or args.color != "auto"):
+            ap.error(t("cli_file_diff_options"))
+        return print_file_diff(args.root, args.file_diff, args.diff_mode or "combined", as_json=args.json)
+    if args.diff_mode is not None:
+        ap.error(t("cli_file_diff_mode"))
     if args.compare:
         if args.diff or args.demo or args.fetch or args.fetch_remote is not None:
             ap.error(t("cli_compare_options"))

@@ -778,3 +778,6 @@ liegengebliebene Arbeit aus.
 
 - Prozessausgaben werden byteerhaltend über `_decode_process_output()` dekodiert; kein `text=True` im zentralen Prozessleser, sonst werden CR und CRLF in NUL-getrennten Pfaden verändert. `_git_reported_path()` entfernt nur den einen Protokoll-LF.
 - Worktree-Familien verwenden `collect_worktrees()` und lokale Pfadidentitäten; externe Registrierungen erhalten keinen weiteren Statusscan. Submodule laufen über `collect_submodules()` ohne init/update/fetch. Eltern-HEAD, Index-Verweis und Modul-Checkout getrennt halten; reine Modul-Inhalte bleiben in `C` gesperrt. Optionale fehlende Inventare gelten nie als leer.
+
+- Datei-Diffs verwenden `file_diff(..., mode)` und `files_for_diff_mode()`: combined gegen HEAD, staged gegen Index, unstaged ab Index einschließlich neuer Dateien. Externe Diff-/Textconv-Treiber bleiben deaktiviert. `--file-diff` erzeugt einen eigenen JSON-Ergebnistyp, keinen Repo-Snapshot, und startet weder Scan noch Netz.
+- Abdeckungszählungen gleicher OIDs dürfen nur im lokalen Dict einer `read_branch_inventory()`-Messung geteilt werden. Keine Übernahme in weitere Scans oder Transfer-Preflights; Ref-/HEAD-Nachprüfungen erhalten. Laufzeitmatrix und lokale Scan-Messung stehen in `tools/check-compatibility.py` und `tools/benchmark-scan.py`.
