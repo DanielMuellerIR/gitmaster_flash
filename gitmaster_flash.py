@@ -72,7 +72,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -260,6 +260,38 @@ TR = {
     "filter_active": {"en": "Filter “{q}”: {n} of {total} repos.",
                       "de": "Filter „{q}“: {n} von {total} Repos."},
     "hdr_filter_note": {"en": "filter “{q}”", "de": "Filter „{q}“"},
+    "view_all": {"en": "All repositories", "de": "Alle Repos"},
+    "view_changes": {"en": "Local changes / stashes / operations", "de": "Lokale Änderungen / Stashes / Vorgänge"},
+    "view_incoming": {"en": "Incoming commits", "de": "Eingehende Commits"},
+    "view_outgoing": {"en": "Outgoing commits / missing remote branches", "de": "Ausgehende Commits / fehlende Remote-Branches"},
+    "view_access": {"en": "Access / inspection problems", "de": "Zugriffs- / Prüfprobleme"},
+    "view_publish": {"en": "GitHub publication pending", "de": "GitHub-Veröffentlichung offen"},
+    "view_short_all": {"en": "all", "de": "alle"},
+    "view_short_changes": {"en": "changes", "de": "Änderungen"},
+    "view_short_incoming": {"en": "incoming", "de": "eingehend"},
+    "view_short_outgoing": {"en": "outgoing", "de": "ausgehend"},
+    "view_short_access": {"en": "access", "de": "Zugriff"},
+    "view_short_publish": {"en": "GitHub", "de": "GitHub"},
+    "view_header": {"en": "{v} · {n}/{total} · {review} review · {hidden} hidden",
+                    "de": "{v} · {n}/{total} · {review} offen · {hidden} verdeckt"},
+    "view_hidden": {"en": "{n} hidden", "de": "{n} verdeckt"},
+    "view_title": {"en": "Work view · path filter stays unchanged", "de": "Arbeitsansicht · Pfadfilter bleibt erhalten"},
+    "view_active": {"en": "view: {v}", "de": "Ansicht: {v}"},
+    "view_empty": {"en": "No repo in this view. B choose view · / path filter · Esc reset",
+                   "de": "Kein Repo in dieser Ansicht. B Ansicht wählen · / Pfadfilter · Esc zurücksetzen"},
+    "view_cli_empty": {"en": "Note: no repo matches the work view — nothing was checked.",
+                       "de": "Hinweis: Kein Repo passt zur Arbeitsansicht — es wurde nichts geprüft."},
+    "sync_clean": {"en": "sync clean", "de": "Sync sauber"},
+    "sync_open": {"en": "sync needs attention", "de": "Sync prüfen"},
+    "publication_pending": {"en": "GitHub publication pending", "de": "GitHub-Veröffentlichung offen"},
+    "context_sync_clean": {"en": "Sync ✔", "de": "Sync ✔"},
+    "context_sync_open": {"en": "Sync !", "de": "Sync !"},
+    "context_publish": {"en": "G pending", "de": "G offen"},
+    "info_sync_state": {"en": "Sync state", "de": "Sync-Stand"},
+    "info_publication": {"en": "GitHub publication", "de": "GitHub-Veröffentlichung"},
+    "access_attention": {"en": "Inspect remote configuration", "de": "Remote-Konfiguration prüfen"},
+    "selected_context": {"en": "Selected: {rel} [{branch}] · {state} · {actions} · {remotes}",
+                         "de": "Gewählt: {rel} [{branch}] · {state} · {actions} · {remotes}"},
     "filter_cli_no_hit": {
         "en": "Note: no repo matches the filter “{q}” — nothing was checked.",
         "de": "Hinweis: Kein Repo passt auf den Filter „{q}“ — es wurde nichts geprüft."},
@@ -295,14 +327,21 @@ TR = {
     "diff_failed": {"en": "Diff for {p} failed: {e}",
                     "de": "Diff für {p} fehlgeschlagen: {e}"},
     # Footer
-    "f1": {"en": (" ↑/↓/←/→ select · ⏎ cd & quit · / filter · M view · Tab log · "
-                  "I info · H help"),
-           "de": (" ↑/↓/←/→ wählen · ⏎ cd & Exit · / Filter · M Ansicht · Tab Log · "
-                  "I Info · H Hilfe")},
-    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · N reread",
-           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · N neu lesen"},
-    "f3": {"en": " R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings · Q quit",
-           "de": " R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einstellungen · Q Ende"},
+    "f1": {"en": " ↑↓←→ select · ⏎ cd/quit · / search · M layout · B work view · Tab log · Q quit",
+           "de": " ↑↓←→ wählen · ⏎ cd/Exit · / Suche · M Layout · B Arbeitsansicht · Tab Log · Q Ende"},
+    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · I info · H help",
+           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · I Info · H Hilfe"},
+    "f3": {"en": " N reread · R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings",
+           "de": " N neu lesen · R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einst."},
+    "f1_short": {"en": " ↑↓←→ select · ⏎ cd · / find · M layout · B work · Tab log · Q",
+                 "de": " ↑↓←→ wählen · ⏎ cd · / Suche · M Layout · B Ansicht · Tab · Q"},
+    "f2_short": {"en": " {apps} · A diff · C commit · L pull · S stash · I info · H ?",
+                 "de": " {apps} · A Diff · C Commit · L Pull · S Stash · I Info · H ?"},
+    "f3_short": {"en": " N read · R all · U fetch · X stop · P sync · G GitHub · , setup",
+                 "de": " N neu · R alle · U Fetch · X Stop · P Sync · G GitHub · , Setup"},
+    "f1_tiny": {"en": " ↑↓ · ⏎ cd · B view · / find · Q", "de": " ↑↓ · ⏎ cd · B Ansicht · / Suche · Q"},
+    "f2_tiny": {"en": " A diff · C commit · L pull · P/G push", "de": " A Diff · C Commit · L Pull · P/G Push"},
+    "f3_tiny": {"en": " M layout · I info · H help", "de": " M Layout · I Info · H Hilfe"},
     "pull_choose": {"en": "Pull source · {rel} · local branch {b}",
                     "de": "Pull-Quelle · {rel} · lokaler Branch {b}"},
     "pull_all": {"en": "Fetch all remotes, then choose one pull source",
@@ -615,7 +654,10 @@ TR = {
     "git_help_title": {"en": "Safe Git actions & command log",
                        "de": "Sichere Git-Aktionen & Befehlsprotokoll"},
     "git_help_body": {
-        "en": "P  Push only the current branch to the private sync remote.\n"
+        "en": "B  Choose a work view; / adds a path filter, M changes the layout.\n"
+              "N  Reread the selected repo locally. U fetches one chosen remote.\n"
+              "X  Stop the background scan and retain completed results.\n\n"
+              "P  Push only the current branch to the private sync remote.\n"
               "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
               "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
               "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
@@ -628,7 +670,10 @@ TR = {
               "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
               "A  Shows every changed file and its diff without modifying the repository.\n"
               "   Discarding or unstaging remains an explicit terminal operation.",
-        "de": "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
+        "de": "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
+              "N  Gewähltes Repo lokal neu lesen. U ruft ein gewähltes Remote ab.\n"
+              "X  Hintergrundscan stoppen und fertige Ergebnisse behalten.\n\n"
+              "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
               "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
               "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
               "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
@@ -1148,19 +1193,32 @@ class RepoStatus:
         return bool(self.modified or self.deleted or self.untracked or self.conflicts)
 
     @property
-    def clean_and_synced(self) -> bool:
-        return (not self.error and not self.branches_error and not self.branch_review_count
-                and not self.operation and not self.dirty
-                and not self.stashes and self.ahead == 0
+    def sync_clean(self) -> bool:
+        local_ok = (not (self.error and not self.fetch_error) and not self.branches_error
+                    and not self.operation and not self.dirty and not self.stashes)
+        sync = next((remote for remote in self.remotes if remote.is_sync), None)
+        if sync is not None:
+            return (local_ok and sync.branch_exists and not sync.fetch_failed
+                    and sync.ahead == 0 and sync.behind == 0)
+        return (local_ok and not self.error and self.ahead == 0
                 and self.behind == 0 and self.remote_state == "ok")
+
+    @property
+    def publication_pending(self) -> bool:
+        return repo_matches_view(self, "publish")
+
+    @property
+    def clean_and_synced(self) -> bool:
+        return (self.sync_clean and not self.branch_review_count
+                and not self.publication_pending and not repo_matches_view(self, "access"))
 
     def severity(self) -> int:
         """Sortierschlüssel: Problematisches nach oben."""
-        if self.error or self.branches_error:
+        if repo_matches_view(self, "access"):
             return 0
         if self.operation or self.dirty or self.stashes:
             return 1
-        if self.ahead or self.behind or self.branch_review_count:
+        if self.ahead or self.behind or self.branch_review_count or self.publication_pending:
             return 2
         if self.remote_state != "ok":
             return 3
@@ -4344,6 +4402,9 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
                 t("info_changes", m=st.modified, d=st.deleted,
                   u=st.untracked, c=st.conflicts))
     head_rows.append((t("info_worktree"), worktree))
+    head_rows.append((t("info_sync_state"), t("sync_clean") if st.sync_clean else t("sync_open")))
+    head_rows.append((t("info_publication"), t("publication_pending") if st.publication_pending
+                      else t("none_label")))
     if st.operation:
         head_rows.append((t("info_operation"), operation_label(st.operation)))
     head_rows.append((t("info_stashes"), str(len(st.stashes))))
@@ -4385,6 +4446,11 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     for name in ordered_names:
         remote = configs[name]
         state = states.get(name)
+        current_state = remote_status_from_config(remote, st.remote, st.branch)
+        known = (state is not None and remote_approval_signature(state)
+                 == remote_approval_signature(current_state))
+        if not known:
+            state = None
         web_urls = github_web_urls(remote)
         labels = []
         if state and state.is_sync:
@@ -4393,6 +4459,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             labels.append(t("info_github"))
         if not remote.transfer_safe:
             labels.append(t("info_unsafe_remote"))
+        elif remote_access_problem(current_state, st.branch not in ("?", "(detached)", "")):
+            labels.append(t("access_attention"))
         if state and state.fetch_failed:
             labels.append(t("info_fetch_failed"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
@@ -4409,8 +4477,6 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             rows.extend((t("info_fetch_url"), url) for url in fetch_shown)
             rows.extend((t("info_push_url"), url) for url in push_shown)
         rows.extend((t("info_web_url"), url) for url in web_urls)
-        known = (state is not None and remote_approval_signature(state)
-                 == remote_approval_signature(remote_status_from_config(remote, st.remote, st.branch)))
         rows.append((t("info_fetched"),
                      state.fetched_at if known and state.fetched_at else t("age_unknown")))
         if state and st.branch not in ("?", "(detached)"):
@@ -5207,6 +5273,7 @@ def status_dict(st: RepoStatus) -> dict:
         "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
         "conflicts": st.conflicts,
         "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
+        "sync_clean": st.sync_clean, "publication_pending": st.publication_pending,
         "error": json_text(st.error),
         "error_long": json_text(st.error_long),
         # Aus demselben Grund wie `fetch_failed` oben nicht als Wert verglichen,
@@ -5276,6 +5343,9 @@ def _valid_remote_payload(payload) -> bool:
                 return False
         if "fetch_error" in repo and type(repo["fetch_error"]) is not bool:
             return False
+        for key in ("sync_clean", "publication_pending"):
+            if key in repo and type(repo[key]) is not bool:
+                return False
         for field_name in ("branch", "remote_state", "error"):
             if field_name in repo and not isinstance(repo[field_name], str):
                 return False
@@ -5661,12 +5731,62 @@ def repo_matches_filter(rel: str, terms: list[str]) -> bool:
     return all(term in name for term in terms)
 
 
-def filter_statuses(statuses: list, query: str) -> list:
+STATUS_VIEWS = ("all", "changes", "incoming", "outgoing", "access", "publish")
+
+
+def status_value(status, name: str, default=None):
+    return status.get(name, default) if isinstance(status, dict) else getattr(status, name, default)
+
+
+def remote_access_problem(remote, named_branch: bool) -> bool:
+    return bool(status_value(remote, "fetch_failed") or status_value(remote, "mixed_public")
+                or status_value(remote, "target_mismatch") or status_value(remote, "multiple_pushurls")
+                or (status_value(remote, "fetch_refspec_fingerprint") and (
+                    not status_value(remote, "fetch_refspecs_safe", True)
+                    or not status_value(remote, "fetch_url_safe", True)
+                    or not status_value(remote, "push_url_safe", True)
+                    or (named_branch and not status_value(remote, "branch_mapping_safe", True)))))
+
+
+def repo_matches_view(status, view: str) -> bool:
+    """Eine fachliche Auswahlregel für Modell und JSON, ohne lokalisierte Texte."""
+    if view == "all":
+        return True
+    remotes = status_value(status, "remotes", [])
+    named_branch = status_value(status, "branch", "?") not in ("", "?", "(detached)")
+    has_head = named_branch and is_object_id(status_value(status, "head_oid"))
+    if view == "changes":
+        return any(status_value(status, key) for key in (
+            "modified", "deleted", "untracked", "conflicts", "stashes", "operation"))
+    if view == "incoming":
+        return bool(status_value(status, "behind", 0) or any(
+            status_value(remote, "behind", 0) for remote in remotes))
+    if view == "outgoing":
+        return bool(status_value(status, "ahead", 0) or any(
+            status_value(remote, "ahead", 0)
+            or (has_head and not status_value(remote, "branch_exists", False))
+            for remote in remotes) or any(
+                status_value(branch, "coverage") == "uncovered"
+                for branch in status_value(status, "branches", [])))
+    if view == "access":
+        return bool(status_value(status, "error") or status_value(status, "branches_error") or any(
+            remote_access_problem(remote, named_branch)
+            for remote in remotes))
+    if view == "publish":
+        return named_branch and any(status_value(remote, "public", False) and (
+            status_value(remote, "ahead", 0) > 0
+            or (has_head and not status_value(remote, "branch_exists", False)))
+            for remote in remotes)
+    raise ValueError("unknown status view: " + view)
+
+
+def filter_statuses(statuses: list, query: str, view: str = "all") -> list:
     """Repos auf den Suchtext eingrenzen; die Reihenfolge bleibt erhalten."""
     terms = filter_terms(query)
-    if not terms:
+    if not terms and view == "all":
         return list(statuses)
-    return [st for st in statuses if repo_matches_filter(st.rel, terms)]
+    return [st for st in statuses if repo_matches_filter(st.rel, terms)
+            and repo_matches_view(st, view)]
 
 
 def hidden_dirty(all_statuses: list, statuses: list) -> int:
@@ -5689,7 +5809,7 @@ def hidden_dirty(all_statuses: list, statuses: list) -> int:
                if id(st) not in visible and not st.clean_and_synced)
 
 
-def filter_repo_dicts(repos: list, query: str) -> list:
+def filter_repo_dicts(repos: list, query: str, view: str = "all") -> list:
     """Dasselbe für die JSON-Form eines Repos (`--diff` vergleicht Dicts).
 
     Beide Rechner werden mit demselben Filter eingegrenzt. Ein Repo, das nur auf
@@ -5697,14 +5817,25 @@ def filter_repo_dicts(repos: list, query: str) -> list:
     gar nicht gibt.
     """
     terms = filter_terms(query)
-    if not terms:
+    if not terms and view == "all":
         return list(repos)
     return [repo for repo in repos
-            if repo_matches_filter(str(repo.get("rel", "")), terms)]
+            if repo_matches_filter(str(repo.get("rel", "")), terms)
+            and repo_matches_view(repo, view)]
+
+
+def filter_comparison_repos(here: list, there: list, query: str,
+                            view: str) -> tuple[list, list]:
+    left, right = filter_repo_dicts(here, query), filter_repo_dicts(there, query)
+    # Zustandsfilter dürfen die Vergleichsseite nicht verschwinden lassen:
+    # Treffen Änderungen nur hier zu, wird derselbe Repo-Pfad trotzdem dort gelesen.
+    selected = {repo["rel"] for repo in left + right if repo_matches_view(repo, view)}
+    return ([repo for repo in left if repo["rel"] in selected],
+            [repo for repo in right if repo["rel"] in selected])
 
 
 def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
-             query: str = "") -> int:
+             query: str = "", view: str = "all") -> int:
     """Rechner vergleichen; Config-Erzeugung und optionaler Fetch sind die Ausnahmen."""
     host, _, path = spec.partition(":")
     if not host or host.startswith("-") or terminal_text(host) != host:
@@ -5728,10 +5859,11 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
     # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
     note = ""
     filter_info = None
-    if query:
+    if query or view != "all":
         here_all, there_all = here["repos"], there.get("repos") or []
-        here["repos"] = filter_repo_dicts(here_all, query)
-        there = dict(there, repos=filter_repo_dicts(there_all, query))
+        left, right = filter_comparison_repos(here_all, there_all, query, view)
+        here["repos"] = left
+        there = dict(there, repos=right)
         # `terminal_text()` wie in `print_list()`: Der Suchtext kommt roh von der
         # Kommandozeile und darf im Terminal keine Steuerzeichen ausfuehren.
         # Gefiltert wird weiter mit dem Rohtext — nur die Ausgabe wird entschaerft.
@@ -5741,6 +5873,12 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
             "here_matches": len(here["repos"]), "here_total": len(here_all),
             "host_matches": len(there["repos"]), "host_total": len(there_all),
         }
+        if view != "all":
+            filter_info["view"] = view
+            filter_info["selection"] = "either-side"
+            filter_info["here_view_matches"] = len(filter_repo_dicts(here_all, query, view))
+            filter_info["host_view_matches"] = len(filter_repo_dicts(there_all, query, view))
+            shown = " · ".join(filter(None, [shown, t("view_active", v=t("view_" + view))]))
         note = t("diff_filter_note", q=shown,
                  n=len(here["repos"]), total=len(here_all),
                  m=len(there["repos"]), mt=len(there_all), h=host)
@@ -5781,7 +5919,7 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
     Reihenfolge nach Dringlichkeit: kaputter Zugriff, Konflikt, offene Änderungen,
     Stash, Abstand zum Sync-Remote — und ✔, wenn nichts davon zutrifft.
     """
-    if st.error or st.branches_error or any(remote.fetch_failed for remote in st.remotes):
+    if repo_matches_view(st, "access"):
         return "✘", C_RED
     if st.conflicts:
         return "⚠", C_RED
@@ -5800,6 +5938,8 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
             C_RED if st.behind else C_YELLOW)
     if st.branch_review_count:
         return f"B{st.branch_review_count}", C_YELLOW
+    if st.publication_pending:
+        return "G", C_CYAN
     if st.remote_state in ("no-remote", "no-branch", "detached"):
         return "?", C_YELLOW
     return "✔", C_GREEN
@@ -5882,7 +6022,7 @@ def compact_position(index: int, rows: int) -> tuple[int, int]:
 
 
 def print_list(statuses: list[RepoStatus], root: Path | None = None,
-               query: str = "", hidden: int = 0) -> None:
+               query: str = "", hidden: int = 0, view: str = "all") -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
@@ -5896,6 +6036,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
           + (f" · {terminal_text(root)}" if root else "")
           + f" · {len(statuses)} {t('hdr_repos')}"
           + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else "")
+          + (" · " + t("view_active", v=t("view_" + view)) if view != "all" else "")
           # Dieselbe Zusage wie in der Oberflaeche: Ein Filter darf nicht
           # ausgerechnet die Repos verstecken, deretwegen man gmf startet.
           + (f" · {t('hdr_hidden_dirty', n=hidden)}" if hidden else ""))
@@ -5913,12 +6054,16 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
         bits = []
         if st.error:
             bits.append(f"{red}{terminal_text(t('error_prefix', e=st.error))}{reset}")
+        elif repo_matches_view(st, "access") and not st.branches_error:
+            bits.append(f"{red}{t('access_attention')}{reset}")
         if st.conflicts:
             bits.append(f"{red}{t('conflict_n', n=st.conflicts)}{reset}")
         if st.operation:
             bits.append(f"{yellow}{t('operation_active', op=operation_label(st.operation))}{reset}")
         if st.branches_error or st.branch_review_count:
             bits.append(f"{yellow}{branch_inventory_summary(st)}{reset}")
+        if st.publication_pending:
+            bits.append(f"{cyan}{t('publication_pending')}{reset}")
         if st.modified:
             bits.append(f"{red}M:{st.modified}{reset}")
         if st.deleted:
@@ -6152,9 +6297,30 @@ def safe_addstr(win, y, x, text, attr=0):
         pass
 
 
+def selected_repo_context(st: RepoStatus, width: int) -> str:
+    state = t("context_sync_clean") if st.sync_clean else t("context_sync_open")
+    if st.publication_pending:
+        state += " · " + t("context_publish")
+    actions = ["I"]
+    if st.dirty and not (st.operation or st.conflicts):
+        actions.append("C")
+    if st.ahead and not st.behind and not st.dirty and not st.operation and st.remote_state == "ok":
+        actions.append("P")
+    if not st.dirty and not st.operation and any(
+            r.public and r.ahead and not r.behind and r.branch_exists
+            and not r.fetch_failed and r.transfer_safe for r in st.remotes):
+        actions.append("G")
+    name = ellipsize(terminal_text(st.rel), max(8, min(20, width // 5)))
+    branch = ellipsize(terminal_text(st.branch), max(8, min(20, width // 5)))
+    return t("selected_context", rel=name, branch=branch, state=state,
+             remotes=" / ".join(r.badge() for r in st.remotes) or t("none_label"),
+             actions="/".join(actions))
+
+
 class TUI:
     def __init__(self, stdscr, root: Path, cfg: dict, cd_file: str | None,
-                 query: str = "", config_path: Path | None = None):
+                 query: str = "", config_path: Path | None = None,
+                 status_view: str = "all"):
         self.scr = stdscr
         self.root = root
         self.cfg = cfg
@@ -6169,6 +6335,7 @@ class TUI:
         self.all_statuses: list[RepoStatus] = []
         self.statuses: list[RepoStatus] = []
         self.filter_query = canonical_filter_query(query)  # "" = kein Filter; --filter belegt ihn vor
+        self.status_view = status_view
         self.selected = 0
         self.offset = 0            # Scroll-Position
         self.expanded: set[Path] = set()  # echte Pfade der aufgeklappten Repos
@@ -6276,6 +6443,8 @@ class TUI:
                     carry_fetch_times(entry, new)
                     bucket[i] = new
                     break
+        if self.status_view != "all":
+            self.apply_filter(keep_selection=True)
 
     def _finish_scan(self, results: list) -> None:
         """Endergebnis uebernehmen: neue Repos dazu, verschwundene weg, sortiert."""
@@ -6304,7 +6473,7 @@ class TUI:
         """
         previous = self.statuses[self.selected] if (
             keep_selection and 0 <= self.selected < len(self.statuses)) else None
-        self.statuses = filter_statuses(self.all_statuses, self.filter_query)
+        self.statuses = filter_statuses(self.all_statuses, self.filter_query, self.status_view)
         # Wiedererkannt wird über den ECHTEN Pfad, nicht über `rel`: Der
         # Anzeigename ist NFC-normalisiert, und zwei nebeneinanderliegende
         # Ordner, die sich nur in NFC/NFD unterscheiden, tragen denselben — die
@@ -6352,6 +6521,8 @@ class TUI:
                 if entry is st:
                     bucket[i] = new
                     break
+        if self.status_view != "all":
+            self.apply_filter(keep_selection=True)
         return new
 
     # -- Zeichnen -----------------------------------------------------------
@@ -6393,12 +6564,16 @@ class TUI:
         elif st.clean_and_synced:
             part(t("clean_synced"), C_GREEN)
         else:
+            if repo_matches_view(st, "access") and not st.branches_error:
+                part(t("access_attention"), C_RED)
             if st.conflicts:
                 part("⚠" + t("conflict_n", n=st.conflicts), C_RED)
             if st.operation:
                 part(t("operation_active", op=operation_label(st.operation)), C_YELLOW)
             if st.branches_error or st.branch_review_count:
                 part(branch_inventory_summary(st), C_RED if st.branches_error else C_YELLOW)
+            if st.publication_pending:
+                part(t("publication_pending"), C_CYAN)
             if st.modified:
                 part(f"M:{st.modified}", C_RED)
             if st.deleted:
@@ -6462,10 +6637,30 @@ class TUI:
             tail += " · " + t("scan_progress", done=self.scan.done,
                               total=self.scan.total or "?")
         head = f" gitmaster_flash {__version__} · {self.root} · {count} · {tail}"
+        if self.status_view != "all":
+            label = t("view_short_" + self.status_view)
+            hidden = t("view_hidden", n=self.hidden_dirty())
+            search_width = 3 if self.scan and w < 100 else min(16, max(3, w // 6))
+            search = " /" + ellipsize(terminal_text(self.filter_query), search_width) if self.filter_query else ""
+            if w < 65:
+                head = f" v{__version__} {label}{search} {len(self.statuses)}/{len(self.all_statuses)} {hidden}"
+            else:
+                prefix = f"gitmaster_flash {__version__}" if w >= 100 else f"v{__version__}"
+                label = t("view_active", v=label) + search
+                detail = (f"{label} · {len(self.statuses)}/{len(self.all_statuses)} · {hidden}"
+                          if search or self.scan else t("view_header", v=label, n=len(self.statuses),
+                                           total=len(self.all_statuses), review=dirty,
+                                           hidden=self.hidden_dirty()))
+                head = f" {prefix} · {detail}"
+            if self.scan:
+                head += f" R {self.scan.done}/{self.scan.total or '?'}"
+            if w >= 100:
+                head += f" · {self.root}"
         safe_addstr(self.scr, 0, 0, head.ljust(w - 1), curses.A_BOLD)
 
         # Höhe aufteilen: Kopf, Repo-Bereich, Protokoll, Meldung, 3 Footerzeilen.
-        available = max(1, h - 5)
+        has_context = bool(self.context_height(h))
+        available = max(1, h - 5 - int(has_context))
         log_h = self.log_height(h)
         body_h = max(1, available - log_h)
         if not self.statuses:
@@ -6474,7 +6669,8 @@ class TUI:
             # gehört deshalb hierher und nicht in sie hinein.
             safe_addstr(self.scr, 1, 2,
                         t("filter_empty_hint", q=self.filter_query)
-                        if self.filter_query else t("no_repos_found"),
+                        if self.filter_query else (t("view_empty") if self.status_view != "all"
+                                                   else t("no_repos_found")),
                         curses.color_pair(C_YELLOW))
             body_h = 1
         elif self.view_mode == "compact":
@@ -6489,6 +6685,9 @@ class TUI:
             self.draw_detail(1, body_h, w)
         if log_h:
             self.draw_log(1 + body_h, min(log_h, available - body_h), w)
+        if has_context and self.current():
+            safe_addstr(self.scr, h - 5, 1, selected_repo_context(self.current(), w - 2),
+                        curses.color_pair(C_CYAN))
 
         note = self.message or (measurement_summary(self.current()) if self.current() else "")
         safe_addstr(self.scr, h - 4, 1, note, curses.color_pair(C_YELLOW))
@@ -6496,16 +6695,20 @@ class TUI:
         # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
         app_hints = " · ".join(f"{key.upper()} {app_label(app)}"
                                for key, app in self.cfg["apps"].items())
+        short = w < 100
+        if short:
+            app_hints = "/".join(self.cfg["apps"]) + " Apps"
+        suffix = "_tiny" if w < 65 else "_short" if short else ""
         footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
-        safe_addstr(self.scr, h - 3, 0, t("f1").ljust(w - 1), footer_dim)
-        safe_addstr(self.scr, h - 2, 0, t("f2", apps=app_hints).ljust(w - 1), footer_dim)
-        safe_addstr(self.scr, h - 1, 0, t("f3").ljust(w - 1), footer_dim)
+        safe_addstr(self.scr, h - 3, 0, t("f1" + suffix).ljust(w - 1), footer_dim)
+        safe_addstr(self.scr, h - 2, 0, t("f2" + suffix, apps=app_hints).ljust(w - 1), footer_dim)
+        safe_addstr(self.scr, h - 1, 0, t("f3" + suffix).ljust(w - 1), footer_dim)
         self.scr.refresh()
 
     def compact_step(self, direction: int) -> int:
         """Auswahl in der kompakten Ansicht um eine Spalte verschieben."""
         h, w = self.scr.getmaxyx()
-        body_h = max(1, h - 5 - self.log_height(h))
+        body_h = max(1, h - 5 - self.context_height(h) - self.log_height(h))
         rows, _, _, _ = self.compact_geometry(body_h, w)
         target = self.selected + direction * rows
         if 0 <= target < len(self.statuses):
@@ -6761,6 +6964,36 @@ class TUI:
             return None
         return self.statuses[self.selected]
 
+    def context_height(self, height: int) -> int:
+        return int(self.view_mode == "compact" and height >= 9)
+
+    def action_work_view(self):
+        selected = STATUS_VIEWS.index(self.status_view)
+        offset = 0
+        while True:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            safe_addstr(self.scr, 0, 0, " " + t("view_title"), curses.A_BOLD)
+            height = max(1, h - 3)
+            offset = scroll_window(selected, offset, height)
+            for y, i in enumerate(range(offset, min(len(STATUS_VIEWS), offset + height)), 1):
+                safe_addstr(self.scr, y, 1, t("view_" + STATUS_VIEWS[i]),
+                            color_attr(C_CYAN, i == selected))
+            safe_addstr(self.scr, h - 1, 0, t("pull_choose_footer"), curses.color_pair(C_DIM))
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN:
+                selected = min(len(STATUS_VIEWS) - 1, selected + 1)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                self.status_view = STATUS_VIEWS[selected]
+                self.apply_filter(keep_selection=True)
+                self.message = t("view_active", v=t("view_" + self.status_view))
+                return
+            elif ch in (27, ord("q"), ord("Q")):
+                return
+
     def action_filter(self):
         """Repo-Liste über einen Suchtext eingrenzen (Taste /).
 
@@ -6777,7 +7010,9 @@ class TUI:
             return
         self.filter_query = canonical_filter_query(answer)
         self.apply_filter()
-        if not self.filter_query:
+        if not self.filter_query and self.status_view != "all":
+            self.message = t("view_active", v=t("view_" + self.status_view))
+        elif not self.filter_query:
             self.message = t("filter_cleared")
         elif not self.statuses:
             self.message = t("filter_no_hit", q=self.filter_query)
@@ -6796,7 +7031,8 @@ class TUI:
         """
         self.filter_query = ""
         self.apply_filter(keep_selection=True)
-        self.message = t("filter_cleared")
+        self.message = (t("filter_cleared") if self.status_view == "all" else
+                        t("view_active", v=t("view_" + self.status_view)))
 
     def settings_rows(self) -> list[tuple]:
         """Zeilen der Einstellungsansicht — ohne curses, damit prüfbar.
@@ -8130,6 +8366,8 @@ class TUI:
             # Ansicht wechseln — die Auswahl bleibt auf demselben Repo, damit
             # man in der Übersicht suchen und im Detail weiterarbeiten kann.
             self.view_mode = "detail" if self.view_mode == "compact" else "compact"
+        elif key == "B":
+            self.action_work_view()
         elif key == "S":
             self.action_stash_show()
         elif key == "/":
@@ -8233,6 +8471,11 @@ class TUI:
                 # das ganze Programm.
                 if self.filter_query:
                     self.clear_filter()
+                    continue
+                if self.status_view != "all":
+                    self.status_view = "all"
+                    self.apply_filter(keep_selection=True)
+                    self.message = t("view_active", v=t("view_all"))
                     continue
                 return
 
@@ -8528,11 +8771,14 @@ def build_demo_sandbox(base: Path) -> Path:
     repo, _ = _demo_repo(root, "data-pipeline", branch="feature/etl-rewrite")
     (repo / "sketch.py").write_text("# draft\n")
 
-    # 15) drei Remotes (origin, backup, github), sauber
+    # 15) privat auf zwei Remotes synchron, auf GitHub noch nicht veröffentlicht
     repo, _ = _demo_repo(root, "docs-portal")
     _demo_extra_remote(root, repo, "backup")
     _demo_extra_remote(root, repo, "github",
                        url="https://github.com/example/docs-portal.git")
+    _demo_ahead(repo, 1)
+    _dgit(repo, "push", "-q", "origin", "main")
+    _dgit(repo, "push", "-q", "backup", "main")
 
     # 16) Backup-Remote + 2 Commits zurück
     repo, _ = _demo_repo(root, "photo-sorter")
@@ -8643,6 +8889,9 @@ def main(argv: list[str] | None = None) -> int:
                          "terms (case-insensitive, any order). Applies to --list, "
                          "--json and --diff (there on both machines alike), and "
                          "preselects the filter in the TUI, where / changes it.")
+    ap.add_argument("--view", choices=STATUS_VIEWS, default="all",
+                    help="work view in addition to the path filter; comparisons keep "
+                         "a repo on both sides when either side matches")
     ap.add_argument("--lang", choices=["en", "de"],
                     help="UI language (overrides config; default: auto from $LANG)")
     ap.add_argument("--demo", action="store_true",
@@ -8697,12 +8946,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.diff:
         return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json,
-                        query=query)
+                        query=query, view=args.view)
 
     if args.list or args.json or not sys.stdout.isatty():
         all_statuses = collect_all(root, cfg, fetch=args.fetch,
                                    fetch_remote=args.fetch_remote)
-        statuses = filter_statuses(all_statuses, query)
+        statuses = filter_statuses(all_statuses, query, args.view)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
@@ -8714,15 +8963,21 @@ def main(argv: list[str] | None = None) -> int:
                     "query": terminal_text(query),
                     "matches": len(statuses), "total": len(all_statuses),
                 }
+            if args.view != "all":
+                payload["view"] = {"id": args.view, "matches": len(statuses),
+                                   "total": len(all_statuses),
+                                   "hidden_attention": hidden_dirty(all_statuses, statuses)}
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print_list(statuses, root, query,
-                       hidden_dirty(all_statuses, statuses))
+                       hidden_dirty(all_statuses, statuses), view=args.view)
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
         if query and not statuses:
             print(t("filter_cli_no_hit", q=terminal_text(query)), file=sys.stderr)
+        elif args.view != "all" and not statuses:
+            print(t("view_cli_empty"), file=sys.stderr)
         # Exit-Code 1, wenn irgendein Repo Aufmerksamkeit braucht (skriptbar).
         return 0 if all(s.clean_and_synced for s in statuses) else 1
 
@@ -8731,7 +8986,7 @@ def main(argv: list[str] | None = None) -> int:
         # Der Demo-Modus bekommt KEINEN Pfad: Seine Config ist eine Wegwerfkopie
         # der Defaults, und ein Screenshot-Lauf darf die echte Datei nie ändern.
         TUI(stdscr, root, cfg, args.cd_file, query,
-            None if args.demo else CONFIG_PATH).run()
+            None if args.demo else CONFIG_PATH, status_view=args.view).run()
 
     curses.wrapper(_run)
     return 0

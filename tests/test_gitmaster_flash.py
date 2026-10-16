@@ -664,8 +664,8 @@ class ScrollWindowTests(unittest.TestCase):
         self.assertNotIn("self.offset = sel_row - body_h + 1", source)
         self.assertNotIn("self.compact_col = sel_col - columns + 1", source)
         self.assertNotIn("self.log_top = self.log_selected - visible + 1", source)
-        # Definition + fünf Listen + Protokoll + Kompaktspalten + Einstellungen.
-        self.assertEqual(source.count("scroll_window("), 9)
+        # Definition + fünf Listen + Protokoll + Kompaktspalten + Einstellungen + Arbeitsansichten.
+        self.assertEqual(source.count("scroll_window("), 10)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -7897,17 +7897,21 @@ class CompactViewTests(unittest.TestCase):
                 calls = ui.scr.lines
                 self.assertTrue(all(0 <= y < 26 for y, _, _ in calls), calls)
                 repo_ys = {y for y, _, text in calls
-                           if any(name in text for name in ("repo-0", "repo-1"))}
+                           if any(name in text for name in ("repo-0", "repo-1"))
+                           and not (mode == "compact" and y == 21)}
                 log_ys = {y for y, _, text in calls
                           if "Befehle" in text or "Commands" in text
                           or "git status" in text}
                 footer_ys = {y for y, _, text in calls
                              if any(marker in text for marker in
-                                    ("M view", "M Ansicht", "A changes",
-                                     "A Änderungen", "Q quit", "Q Beenden"))}
+                                    ("M layout", "M Layout", "A changes",
+                                     "A Änderungen", "N reread", "N neu lesen"))}
                 self.assertTrue(repo_ys and log_ys and footer_ys, calls)
                 self.assertLess(max(repo_ys), min(log_ys))
                 self.assertLess(max(log_ys), min(footer_ys))
+                if mode == "compact":
+                    self.assertLess(max(log_ys), 21)
+                    self.assertTrue(any(y == 21 and "repo-00" in text for y, _, text in calls))
                 # Die drei Fußzeilen stehen ganz unten und nirgends sonst.
                 self.assertEqual(sorted(footer_ys), [23, 24, 25])
 

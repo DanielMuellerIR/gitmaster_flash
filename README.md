@@ -58,7 +58,7 @@ Three keys carry you through the first session:
 Nothing is ever pushed, dropped or deleted without a confirmation that names the
 exact command first. Details are further down; you do not need them to start.
 
-## Two views (`M`)
+## List layouts (`M`)
 
 With up to 20 repositories gmf opens in the **detail view**: one full line each,
 with counts, branch and remotes. Above that the same list turns into a long
@@ -86,6 +86,7 @@ The mark is the whole status, condensed into one field:
 | Bn | n other local branches need review |
 | ⇅ | diverged (both ahead and behind) |
 | ✘ | repository scan error or last fetch failed for a remote |
+| G | privately synced, with GitHub publication still outstanding |
 | ? | no sync remote, no remote branch, or detached HEAD |
 
 When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
@@ -156,6 +157,7 @@ memorize. Case does not matter — `f` works like `F`.
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
 | / | filter the repo list by name (see below) |
 | , | settings: view them, change the harmless ones (see below) |
+| B | choose a work view independently of path search |
 | M | switch between compact and detail view |
 | Tab | move the focus to the command log and back |
 | ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
@@ -179,6 +181,41 @@ empty Git preview is labelled explicitly. Applying or deleting a stash remains a
 terminal task after that review: Git cannot atomically bind the target branch,
 index and working tree against concurrent changes, nor bind deletion to one
 specific reflog entry.
+
+## Work views (`B`)
+
+`B` narrows the list by the work ahead. Path search with `/` stays independent.
+`M` still changes only the detail/compact layout.
+
+| `--view` | Selection |
+|---|---|
+| `all` | every repo |
+| `changes` | local files, stashes or active Git operations |
+| `incoming` | known incoming commits on any remote |
+| `outgoing` | known outgoing commits, missing remote branches or uncovered local branches |
+| `access` | fetch/read failures or proven unsafe remote configuration |
+| `publish` | GitHub is missing commits from the current branch, or has no such branch |
+
+Views use locally known data and do not start a fetch. `R` and `U` renew remote
+measurements. The header names the active view, match count and hidden repos
+needing attention. An empty view does not claim a clean inventory. Esc clears
+path search first, then an active work view, and only then quits.
+
+In compact layout a context line shows the selected repo, branch, sync state,
+remotes and relevant action keys. `Sync ✔` and `G pending` can coexist: privately
+synced, with publication to GitHub still outstanding. That receives the `G` mark
+and counts as needing attention. `I` explains both states in full. Action keys
+never replace a safety check or confirmation. Key hints become shorter below
+100 columns; below 65 columns they show common actions and `H` for full help.
+
+Non-interactively: `gmf --list --view outgoing` or
+`gmf --json --view publish --filter api`. JSON adds `sync_clean` and
+`publication_pending` per repo; `view` metadata gives its ID, matches, inventory
+total and hidden attention count. Exit status still concerns visible repos.
+`--diff HOST --view changes` compares each matching repo path on **both**
+machines when either side matches. A working copy changed only here therefore
+does not become a false “repo only here” finding. Path filters still apply to
+both sides.
 
 ## Fetching in the background (`R`)
 
@@ -239,7 +276,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.26.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.27.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter

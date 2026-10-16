@@ -137,7 +137,15 @@ class ReleaseScriptTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="gmf-release-test-")
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
-        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        home = self.repo / "home"
+        shell = self.repo / "shell-env"
+        home.mkdir()
+        shell.mkdir()
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_")}
+        self.env.update(HOME=str(home), ZDOTDIR=str(shell), GIT_CONFIG_NOSYSTEM="1",
+                        GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
+                        PYTHONDONTWRITEBYTECODE="1")
         self.git("init", "-q")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -168,7 +176,10 @@ class ReleaseScriptTests(unittest.TestCase):
                               stderr=subprocess.PIPE, text=True,
                               start_new_session=True) as proc:
             try:
-                out, err = proc.communicate(timeout=30)
+                # Der gesamte Release umfasst mehrere Interpreterstarts. Ein
+                # isolierter erfolgreicher Lauf benötigte bereits 26 Sekunden;
+                # 30 Sekunden trennten unter Last nicht zuverlässig Fehler von Laufzeit.
+                out, err = proc.communicate(timeout=90)
             except subprocess.TimeoutExpired:
                 # Auch die Shell-Kinder beenden; offene Pipes dürfen weder den
                 # Test noch seine temporären Repositories überleben.

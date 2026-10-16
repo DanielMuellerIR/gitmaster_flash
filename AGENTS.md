@@ -771,3 +771,5 @@ liegengebliebene Arbeit aus.
   des Repos sie setzt, siehe Regel oben)
 
 - Messzeiten: `measured_at` bezeichnet die lokale Messung, `fetched_at` nur den belegten erfolgreichen Fetch dieses Remotes für den aktuellen Branch. Keine Zeit aus `FETCH_HEAD` oder Dateizeiten erfinden. `carry_fetch_times()` bindet übernommene Zeiten an Branch und `remote_approval_signature()`. Scan-Abbruch läuft ausschließlich über den eigenen `GitCallScope`; der globale Abbruch bleibt dem gesamten Prozess vorbehalten.
+
+- Arbeitsansichten verwenden `repo_matches_view()` für Modelle und JSON; belegte Remote-Probleme laufen über `remote_access_problem()`. Bei Vergleichen wählt `filter_comparison_repos()` die Vereinigung passender Repo-Pfade und erhält beide Gegenstücke. `sync_clean` und `publication_pending` getrennt halten. Der Platz der Kontextzeile kommt aus `context_height()`, auch bei der Navigation.

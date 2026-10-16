@@ -62,7 +62,7 @@ Nichts wird gepusht, verworfen oder gelöscht, ohne dass vorher eine Rückfrage 
 genauen Befehl nennt. Die Details stehen weiter unten; zum Loslegen braucht man
 sie nicht.
 
-## Zwei Ansichten (`M`)
+## Darstellung der Liste (`M`)
 
 Bis 20 Repos startet gmf in der **Detailansicht**: pro Repo eine volle Zeile mit
 Zählern, Branch und Remotes. Darüber wird dieselbe Liste zur langen Scrollstrecke,
@@ -91,6 +91,7 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 | Bn | n weitere lokale Branches brauchen Prüfung |
 | ⇅ | divergiert (gleichzeitig vor und zurück) |
 | ✘ | Fehler beim Repo-Scan oder letzter Fetch eines Remotes fehlgeschlagen |
+| G | private Synchronisation erledigt, GitHub-Veröffentlichung noch offen |
 | ? | kein Sync-Remote, kein Remote-Branch oder detached HEAD |
 
 Treffen mehrere Zustände zu, zeigt die Marke den dringendsten: zuerst `✘`, dann
@@ -168,6 +169,7 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | → / ← | auf-/zuklappen (Dateien mit M/D/U/C, Stashes) |
 | / | Repo-Liste nach Namen filtern (siehe unten) |
 | , | Einstellungen ansehen und die unkritischen ändern (siehe unten) |
+| B | Arbeitsansicht wählen, unabhängig von der Pfadsuche |
 | M | zwischen Kompakt- und Detailansicht umschalten |
 | Tab | Fokus ins Befehlsprotokoll und zurück |
 | ⏎ | beenden und in den Repo-Ordner wechseln (braucht den `gmf`-Wrapper, siehe unten) |
@@ -192,6 +194,44 @@ gekennzeichnet. Das Anwenden oder Löschen eines Stashs bleibt danach eine
 Terminal-Aufgabe: Git kann Ziel-Branch, Index und Arbeitsbaum nicht atomar gegen
 parallele Änderungen binden und das Löschen nicht an einen bestimmten
 Reflog-Eintrag koppeln.
+
+## Arbeitsansichten (`B`)
+
+`B` grenzt die Liste nach dem anstehenden Arbeitsschritt ein. Die Pfadsuche
+mit `/` bleibt unabhängig davon erhalten. `M` wechselt weiterhin nur die
+Darstellung zwischen Detail und Kompakt.
+
+| `--view` | Auswahl |
+|---|---|
+| `all` | alle Repos |
+| `changes` | lokale Dateien, Stashes oder laufende Git-Vorgänge |
+| `incoming` | bekannte eingehende Commits auf einem Remote |
+| `outgoing` | bekannte ausgehende Commits, fehlende Remote-Branches oder nicht abgedeckte lokale Branches |
+| `access` | Fetch-/Lesefehler oder belegte unsichere Remote-Konfiguration |
+| `publish` | aktueller Branch auf GitHub zurück oder noch nicht vorhanden |
+
+Die Ansichten verwenden lokal bekannte Daten und starten keinen Fetch. `R`
+und `U` erneuern die Remote-Messung. Die Kopfzeile nennt aktive Ansicht,
+Trefferzahl und ausgeblendete Repos mit Handlungsbedarf. Eine leere Ansicht
+behauptet keine geprüfte Sauberkeit. Esc hebt zuerst die Pfadsuche, dann eine
+aktive Arbeitsansicht auf; erst danach beendet es das Programm.
+
+In der Kompaktansicht zeigt die Kontextzeile das ausgewählte Repo, Branch,
+Sync-Zustand, Remotes und passende Aktionskürzel. `Sync ✔` und `G offen` können
+gleichzeitig gelten: privat synchronisiert, aber noch nicht auf GitHub.
+Das erhält die Marke `G` und zählt als Handlungsbedarf. `I` erklärt beide
+Zustände ausführlich. Aktionskürzel ersetzen keine Prüfung oder Freigabe.
+Bei weniger als 100 Spalten werden die Tastenhinweise kürzer, unter 65 Spalten
+zeigen sie die häufigsten Aktionen und `H` für die vollständige Hilfe.
+
+Nicht interaktiv: `gmf --list --view outgoing` oder
+`gmf --json --view publish --filter api`. JSON ergänzt `sync_clean` und
+`publication_pending` je Repo; die Metadaten `view` nennen ID, Treffer,
+Gesamtbestand und ausgeblendeten Handlungsbedarf. Der Exit-Code bezieht sich
+weiter auf die sichtbaren Repos. `--diff HOST --view changes` vergleicht jeden
+passenden Repo-Pfad auf **beiden** Rechnern, sobald er auf einer Seite zutrifft.
+Dadurch wird eine nur hier geänderte Arbeitskopie nicht zu einem falschen
+„Repo nur hier“-Befund. Pfadfilter wirken weiterhin auf beiden Seiten.
 
 ## Fetch im Hintergrund (`R`)
 
@@ -258,7 +298,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.26.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.27.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
