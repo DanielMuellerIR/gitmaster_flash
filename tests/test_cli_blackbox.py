@@ -153,6 +153,20 @@ exit "$rc"
     def _remote_payload(self) -> dict:
         return json.loads(self.remote_stdout.read_text())
 
+    def test_equal_remote_distances_keep_different_local_commits_visible(self):
+        local, remote = self._clone_pair()
+        for repo, content in ((local, "local work\n"), (remote, "remote work\n")):
+            git(repo, "config", "user.name", "Test")
+            git(repo, "config", "user.email", "test@example.invalid")
+            (repo / "tracked.txt").write_text(content)
+            git(repo, "add", "tracked.txt")
+            git(repo, "commit", "-qm", "local work")
+        result = self._run_gmf()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("commit on 'main' differs", result.stdout)
+        self.assertNotIn("SYNC", result.stdout)
+        self.assertRegex(self._remote_payload()["repos"][0]["head_oid"], r"^[0-9a-f]{40}$")
+
     def test_clean_remote_exit_zero_compares_successfully(self):
         self._clone_pair()
 

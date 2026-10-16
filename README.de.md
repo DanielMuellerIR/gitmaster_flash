@@ -85,6 +85,7 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 | ✔ | sauber und synchron |
 | ● | geänderte, gelöschte oder unversionierte Dateien |
 | ⚠ | Merge-Konflikt |
+| ↻ | laufender Git-Vorgang (Merge, Rebase, Cherry-Pick, Revert, Sequenz oder Bisect) |
 | ⚑ | Stash vorhanden |
 | ↑n / ↓n | vor/zurück gegenüber dem Sync-Remote |
 | ⇅ | divergiert (gleichzeitig vor und zurück) |
@@ -92,7 +93,8 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 | ? | kein Sync-Remote, kein Remote-Branch oder detached HEAD |
 
 Treffen mehrere Zustände zu, zeigt die Marke den dringendsten: zuerst `✘`, dann
-`⚠`, `●`, `⚑`, den Abstand zum Sync-Remote und schließlich `?`. Rot steht für
+`⚠`, `↻`, `●`, `⚑`, den Abstand zum Sync-Remote und schließlich `?`. Ein offener
+Git-Vorgang braucht auch bei sauberem Arbeitsbaum Aufmerksamkeit. Rot steht für
 Fehler, Konflikt, lokale Änderung, fehlende eingehende Commits oder Divergenz;
 Gelb für Stash, ausgehende Commits oder eine fehlende Sync-Beziehung; das grüne
 `✔` bedeutet sauber und synchron. `M` oder `I` zeigt die Details hinter der
@@ -235,7 +237,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.23.2 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.24.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -540,6 +542,14 @@ dem anderen Rechner **nicht** installiert sein: das Skript geht per stdin rüber
 braucht es nur `python3` und `git`. Nebeneffekt: beide Seiten laufen immer in exakt
 derselben Fassung, Versionsdrift ist ausgeschlossen. Funktioniert auch gegen Linux.
 
+Beim gleichen ausgecheckten Branch vergleicht gmf auch die vollständigen
+Commit-IDs. Gleiche Voraus-/Zurück-Zahlen können verschiedene Commits beschreiben;
+das wird als `DRIFT` statt als gemeinsamer `SYNC`-Stand gemeldet. Älteres JSON ohne
+Commit-IDs bleibt lesbar, kann Commit-Gleichheit aber nicht belegen. Laufende
+Git-Vorgänge erscheinen als lokale Arbeit, auch bei sauberem Arbeitsbaum. JSON
+enthält `head_oid` (null vor dem ersten Commit, leer bei unbekanntem Stand) und
+den stabilen Code `operation`.
+
 **Branch, Index und Arbeitsbaum bleiben unangetastet** — keine Remotes angelegt,
 nichts committet oder gepusht. Es sagt, was anders ist; das Reparieren bleibt bei
 dir. Zweierlei schreibt es trotzdem: `--fetch` führt auf beiden Rechnern einen
@@ -631,6 +641,11 @@ Einstellung, die man nicht findet, ist schlimmer als eine, die man in der Datei
 ## Konfiguration
 
 `~/.config/gitmaster_flash/config.json`, wird beim ersten Start angelegt:
+
+Werte aus dieser Datei verwenden dieselben Bereiche und Auswahlmöglichkeiten wie
+die Einstellungsansicht. Ungültige Einträge fallen einzeln mit einer Warnung auf
+Defaults zurück; die Datei bleibt zur Korrektur erhalten. Ordner- und Remote-Listen
+dürfen ausschließlich Zeichenketten enthalten.
 
 - `apps` — Taste → App zum Öffnen des Repos (macOS `open -a`). Die Taste taucht
   automatisch im Footer auf: `{"Z": {"name": "Zed", "path":

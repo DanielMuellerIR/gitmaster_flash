@@ -678,8 +678,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   vorbehalten — sichtbar, aber nicht änderbar. Eine neue Einstellung gehört nur
   dann nach `EDITABLE_SETTINGS`, wenn ein Vertipper darin nichts startet und
   nichts umleitet.
-- Jede Eingabe läuft durch `parse_setting()`, bevor sie in die Config kommt;
-  `load_config()` prüft nur die FORM, nie den Wert: Ein Eintrag, dessen Typ
+- Jede Eingabe läuft durch `parse_setting()`, bevor sie in die Config kommt.
+  `validate_setting()` prüft Werte für Oberfläche UND `load_config()`;
+  Wertebereiche, Sprachwahl und Ordnernamen haben damit eine gemeinsame Regel.
+  Remote-Listen enthalten ausschließlich Zeichenketten. Die Originaldatei bleibt
+  bei ungültigen Einträgen erhalten. Ein Eintrag, dessen Typ
   nicht zum Default passt, fällt auf den Default zurück und wird auf stderr
   genannt. Die Datei trägt man von Hand ein, und `null`, `[…]` oder `"text"`
   auf oberster Ebene sind gültiges JSON — `dict.update()` und die

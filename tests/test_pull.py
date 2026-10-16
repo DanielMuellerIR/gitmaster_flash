@@ -217,9 +217,13 @@ class PullTests(unittest.TestCase):
         script.chmod(0o755)
         pid, fd = pty.fork()
         if pid == 0:
-            os.environ["PATH"] = str(wrapper) + os.pathsep + os.environ["PATH"]
-            gmf.run_git(self.repo, "ls-remote", "origin", timeout=120)
-            os._exit(0)
+            env = dict(os.environ, PATH=str(wrapper) + os.pathsep + os.environ["PATH"])
+            # Wie beim echten CLI-Start einen frischen Interpreter ausführen.
+            # Ein fork erbt sonst Sperren und Abbruchzustand der übrigen Tests.
+            code = (f"import sys; sys.path.insert(0, {str(Path(gmf.__file__).parent)!r}); "
+                    "from pathlib import Path; import gitmaster_flash as gmf; "
+                    f"gmf.run_git(Path({str(self.repo)!r}), 'ls-remote', 'origin', timeout=120)")
+            os.execve(sys.executable, [sys.executable, "-c", code], env)
         git_pid = None
         try:
             deadline = time.monotonic() + 5

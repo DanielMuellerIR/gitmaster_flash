@@ -80,6 +80,7 @@ The mark is the whole status, condensed into one field:
 | ✔ | clean and in sync |
 | ● | modified, deleted or untracked files |
 | ⚠ | merge conflict |
+| ↻ | Git operation in progress (merge, rebase, cherry-pick, revert, sequence or bisect) |
 | ⚑ | stash present |
 | ↑n / ↓n | ahead of / behind the sync remote |
 | ⇅ | diverged (both ahead and behind) |
@@ -87,7 +88,8 @@ The mark is the whole status, condensed into one field:
 | ? | no sync remote, no remote branch, or detached HEAD |
 
 When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
-`●`, `⚑`, the sync distance, and finally `?`. Red means an error, conflict,
+`↻`, `●`, `⚑`, the sync distance, and finally `?`. A pending Git operation needs
+attention even when its working tree is clean. Red means an error, conflict,
 local change, missing incoming commits or divergence; yellow marks a stash,
 outgoing commits or missing sync relationship; green `✔` means clean and
 synchronized. `M` or `I` reveals the details behind the condensed mark.
@@ -218,7 +220,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.23.2 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.24.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -511,6 +513,13 @@ to be installed on the other machine: the script is piped over stdin, so the rem
 only needs `python3` and `git`, and both sides always run the exact same version (no
 version drift to reason about). Works against Linux too.
 
+For the same checked-out branch, gmf also compares the full commit IDs. Equal
+ahead/behind counts can describe different commits; those are reported as `DRIFT`,
+not as a shared `SYNC` state. Older JSON without commit IDs remains readable but
+cannot prove commit equality. Active Git operations are reported as local work,
+even with a clean working tree. JSON carries `head_oid` (null before the first
+commit, empty when unknown) and the stable `operation` code.
+
 **Branch, index, and working tree stay untouched** — no remotes are added and
 nothing is committed or pushed. It tells you what differs; fixing is yours.
 Two things it does write: `--fetch` runs a real fetch on both machines — that is
@@ -599,6 +608,10 @@ than one you have to edit in a file.
 ## Configuration
 
 `~/.config/gitmaster_flash/config.json`, created on first run:
+
+Values loaded from this file use the same ranges and choices as the settings
+interface. Invalid entries fall back individually with a warning; the file is
+preserved for correction. Folder and remote lists must contain strings only.
 
 - `apps` — key → application used to open a repository (macOS `open -a`). The key
   shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":

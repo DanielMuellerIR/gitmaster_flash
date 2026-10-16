@@ -163,8 +163,19 @@ class ReleaseScriptTests(unittest.TestCase):
                  "gitmaster_flash.py", "gmf.zsh", "install.sh", "README.md", "README.de.md",
                  "LICENSE", ".gitignore")
         self.git("commit", "-qm", "fixture")
-        return subprocess.run([str(self.repo / "release.sh")], cwd=self.repo,
-                              env=self.env, capture_output=True, text=True, timeout=30)
+        with subprocess.Popen([str(self.repo / "release.sh")], cwd=self.repo,
+                              env=self.env, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True,
+                              start_new_session=True) as proc:
+            try:
+                out, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                # Auch die Shell-Kinder beenden; offene Pipes dürfen weder den
+                # Test noch seine temporären Repositories überleben.
+                os.killpg(proc.pid, signal.SIGKILL)
+                out, err = proc.communicate(timeout=5)
+                self.fail(f"Release fixture timed out. stdout={out!r}; stderr={err!r}")
+            return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
     def test_commit_during_build_aborts_without_publishing_an_archive(self):
         result = self.release_with_build(

@@ -442,7 +442,7 @@ class LoadConfigShapeTests(unittest.TestCase):
     Datei aus `null`, `[…]` oder `"text"`, und `.items()` bei einem
     `"apps": null`. Ein `"skip_dirs": null` riss spaeter den ganzen Scan mit
     (`find_repos` -> `set(None)`), ein `"sync_remote_names": null` jedes
-    einzelne Repo. Geprueft wird nur die FORM, nie der Wert.
+    einzelne Repo. Form und Werte werden an der Eingabegrenze geprueft.
     """
 
     def setUp(self):

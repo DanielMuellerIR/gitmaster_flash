@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.23.2"
+__version__ = "0.24.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -174,6 +174,23 @@ TR = {
         "de": "SYNC   {rel}: {r} auf beiden Rechnern {aa} voraus/{ab} zurueck"},
     "diff_branch": {"en": "local  {rel}: [{ba}] {a}, [{bb}] {b}",
                     "de": "lokal  {rel}: [{ba}] {a}, [{bb}] {b}"},
+    "diff_head": {
+        "en": "DRIFT  {rel}: commit on '{br}' differs: {oa} {a}, {ob} {b}",
+        "de": "DRIFT  {rel}: Commit auf '{br}' verschieden: {oa} {a}, {ob} {b}"},
+    "diff_operation": {"en": "local  {rel}: {op} in progress {m}",
+                       "de": "lokal  {rel}: {op} läuft {m}"},
+    "operation_merge": {"en": "Merge", "de": "Merge"},
+    "operation_rebase": {"en": "Rebase", "de": "Rebase"},
+    "operation_cherry_pick": {"en": "Cherry-pick", "de": "Cherry-Pick"},
+    "operation_revert": {"en": "Revert", "de": "Revert"},
+    "operation_sequencer": {"en": "Git sequence", "de": "Git-Sequenz"},
+    "operation_bisect": {"en": "Bisect", "de": "Bisect"},
+    "operation_active": {"en": "{op} in progress", "de": "{op} läuft"},
+    "info_operation": {"en": "Git operation", "de": "Git-Vorgang"},
+    "config_string_list": {"en": "expected a list of strings",
+                           "de": "eine Liste von Zeichenketten erwartet"},
+    "set_err_names": {"en": "Enter a list of folder names.",
+                      "de": "Eine Liste von Ordnernamen eingeben."},
     "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) {m}",
                    "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}"},
     # Einmal je Lauf, nicht je Repo: sonst wiederholt ein einziger fehlgeschlagener
@@ -824,14 +841,9 @@ def resolve_lang(cfg: dict, override: str | None = None) -> str:
 def load_config() -> dict:
     """Config laden; fehlt sie, mit Defaults anlegen (selbsterklärender Start).
 
-    Geprüft wird nur die FORM, nie der Wert: Ein Eintrag, dessen Typ nicht zum
-    Default passt, fällt auf den Default zurück und wird auf stderr genannt.
-    Die Datei trägt man von Hand ein, und ein `"skip_dirs": null` oder eine in
-    `[…]` gepackte Config ist gültiges JSON — `dict.update()` und die
-    Grossschreibung der App-Tasten endeten dort mit einem Traceback statt mit
-    der zugesagten Rückfallebene (Review-Fund 2026-09-03). Die Werte selbst
-    prüft weiterhin `parse_setting()` an der Eingabegrenze der
-    Einstellungsansicht.
+    Form und Werte werden geprüft; editierbare Einstellungen teilen ihre
+    Regeln mit der Oberfläche. Ungültige Einträge fallen einzeln auf Defaults
+    zurück. Die ursprüngliche Datei bleibt zur Korrektur erhalten.
     """
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # tiefe Kopie
 
@@ -885,6 +897,16 @@ def load_config() -> dict:
                 warn(f'entry "{key}" is a {type(value).__name__}, '
                      f"not a {wanted}")
                 continue
+            setting = next((s for s in EDITABLE_SETTINGS if s.key == key), None)
+            if setting is not None:
+                value, error = validate_setting(setting, value)
+                if error:
+                    warn(f'entry "{key}": {terminal_text(error)}')
+                    continue
+            elif key in ("sync_remote_names", "sync_remote_hosts"):
+                if any(not isinstance(item, str) for item in value):
+                    warn(f'entry "{key}": {t("config_string_list")}')
+                    continue
         cfg[key] = value
     # App-Tasten intern immer groß (Tastendruck wird ebenfalls großgezogen).
     cfg["apps"] = {str(k).upper(): v for k, v in cfg["apps"].items()}
@@ -933,6 +955,28 @@ READ_ONLY_SETTINGS = ("apps", "sync_remote_names", "sync_remote_hosts")
 _NUMBER_RE = re.compile(r"[0-9]+\Z")
 
 
+def validate_setting(setting: Setting, value) -> tuple:
+    """Gemeinsame Werteprüfung für Datei und Oberfläche."""
+    if setting.kind == "choice":
+        low = "auto" if value is None else (
+            value.casefold() if isinstance(value, str) else "")
+        if low not in setting.choices:
+            return None, t("set_err_choice", opts=" / ".join(setting.choices))
+        return (None if low == "auto" else low), None
+    if setting.kind == "number":
+        if type(value) is not int:
+            return None, t("set_err_number")
+        if not setting.minimum <= value <= setting.maximum:
+            return None, t("set_err_range", lo=setting.minimum, hi=setting.maximum)
+        return value, None
+    if not isinstance(value, list) or any(not isinstance(n, str) for n in value):
+        return None, t("set_err_names")
+    for name in value:
+        if not name or "/" in name or name in (".", ".."):
+            return None, t("set_err_dirname", n=name)
+    return value, None
+
+
 def parse_setting(setting: Setting, raw: str) -> tuple:
     """Eingabe prüfen: liefert `(Wert, None)` oder `(None, Fehlertext)`.
 
@@ -941,29 +985,22 @@ def parse_setting(setting: Setting, raw: str) -> tuple:
     """
     text = raw.strip()
     if setting.kind == "choice":
-        low = text.casefold()
-        if low not in setting.choices:
-            return None, t("set_err_choice", opts=" / ".join(setting.choices))
-        # "auto" heißt in der Datei `null`: dann entscheidet $LANG.
-        return (None if low == "auto" else low), None
+        return validate_setting(setting, text)
     if setting.kind == "number":
         # Kein `str.isdigit()`: das hält auch "²" für eine Ziffer, `int()` aber
         # nicht — die Prüfung ginge durch und der Aufruf danach schlüge fehl.
         if not _NUMBER_RE.match(text):
             return None, t("set_err_number")
-        value = int(text)
-        if not setting.minimum <= value <= setting.maximum:
+        digits = text.lstrip("0") or "0"
+        if len(digits) > len(str(setting.maximum)):
             return None, t("set_err_range", lo=setting.minimum, hi=setting.maximum)
-        return value, None
+        return validate_setting(setting, int(digits))
     # "names": Ordnernamen, durch Komma getrennt. `find_repos()` vergleicht sie
     # mit einzelnen Pfadsegmenten — ein Eintrag mit "/" könnte deshalb nie
     # zutreffen und wäre eine stille Enttäuschung.
     names = [part.strip() for part in text.split(",")]
     names = [name for name in names if name]
-    for name in names:
-        if "/" in name or name in (".", ".."):
-            return None, t("set_err_dirname", n=name)
-    return names, None
+    return validate_setting(setting, names)
 
 
 def app_label(app: dict | None) -> str:
@@ -1028,6 +1065,7 @@ class RepoStatus:
     # Volle OID aus demselben Scan wie `branch`; None bedeutet belegten unborn
     # Branch, der leere String nur einen von Tests/Altaufrufern unbekannten Stand.
     head_oid: str | None = ""
+    operation: str = ""          # merge | rebase | cherry-pick | revert | sequencer | bisect
     remote: str | None = None     # Name des erkannten Sync-Remotes (z.B. origin)
     remote_state: str = "ok"      # ok | no-remote | no-branch | detached | error
     ahead: int = 0
@@ -1061,14 +1099,15 @@ class RepoStatus:
 
     @property
     def clean_and_synced(self) -> bool:
-        return (not self.dirty and not self.stashes and self.ahead == 0
+        return (not self.error and not self.operation and not self.dirty
+                and not self.stashes and self.ahead == 0
                 and self.behind == 0 and self.remote_state == "ok")
 
     def severity(self) -> int:
         """Sortierschlüssel: Problematisches nach oben."""
         if self.error:
             return 0
-        if self.dirty or self.stashes:
+        if self.operation or self.dirty or self.stashes:
             return 1
         if self.ahead or self.behind:
             return 2
@@ -1952,19 +1991,32 @@ def has_unmerged_entries(repo: Path, timeout: int) -> bool:
     return bool(diff.stdout or index.stdout)
 
 
-def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
-    """True, wenn ein Commit Teil einer laufenden Git-Sequenz waere.
+OPERATION_MARKERS = (
+    ("rebase-merge", "rebase"), ("rebase-apply", "rebase"),
+    ("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"), ("sequencer", "sequencer"), ("BISECT_LOG", "bisect"),
+)
 
-    Ein konfliktfrei vorbereiteter Merge hat keine ungemergten Indexeintraege,
-    aber `git commit` erzeugt trotzdem einen Merge-Commit. Der temporaere
-    Teilbaum der Commit-Hilfe darf einen solchen Commit niemals abschliessen.
-    Dasselbe gilt fuer Cherry-Pick, Revert, Rebase, Sequencer und Bisect.
+
+def repository_operation(repo: Path, timeout: int) -> str:
+    """Laufenden Vorgang im Git-Verzeichnis dieser Arbeitskopie erkennen.
+
+    Alle Vorgangsmarker sind worktree-lokal wie HEAD. Dessen Git-Pfad liefert
+    deshalb mit einem Aufruf das richtige Verzeichnis auch für linked Worktrees.
+    Rebase hat Vorrang vor seinen vorübergehenden Cherry-Pick-Markern.
     """
-    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                   "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG"):
-        if _git_path(repo, marker, timeout).exists():
-            return True
-    return False
+    git_dir = _git_path(repo, "HEAD", timeout).parent
+    return next((operation for marker, operation in OPERATION_MARKERS
+                 if (git_dir / marker).exists()), "")
+
+
+def operation_label(operation: str) -> str:
+    return t("operation_" + operation.replace("-", "_"))
+
+
+def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
+    """Auch ein konfliktfrei vorbereiteter Vorgang darf nicht beendet werden."""
+    return bool(repository_operation(repo, timeout))
 
 
 def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
@@ -4116,6 +4168,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
                 t("info_changes", m=st.modified, d=st.deleted,
                   u=st.untracked, c=st.conflicts))
     head_rows.append((t("info_worktree"), worktree))
+    if st.operation:
+        head_rows.append((t("info_operation"), operation_label(st.operation)))
     head_rows.append((t("info_stashes"), str(len(st.stashes))))
 
     tags = read_git("tag", "--points-at", "HEAD")
@@ -4569,6 +4623,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
                           "--untracked-files=all", timeout=t_)
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
             r.stdout)
+        st.operation = repository_operation(repo, t_)
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
         st.stashes = [l for l in r.stdout.splitlines() if l.strip()]
@@ -4860,6 +4915,7 @@ def status_dict(st: RepoStatus) -> dict:
     return {
         "path": terminal_text(st.path), "rel": terminal_text(st.rel),
         "branch": json_text(st.branch),
+        "head_oid": st.head_oid, "operation": st.operation,
         "remote": json_text(st.remote), "remote_state": st.remote_state,
         "ahead": st.ahead, "behind": st.behind,
         "upstream": json_text(st.upstream),
@@ -4948,6 +5004,14 @@ def _valid_remote_payload(payload) -> bool:
         for field_name in ("branch", "remote_state", "error"):
             if field_name in repo and not isinstance(repo[field_name], str):
                 return False
+        if "head_oid" in repo:
+            oid = repo["head_oid"]
+            if oid is not None and (not isinstance(oid, str) or
+                    (oid != "" and not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid))):
+                return False
+        if "operation" in repo and repo["operation"] not in (
+                "", *(operation for _, operation in OPERATION_MARKERS)):
+            return False
         remotes = repo.get("remotes", [])
         if not isinstance(remotes, list):
             return False
@@ -5091,6 +5155,16 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
 
     for rel in sorted(set(ra) & set(rb)):
         x, y = ra[rel], rb[rel]
+        same_branch = (x.get("branch") == y.get("branch")
+                       and x.get("branch") not in (None, "?", "(detached)"))
+        head_differs = (same_branch and "head_oid" in x and "head_oid" in y
+                        and x["head_oid"] != "" and y["head_oid"] != ""
+                        and x["head_oid"] != y["head_oid"])
+        if head_differs:
+            out.append(t("diff_head", rel=rel, br=x["branch"],
+                         oa=x["head_oid"] or t("info_no_commits"),
+                         ob=y["head_oid"] or t("info_no_commits"),
+                         a=here_at, b=there_at))
         xr, yr = _remotes_by_name(x), _remotes_by_name(y)
         for name, mine, other in ((here_at, xr, yr), (there_at, yr, xr)):
             for rn in sorted(set(mine) - set(other)):
@@ -5144,7 +5218,7 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                 out.append(t("diff_remote_state", rel=rel, r=rn,
                              a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
                              b=there_at, ba=pb.get("ahead"), bb=pb.get("behind")))
-            elif ((pa.get("sync") or pb.get("sync"))
+            elif (not head_differs and (pa.get("sync") or pb.get("sync"))
                   and (pa.get("ahead") or pa.get("behind"))):
                 # Beide Rechner gleichauf, aber gemeinsam neben dem Sync-Remote:
                 # im reinen Zwei-Rechner-Vergleich unsichtbar, trotzdem Handlungsbedarf.
@@ -5183,6 +5257,9 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             if r.get("fetch_error"):
                 fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
         for name, r in ((here_at, x), (there_at, y)):
+            if r.get("operation"):
+                out.append(t("diff_operation", rel=rel, m=name,
+                             op=operation_label(r["operation"])))
             n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
             if n:
                 out.append(t("diff_dirty", rel=rel, m=name, n=n))
@@ -5370,6 +5447,8 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
         return "✘", C_RED
     if st.conflicts:
         return "⚠", C_RED
+    if st.operation:
+        return "↻", C_YELLOW
     if st.modified or st.deleted or st.untracked:
         return "●", C_RED
     if st.stashes:
@@ -5496,6 +5575,8 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             bits.append(f"{red}{terminal_text(t('error_prefix', e=st.error))}{reset}")
         if st.conflicts:
             bits.append(f"{red}{t('conflict_n', n=st.conflicts)}{reset}")
+        if st.operation:
+            bits.append(f"{yellow}{t('operation_active', op=operation_label(st.operation))}{reset}")
         if st.modified:
             bits.append(f"{red}M:{st.modified}{reset}")
         if st.deleted:
@@ -5957,6 +6038,8 @@ class TUI:
         else:
             if st.conflicts:
                 part("⚠" + t("conflict_n", n=st.conflicts), C_RED)
+            if st.operation:
+                part(t("operation_active", op=operation_label(st.operation)), C_YELLOW)
             if st.modified:
                 part(f"M:{st.modified}", C_RED)
             if st.deleted:
