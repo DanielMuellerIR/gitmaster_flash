@@ -31,6 +31,11 @@ diese Remote-Konfiguration. Ein leerer String bedeutet unbekannt. Eine null-
 oder fehlende Identität ist unbekannt. Branch-Abdeckung bezieht sich auf lokal
 bekannte Remote-Tracking-Refs, benannt durch `branch_coverage_basis`.
 
+Ändern sich HEAD oder Branch-/Remote-Refs während eines Scans, melden `error`
+und `branches_error` einen lokalen Messfehler. `head_oid` wird unbekannt und das
+Branch-Inventar verworfen. Die verbleibenden Zähler sind unvollständige Messungen,
+kein erfolgreich synchronisierter Snapshot; vor weiteren Aktionen neu einlesen.
+
 Textfelder stellen Terminal-Steuerzeichen und Bytes ohne UTF-8-Darstellung
 sichtbar maskiert dar. Konfigurierte Remote-URLs haben keine exportierten URL-Felder;
 Ziel-Identitäten sind gehasht. Git-Fehlerbelege enthalten redigierten Text. Anzeigetexte nicht in Git-Argumente zurückwandeln.

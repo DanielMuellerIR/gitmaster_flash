@@ -277,7 +277,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.30.2 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.30.3 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -939,8 +939,10 @@ Python/Git. Repeat `--python` and `--git` to check an installed matrix; `--suite
 selects feature-contract tests and `--screens` adds image verification. It installs
 nothing. `python3 tools/benchmark-scan.py` measures five runs per fixture, using
 only temporary local remotes. See [the recorded measurement](docs/scan-benchmark.json).
-With 25 branches pointing to the same commit and three remotes, the optimized
-scan uses 33 rather than 57 Git calls locally and 136 rather than 160 with fetch.
+With 25 branches pointing to the same commit and three remotes, the 0.30.0
+measurement used 33 rather than 57 Git calls locally and 136 rather than 160 with fetch.
+Version 0.30.3 adds four calls to detect HEAD/ref changes across the complete
+measurement: 37 locally and 140 with fetch, for either one or 25 identical tips.
 Only identical OID coverage counts within one ref measurement are shared; every
 ref/HEAD recheck and transfer preflight remains in place. Timings depend on load.
 

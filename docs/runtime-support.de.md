@@ -37,6 +37,21 @@ Erfolg.
 
 ## Prüfstand, 2026-10-16
 
+### 0.30.3
+
+| System | Python | Git | Ergebnis |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 842 Tests und sechs identische Bilder |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 157 Kernprüfungen |
+| Linux, x86_64 | 3.12.3 | 2.43.0 | 788 ausgeführt, 54 zsh-Prüfungen übersprungen |
+
+Vier Regressionen wurden vor der Korrektur reproduziert. Geprüft sind HEAD-Wechsel
+einschließlich unborn/detached, Ref-Änderungen zwischen den Graph-Lesern und
+JSON-Exponentenüberläufe. Echte Terminalabläufe DE/EN halten beim Fetch aller
+Remotes das ursprüngliche Repo fest, wenn die Arbeitsansicht die Auswahl ändert.
+Echte CLI-Läufe melden einen widersprüchlichen Scan mit Exit 1 und JSON-Überlauf
+mit Exit 2.
+
 ### 0.30.2
 
 | System | Python | Git | Ergebnis |
@@ -92,3 +107,9 @@ Der Fall mit einem Branch bleibt bei 33 / 136. Laufzeiten schwankten mit der Las
 Aufrufzahlen sind das stabile Ergebnis. Ref-/HEAD-Nachprüfungen und Konfigurations-
 prüfungen vor jeder Übertragung bleiben erhalten. Zählungen werden nur innerhalb
 eines festgehaltenen Ref-Inventars geteilt.
+
+Die aufgezeichnete Messung `consistency_guard` für 0.30.3 ergänzt vier Prüfungen
+über die gesamte Graph-Messung. Der Fall mit einem und der mit 25 Branches
+benötigen jeweils 37 lokale oder 140 Fetch-Scan-Aufrufe. Damit werden Änderungen
+zwischen Remote-Zählern, Branch-Inventar und Upstream-Lesen erkannt; der Scan
+meldet einen lokalen Messfehler.

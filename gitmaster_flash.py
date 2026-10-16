@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.30.2"
+__version__ = "0.30.3"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -163,6 +163,10 @@ TR = {
     "snapshot_too_large": {"en": "snapshot exceeds 64 MiB", "de": "Snapshot überschreitet 64 MiB"},
     "snapshot_duplicate_key": {"en": "duplicate JSON key: {name}", "de": "Doppelter JSON-Schlüssel: {name}"},
     "snapshot_nonfinite": {"en": "non-finite JSON number: {value}", "de": "Nicht endliche JSON-Zahl: {value}"},
+    "scan_head_changed": {"en": "HEAD changed during repository scan; refresh and retry",
+                          "de": "HEAD hat sich während des Repo-Scans geändert; bitte neu einlesen"},
+    "scan_refs_changed": {"en": "Branch or remote refs changed during repository scan; refresh and retry",
+                          "de": "Branch- oder Remote-Refs haben sich während des Repo-Scans geändert; bitte neu einlesen"},
     "snapshot_depth": {"en": "JSON nesting is too deep", "de": "JSON-Verschachtelung ist zu tief"},
     "cli_compare_options": {"en": "--compare cannot be combined with --diff, --demo or fetch options",
                             "de": "--compare ist nicht mit --diff, --demo oder Fetch-Optionen kombinierbar"},
@@ -5475,6 +5479,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
     st = RepoStatus(path=repo, rel=rel)
     t_ = cfg["git_timeout"]
     detached = False
+    scan_refs = None
     try:
         # Branch (oder detached HEAD). Bewusst der VOLLE Ref und selbst
         # gekuerzt: `--short` liefert nicht den Branchnamen, sondern den
@@ -5483,15 +5488,16 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
         # der Commit scheiterte dauerhaft mit "HEAD changed after UI approval",
         # der Push mit "inspect failed", und die Liste behauptete "Branch nicht
         # auf origin" (Review-Fund 2026-09-03).
-        r = run_git(repo, "symbolic-ref", "-q", "HEAD", timeout=t_)
-        if r.returncode == 0:
-            st.branch = r.stdout.strip().removeprefix("refs/heads/")
+        head_ref = current_symbolic_head_ref(repo, t_)
+        if head_ref is not None:
+            st.branch = head_ref.removeprefix("refs/heads/")
         else:
             _required_git(repo, "rev-parse", "--verify", "HEAD", timeout=t_)
             st.branch = "(detached)"
             st.remote_state = "detached"
             detached = True
         st.head_oid = current_head(repo, t_)
+        head_before = (head_ref, st.head_oid)
 
         # Arbeitsverzeichnis-Zustand
         try:
@@ -5587,6 +5593,9 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
                         "",
                     )
             st.remote = detect_sync_remote(repo, cfg, configs)
+        # Der eigene Fetch darf Refs bewegen. Erst danach beginnt die gemeinsame
+        # Messung für Remote-Zähler, Branch-Inventar und Upstream.
+        scan_refs = read_ref_snapshot(repo, t_)
         st.remotes = collect_remote_statuses(
             repo, st.branch, st.remote, cfg, configs,
             fetch_failures=fetch_failures)
@@ -5594,11 +5603,6 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
             remote.fetched_at = fetch_times.get(remote.name, "")
         try:
             st.branches = read_branch_inventory(repo, cfg)
-            current = next((b for b in st.branches if b.is_head), None)
-            if not detached and st.head_oid:
-                if current is None or (current.name, current.oid) != (st.branch, st.head_oid):
-                    st.head_oid = ""
-                    raise GitReadError("HEAD changed during branch inventory")
             st.branches_scanned = True
         except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
             st.branches = []
@@ -5640,6 +5644,23 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
         st.error = str(exc)
         st.remote_state = "error"
     finally:
+        if scan_refs is not None:
+            try:
+                # Auch unborn HEAD und detached HEAD gehören zur Identität.
+                # finally prüft ebenso die frühen Rückgaben ohne Sync-Remote.
+                if (current_symbolic_head_ref(repo, t_), current_head(repo, t_)) != head_before:
+                    raise GitReadError(t("scan_head_changed"))
+                if read_ref_snapshot(repo, t_) != scan_refs:
+                    raise GitReadError(t("scan_refs_changed"))
+            except Exception as exc:
+                st.head_oid = ""
+                st.branches = []
+                st.branches_scanned = False
+                st.branches_error = st.error = st.error_long = str(exc)
+                st.remote_state = "error"
+                # Dies ist ein lokaler Messfehler, auch wenn zusätzlich ein
+                # Remote-Fetch scheiterte. Der Vergleich darf ihn nicht ausblenden.
+                st.fetch_error = False
         if not st.measured_at:
             st.measured_at = utc_now()
     return st
@@ -6853,8 +6874,15 @@ def parse_snapshot_json(text: str):
     def nonfinite(value):
         raise ValueError(t("snapshot_nonfinite", value=value))
 
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            nonfinite(value)
+        return number
+
     try:
-        payload = json.loads(text, object_pairs_hook=unique_keys, parse_constant=nonfinite)
+        payload = json.loads(text, object_pairs_hook=unique_keys, parse_constant=nonfinite,
+                             parse_float=finite_float)
     except RecursionError:
         raise ValueError(t("snapshot_depth")) from None
     # Die Decoder verschiedener Python-Versionen haben unterschiedliche Grenzen.
@@ -8680,11 +8708,15 @@ class TUI:
             return
         if selected == "":
             failures = []
+            repo_path = st.path
             for name in [remote.name for remote in st.remotes]:
                 fresh = self._fetch_remote(st, name)
                 if fresh is None:
                     failures.append(name)
-                    st = self.current() or st
+                    # Ein Refresh kann das Repo aus der Arbeitsansicht nehmen.
+                    # Weitere Fetches bleiben trotzdem am ursprünglichen Ziel.
+                    st = next((entry for entry in self.all_statuses
+                               if entry.path == repo_path), st)
                 else:
                     st = fresh
             if failures:

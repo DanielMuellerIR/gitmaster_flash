@@ -16,7 +16,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 CORE_PATTERNS = (
     'test_state_contracts.py', 'test_branch_inventory.py', 'test_measurement_refresh.py',
-    'test_work_views.py', 'test_snapshot_contract.py', 'test_path_bytes.py',
+    'test_work_views.py', 'test_snapshot_contract.py', 'test_scan_consistency.py', 'test_path_bytes.py',
     'test_repository_topology.py', 'test_diff_modes.py', 'test_package_integration.py',
 )
 

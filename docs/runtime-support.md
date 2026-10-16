@@ -35,6 +35,20 @@ An unavailable or below-floor runtime is a failed check, not a skipped success.
 
 ## Validation record, 2026-10-16
 
+### 0.30.3
+
+| System | Python | Git | Result |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 842 tests and six identical images |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 157 core checks |
+| Linux, x86_64 | 3.12.3 | 2.43.0 | 788 executed, 54 zsh checks skipped |
+
+Four regressions were reproduced before correction. Tests cover HEAD changes
+including unborn/detached states, ref changes across graph reads, and overflowing
+JSON exponents. Real English/German terminal flows retain the original repo
+during an all-remote fetch when the work view changes selection. Real CLI runs
+report a raced scan with exit 1 and a JSON overflow with exit 2.
+
 ### 0.30.2
 
 | System | Python | Git | Result |
@@ -89,3 +103,8 @@ shows 57 → 33 calls locally and 160 → 136 with fetch for 25 identical tips.
 The one-branch case stays at 33 / 136. Timing varied with host load; process counts
 are the stable result. Ref/HEAD rechecks and per-transfer configuration checks
 are retained. Counts are shared only inside one pinned ref inventory.
+
+The recorded `consistency_guard` measurement for 0.30.3 adds four checks across
+the complete graph measurement. Both the one- and 25-branch cases use 37 local
+or 140 fetch-scan calls. These checks detect changes between remote counters,
+branch inventory and upstream reads; the scan reports a local measurement error.

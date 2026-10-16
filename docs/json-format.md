@@ -30,6 +30,11 @@ configuration, known to this process. An empty string means unknown. A null
 identity is unknown. Branch coverage uses locally known remote-tracking refs,
 as indicated by `branch_coverage_basis`.
 
+If HEAD or branch/remote refs change during a scan, `error` and `branches_error`
+report a local measurement failure. `head_oid` becomes unknown and the branch
+inventory is discarded. The remaining counters are incomplete measurements,
+not a successful synchronized snapshot; refresh before acting on them.
+
 Text fields escape terminal controls and bytes that cannot be represented as
 UTF-8. Configured remote URLs have no exported URL fields; endpoint identity is hashed.
 Git error evidence retains redacted text.

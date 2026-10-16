@@ -300,7 +300,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.30.2 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.30.3 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -997,8 +997,10 @@ Matrix; `--suite core` wählt Funktionsverträge, `--screens` ergänzt die Bildp
 Es wird nichts installiert. `python3 tools/benchmark-scan.py` misst je Fixture
 fünf Läufe ausschließlich mit temporären lokalen Remotes. Siehe die
 [aufgezeichnete Messung](docs/scan-benchmark.json). Bei 25 Branches auf demselben
-Commit und drei Remotes braucht der optimierte Scan lokal 33 statt 57 Git-Aufrufe,
-mit Fetch 136 statt 160. Nur identische OID-Abdeckungszahlen innerhalb einer
+Commit und drei Remotes brauchte die Messung von 0.30.0 lokal 33 statt 57 Git-Aufrufe,
+mit Fetch 136 statt 160. Version 0.30.3 ergänzt vier Aufrufe, um HEAD-/Ref-Wechsel
+über die gesamte Messung zu erkennen: 37 lokal und 140 mit Fetch, bei einem oder
+25 identischen Spitzen. Nur identische OID-Abdeckungszahlen innerhalb einer
 Ref-Messung werden geteilt; alle Ref-/HEAD-Nachprüfungen und Transfer-Preflights
 bleiben erhalten. Laufzeiten hängen von der Last ab.
 

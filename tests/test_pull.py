@@ -255,6 +255,45 @@ class PullTests(unittest.TestCase):
         self.assertEqual(self.git(self.repo, "rev-parse", "refs/remotes/mirror/main"), mirror_head)
         self.assertEqual(self.ui.choose_pull_remote.call_count, 2)
 
+    def test_all_fetches_keep_original_repo_when_refresh_hides_it(self):
+        other = self.root / "other"
+        self.git(self.root, "clone", "-b", "main", str(self.root / "mirror.git"), str(other))
+        self.git(other, "remote", "rename", "origin", "mirror")
+        self.git(other, "remote", "add", "origin", str(self.root / "origin.git"))
+        collect = gmf.collect_status
+        fetch = gmf.fetch_remote_safely
+        failed = False
+        calls = []
+
+        def measured(repo, *args, **kwargs):
+            status = collect(repo, *args, **kwargs)
+            if repo == other or not failed:
+                status.branches_error = "temporary inventory failure"
+            return status
+
+        def fetched(repo, remote, *args):
+            nonlocal failed
+            calls.append((repo, remote.name))
+            if not failed:
+                failed = True
+                raise OSError("temporary fetch failure")
+            return fetch(repo, remote, *args)
+
+        self.ui.all_statuses = [measured(repo, self.root, self.ui.cfg)
+                                for repo in (self.repo, other)]
+        self.ui.status_view = "access"
+        self.ui.apply_filter()
+        self.ui.choose_pull_remote.return_value = ""
+        other_refs = gmf.read_ref_snapshot(other, 10)
+        with mock.patch.object(gmf, "collect_status", side_effect=measured), \
+             mock.patch.object(gmf, "fetch_remote_safely", side_effect=fetched):
+            self.pull()
+        self.assertEqual([repo for repo, _ in calls], [self.repo, self.repo])
+        self.assertEqual({name for _, name in calls}, {"origin", "mirror"})
+        self.assertEqual(self.ui.current().path, other)
+        self.assertEqual(gmf.read_ref_snapshot(other, 10), other_refs)
+        self.assertFalse(self.ui.confirm_in_pager.called)
+
     def test_cancel_and_dirty_and_divergent_never_integrate(self):
         before = self.git(self.repo, "rev-parse", "HEAD")
         self.ui.confirm_in_pager.return_value = False

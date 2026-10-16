@@ -208,6 +208,30 @@ class SnapshotContractTests(unittest.TestCase):
         broken["view"] = {"id": "all", "matches": 1, "total": 6, "hidden_attention": 0}
         self.assertFalse(g._valid_remote_payload(broken))
 
+    def test_overflowed_json_numbers_are_rejected_in_unknown_nested_fields(self):
+        for number in ("1e999", "-1e999", "1.5e999", "-1.5e999"):
+            text = '{"version":"x","repos":[],"extra":{"nested":[' + number + ']}}'
+            path = self.root / "overflow.json"
+            path.write_text(text, encoding="utf-8")
+            for language in ("en", "de"):
+                with self.subTest(number=number, language=language):
+                    with patch.object(g, "UI_LANG", language):
+                        with self.assertRaises(ValueError):
+                            g.parse_snapshot_json(text)
+                    output, error = io.StringIO(), io.StringIO()
+                    with redirect_stdout(output), redirect_stderr(error):
+                        code = g.main(["--compare", str(path), str(path),
+                                       "--json", "--lang", language])
+                    self.assertEqual(code, 2)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertTrue(error.getvalue())
+
+    def test_finite_json_exponents_remain_accepted(self):
+        text = '{"version":"x","repos":[],"extra":[1e308,-1e308,1e-999]}'
+        parsed = g.parse_snapshot_json(text)
+        self.assertEqual(parsed["extra"], [1e308, -1e308, 0.0])
+        self.assertTrue(g._valid_remote_payload(parsed))
+
     def test_file_size_invalid_utf8_and_bom_are_handled(self):
         path = self.file("snapshot.json", self.snapshot())
         with patch.object(g, "MAX_SNAPSHOT_BYTES", 16):
