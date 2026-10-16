@@ -107,10 +107,15 @@ nicht in Befunden.
 | `branch_coverage_unknown` | local | `count`, Branches mit unbekannter Abdeckung |
 | `operation` | local | `operation`, stabile Git-Vorgangs-ID |
 | `dirty` | local | `count`, geänderte/neue Dateien |
+| `worktree_inventory_failed` | local | `error`; `side` nennt die Seite |
+| `submodule_inventory_failed` | local | `error`; `side` nennt die Seite |
+| `submodule_inspection_failed` | local | `path`, `error`; `side` nennt die Seite |
+| `submodule_state` | local | `path`, `here_state`, `there_state` |
 | `fetch_failed_side` | local | `count`, Repos mit fehlgeschlagenem Fetch |
 
 Die Grenz-Codes sind `legacy_schema`, `head_identity_unknown`,
-`branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`.
+`branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`
+und `submodule_inventory_unknown` (nur wenn das Gegenstück ein Modul-Inventar hat).
 Grenzen allein ändern den Exit-Code nicht. Vergleiche enden mit 0 ohne Befunde,
 1 mit mindestens einem Befund und 2 bei unlesbarem oder inkompatiblem Vergleich.
 Lokale Hinweise und Versionswarnungen behalten das bestehende Exit-1-Verhalten.
@@ -119,3 +124,30 @@ Leere Bestände sagen ausdrücklich, dass nichts verglichen wurde.
 Bei einer Arbeitsansicht zählen `here_matches` und `host_matches` einbezogene
 Gegenstücke; `here_view_matches` und `host_view_matches` zählen tatsächliche
 Ansichtstreffer. `selection: "either-side"` hält die Vereinigungsregel fest.
+
+## Optionale Worktree- und Modul-Inventare
+
+`worktree_family` enthält die lokale `id`, das absolute `common_dir`,
+`measured_at` und `members`. Ein Mitglied enthält `path`, `head_oid`, `branch`,
+`bare`, `detached`, `locked`, `lock_reason`, `prunable`, `prune_reason`,
+`present` (bool oder null bei unbekannt), `in_scan_root` und `is_current`.
+`worktrees_error` erklärt eine fehlgeschlagene Messung. IDs und absolute Pfade
+sind lokale Zuordnung, kein Rechnervergleich. Registrierte externe Pfade werden
+nicht zusätzlich gescannt.
+
+`submodules` enthält direkte Module mit `path`, `head_oid` (Eltern-HEAD),
+`index_oid`, `checked_out_oid`, `index_mode`, `index_entries` (je `mode`, `oid`,
+`stage`), `initialized`, `conflicted`, `worktree_kind`, `modified`, `deleted`,
+`untracked`, `conflicts`, `operation` und `error`. `worktree_kind` ist
+`repository`, `directory`, `missing`, `file` oder `unavailable`.
+`submodules_error` erklärt ein nicht belegbares Gesamtinventar;
+`submodule_review_count` zählt Inhaltsänderungen, Konflikte und Vorgänge.
+Ein leeres erfolgreich gemessenes Array belegt keine direkten Module; ein
+fehlendes Feld belegt keine Messung. Fehlermeldungen gehen vor leeren Ergebnissen.
+Modul-URLs und Update-Befehle werden nicht exportiert.
+
+`submodule_state` vergleicht Verweise, Initialisierung, Dateizähler und Vorgänge
+als lokale Zustände. Ein Lesefehler erzeugt einen eigenen Befund statt eines
+vermeintlich fehlenden Moduls. Neue optionale Felder und Befundtypen können in
+Schema 1 hinzukommen; Verbraucher sollten unbekannte Typen erhalten oder
+überspringen, statt sie als bekannte Typen auszulegen.

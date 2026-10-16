@@ -148,8 +148,7 @@ arguments; cancelled confirmations remain explicitly marked as not run.
 
 ## Keys
 
-Every shortcut is permanently visible in the footer, so there is nothing to
-memorize. Case does not matter — `f` works like `F`.
+The footer shows common shortcuts; `H` lists all actions. Case does not matter — `f` works like `F`.
 
 | Key | Action |
 |---|---|
@@ -168,6 +167,8 @@ memorize. Case does not matter — `f` works like `F`.
 | P | safely push the current branch to the private sync remote |
 | G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
+| W | inspect the worktree family, including registered paths outside the scan root |
+| O | inspect submodule references, contents and initialization state |
 | I | repository, remote and branch details; there: `T` tests a remote, `X` removes one (cannot be undone) |
 | S | view the latest stash as a diff (read-only, scrollable) |
 | R | fetch every safe remote in the background; the list stays usable |
@@ -276,7 +277,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.28.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.29.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -441,11 +442,14 @@ An unreadable or concurrently changed inventory is labelled as unavailable.
    too. Both stay visible, because both differences are real; they just say so
    instead of letting the whole commit fail.
 
-   Everything else stays selectable, including paths that turn out to contribute
-   nothing against `HEAD` — a path removed with `git rm --cached`, a submodule
-   whose working tree is merely dirty. The commit then simply leaves them out,
-   exactly as `git commit -- <path>` does. Only when *no* selected path
-   contributes anything does the helper say so instead of committing.
+   Submodule entries identify Gitlink references. A changed, initialized module
+   checkout can be recorded in the parent commit; uncommitted files inside it
+   cannot. Content-only entries are disabled with an `O` detail hint. Conflicted,
+   unavailable or uninitialized references are not offered as ordinary files.
+   A removed module or one replaced by a file remains selectable when its
+   state is proven. Other paths may still contribute nothing against `HEAD`,
+   such as a path removed only with `git rm --cached`; the helper leaves those
+   out and explains when no selected path contributes a change.
 2. `G` offers ready-made subsets — because with thirty changed files you usually
    want several coherent commits rather than one large one. Three views:
    by kind of change (changed / new / deleted), by top-level folder, and by file
@@ -859,3 +863,35 @@ records.
 ## License
 
 **WTFPL** — see [LICENSE](LICENSE).
+
+## Worktree families and submodules (`W`, `O`)
+
+`W` groups the selected working copy with registrations sharing its Git common
+directory. Each working copy remains a separate row in the scan. The family
+view names paths, branches and full commit IDs, plus detached, unborn, bare,
+locked, missing and prunable states. It reuses local measurements already in
+the scan; registered paths outside the scan root are labelled uninspected and
+receive no additional Git status scan. Registry and working-copy times are shown
+separately. Family identity is local to this machine.
+
+`O` separates three references for each direct submodule: parent HEAD, parent
+index and module checkout. Changed files, active operations and conflicted index
+stages are listed separately. Uninitialized, missing and replaced modules stay
+visible. Repository ignore settings do not hide module contents. The view does
+not initialize, update or fetch a module, and it does not run a configured module
+update command. Nested submodules are not recursively inventoried.
+
+Both actions reread the selected repository locally. `A` and the expanded list
+label module paths; `C` records an approved module reference only. Commit the
+files inside the module first. A module operation without file changes receives
+an `O<n>` review mark. Unreadable inventories are shown as unavailable, not as
+empty. `--list`, `--json`, work views and comparisons retain these distinctions.
+Absolute worktree paths and family IDs are not compared across machines; module
+reference/content differences are local findings. Old snapshots without module
+inventories cannot establish that modules are absent.
+
+Try `W` on `monorepo-sandbox` and `O` on `iot-firmware` in `gmf --demo`. The
+demo builds both examples using local repositories. Local measurement time is
+captured before a later fetch, so a slow fetch does not make old file status
+look newly measured. NUL-delimited Git paths preserve CR, LF and undecodable
+bytes internally; displays escape them.

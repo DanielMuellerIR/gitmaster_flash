@@ -6,7 +6,7 @@ Green = clean and in sync with the configured remote; red/yellow = needs
 attention (modified/deleted/untracked files, merge conflicts, stashes, commits
 ahead/behind). Problem repos sort to the top.
 
-Keys (all shown in the footer, nothing to memorize; case-insensitive — f == F):
+Keys (wide footer lists them; H has full help; case-insensitive — f == F):
   ↑/↓   select a repo
   →     expand (shows files with M/D/U/C and stashes)
   ←     collapse
@@ -72,7 +72,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"
 JSON_SCHEMA_VERSION = 1
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_SNAPSHOT_DEPTH = 128
@@ -209,6 +209,16 @@ TR = {
         "de": "DRIFT  {rel}: Commit auf '{br}' verschieden: {oa} {a}, {ob} {b}"},
     "diff_operation": {"en": "local  {rel}: {op} in progress {m}",
                        "de": "lokal  {rel}: {op} läuft {m}"},
+    "diff_worktree_inventory_failed": {"en": "local  {rel}: worktree inventory unavailable {m}: {e}",
+                                       "de": "lokal  {rel}: Worktree-Inventar nicht lesbar {m}: {e}"},
+    "diff_submodule_inventory_failed": {"en": "local  {rel}: submodule inventory unavailable {m}: {e}",
+                                        "de": "lokal  {rel}: Submodule-Inventar nicht lesbar {m}: {e}"},
+    "diff_submodule_inspection_failed": {"en": "local  {rel}: submodule '{path}' not inspected {m}: {e}",
+                                         "de": "lokal  {rel}: Submodul '{path}' nicht geprüft {m}: {e}"},
+    "diff_submodule_state": {"en": "local  {rel}: submodule '{path}' reference/content state differs",
+                             "de": "lokal  {rel}: Verweis-/Inhaltszustand von Submodul '{path}' verschieden"},
+    "snapshot_submodule_inventory_unknown": {"en": "submodule inventory absent in {n} compared repo(s)",
+                                            "de": "Submodule-Inventar in {n} verglichenen Repos fehlt"},
     "operation_merge": {"en": "Merge", "de": "Merge"},
     "operation_rebase": {"en": "Rebase", "de": "Rebase"},
     "operation_cherry_pick": {"en": "Cherry-pick", "de": "Cherry-Pick"},
@@ -318,6 +328,54 @@ TR = {
     "context_publish": {"en": "G pending", "de": "G offen"},
     "info_sync_state": {"en": "Sync state", "de": "Sync-Stand"},
     "info_publication": {"en": "GitHub publication", "de": "GitHub-Veröffentlichung"},
+    "worktrees_title": {"en": "Worktree family · {rel}", "de": "Worktree-Familie · {rel}"},
+    "submodules_title": {"en": "Submodules · {rel}", "de": "Submodule · {rel}"},
+    "worktrees_summary": {"en": "W {n} worktree(s), {outside} outside scan root",
+                          "de": "W {n} Worktrees, {outside} außerhalb der Scan-Wurzel"},
+    "submodules_summary": {"en": "O {n} submodule(s)", "de": "O {n} Submodule"},
+    "modules_review": {"en": "O {n} to review", "de": "O {n} prüfen"},
+    "family_common": {"en": "Shared Git directory", "de": "Gemeinsames Git-Verzeichnis"},
+    "info_family": {"en": "Worktrees", "de": "Worktrees"},
+    "info_modules": {"en": "Submodules", "de": "Submodule"},
+    "family_measured": {"en": "Registry measured", "de": "Registrierung gemessen"},
+    "family_current": {"en": "selected worktree", "de": "gewählter Worktree"},
+    "family_outside": {"en": "outside scan root; working state not inspected",
+                       "de": "außerhalb der Scan-Wurzel; Arbeitszustand nicht geprüft"},
+    "family_unmeasured": {"en": "inside scan root; no repository measurement available",
+                          "de": "innerhalb der Scan-Wurzel; keine Repo-Messung vorhanden"},
+    "family_missing": {"en": "working directory missing", "de": "Arbeitsverzeichnis fehlt"},
+    "family_unknown_presence": {"en": "path availability unknown", "de": "Verfügbarkeit des Pfads unbekannt"},
+    "family_bare": {"en": "bare repository", "de": "Bare-Repository"},
+    "family_locked": {"en": "locked: {reason}", "de": "gesperrt: {reason}"},
+    "family_prunable": {"en": "prunable: {reason}", "de": "bereinigbar: {reason}"},
+    "family_unknown": {"en": "No worktree measurement available. N rereads the repository.",
+                       "de": "Keine Worktree-Messung vorhanden. N liest das Repo neu."},
+    "family_error": {"en": "Worktree inventory unavailable: {e}", "de": "Worktree-Inventar nicht lesbar: {e}"},
+    "inspection_unavailable": {"en": "unavailable", "de": "nicht lesbar"},
+    "submodule_error": {"en": "Submodule inventory unavailable: {e}", "de": "Submodule-Inventar nicht lesbar: {e}"},
+    "submodule_unknown": {"en": "No submodule measurement available. N rereads the repository.",
+                          "de": "Keine Submodule-Messung vorhanden. N liest das Repo neu."},
+    "submodule_none": {"en": "No submodules in this repository.", "de": "Keine Submodule in diesem Repo."},
+    "submodule_note": {"en": "A parent commit records Gitlink references. Uncommitted files inside a module stay in that module. This view does not initialize, update or fetch modules.",
+                       "de": "Ein Commit im Eltern-Repo speichert Gitlink-Verweise. Uncommittete Dateien im Modul bleiben dort. Diese Ansicht initialisiert, aktualisiert oder fetcht keine Module."},
+    "submodule_head": {"en": "Parent HEAD", "de": "Eltern-HEAD"},
+    "submodule_index": {"en": "Parent index", "de": "Eltern-Index"},
+    "submodule_checkout": {"en": "Module checkout", "de": "Modul-Checkout"},
+    "submodule_contents": {"en": "Module contents", "de": "Modul-Inhalt"},
+    "submodule_not_recorded": {"en": "not recorded", "de": "nicht eingetragen"},
+    "submodule_uninitialized": {"en": "not initialized", "de": "nicht initialisiert"},
+    "submodule_replaced": {"en": "replaced by a file", "de": "durch Datei ersetzt"},
+    "submodule_staged": {"en": "reference changed in index", "de": "Verweis im Index geändert"},
+    "submodule_checkout_changed": {"en": "checkout differs from index", "de": "Checkout weicht vom Index ab"},
+    "submodule_stages": {"en": "Index stages", "de": "Index-Stufen"},
+    "submodule_only_contents": {"en": "Only module contents changed. Commit inside the module first; O shows details.",
+                               "de": "Nur Modul-Inhalte geändert. Zuerst im Modul committen; O zeigt die Details."},
+    "submodule_commit_unavailable": {"en": "The module reference cannot be committed from this state. O shows content and staging details.",
+                                    "de": "Der Modul-Verweis lässt sich in diesem Zustand nicht committen. O zeigt Inhalts- und Staging-Details."},
+    "file_submodule": {"en": "submodule", "de": "Submodul"},
+    "do_submodule_content": {"en": "(module contents; O details)", "de": "(Modul-Inhalt; O Details)"},
+    "do_submodule_skip": {"en": "(module state; O details)", "de": "(Modul-Zustand; O Details)"},
+    "do_commit_reference": {"en": "commit reference", "de": "Verweis committen"},
     "access_attention": {"en": "Inspect remote configuration", "de": "Remote-Konfiguration prüfen"},
     "selected_context": {"en": "Selected: {rel} [{branch}] · {state} · {actions} · {remotes}",
                          "de": "Gewählt: {rel} [{branch}] · {state} · {actions} · {remotes}"},
@@ -358,19 +416,19 @@ TR = {
     # Footer
     "f1": {"en": " ↑↓←→ select · ⏎ cd/quit · / search · M layout · B work view · Tab log · Q quit",
            "de": " ↑↓←→ wählen · ⏎ cd/Exit · / Suche · M Layout · B Arbeitsansicht · Tab Log · Q Ende"},
-    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · I info · H help",
-           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · I Info · H Hilfe"},
+    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · I info · W worktrees · O modules · H help",
+           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · I Info · W Worktrees · O Module · H Hilfe"},
     "f3": {"en": " N reread · R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings",
            "de": " N neu lesen · R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einst."},
-    "f1_short": {"en": " ↑↓←→ select · ⏎ cd · / find · M layout · B work · Tab log · Q",
-                 "de": " ↑↓←→ wählen · ⏎ cd · / Suche · M Layout · B Ansicht · Tab · Q"},
+    "f1_short": {"en": " ↑↓←→ · ⏎ cd · / find · M layout · B work · W/O · Tab log · Q",
+                 "de": " ↑↓←→ · ⏎ cd · / Suche · M Layout · B Ansicht · W/O · Tab · Q"},
     "f2_short": {"en": " {apps} · A diff · C commit · L pull · S stash · I info · H ?",
                  "de": " {apps} · A Diff · C Commit · L Pull · S Stash · I Info · H ?"},
     "f3_short": {"en": " N read · R all · U fetch · X stop · P sync · G GitHub · , setup",
                  "de": " N neu · R alle · U Fetch · X Stop · P Sync · G GitHub · , Setup"},
     "f1_tiny": {"en": " ↑↓ · ⏎ cd · B view · / find · Q", "de": " ↑↓ · ⏎ cd · B Ansicht · / Suche · Q"},
     "f2_tiny": {"en": " A diff · C commit · L pull · P/G push", "de": " A Diff · C Commit · L Pull · P/G Push"},
-    "f3_tiny": {"en": " M layout · I info · H help", "de": " M Layout · I Info · H Hilfe"},
+    "f3_tiny": {"en": " M layout · I info · W/O · H help", "de": " M Layout · I Info · W/O · H Hilfe"},
     "pull_choose": {"en": "Pull source · {rel} · local branch {b}",
                     "de": "Pull-Quelle · {rel} · lokaler Branch {b}"},
     "pull_all": {"en": "Fetch all remotes, then choose one pull source",
@@ -683,7 +741,9 @@ TR = {
     "git_help_title": {"en": "Safe Git actions & command log",
                        "de": "Sichere Git-Aktionen & Befehlsprotokoll"},
     "git_help_body": {
-        "en": "B  Choose a work view; / adds a path filter, M changes the layout.\n"
+        "en": "W  Read the selected repository's worktree family. External paths stay unscanned.\n"
+              "O  Read submodule references and contents; no initialization, update or fetch.\n\n"
+              "B  Choose a work view; / adds a path filter, M changes the layout.\n"
               "N  Reread the selected repo locally. U fetches one chosen remote.\n"
               "X  Stop the background scan and retain completed results.\n\n"
               "P  Push only the current branch to the private sync remote.\n"
@@ -699,7 +759,9 @@ TR = {
               "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
               "A  Shows every changed file and its diff without modifying the repository.\n"
               "   Discarding or unstaging remains an explicit terminal operation.",
-        "de": "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
+        "de": "W  Worktree-Familie des gewählten Repos lesen. Externe Pfade bleiben ungeprüft.\n"
+              "O  Submodule-Verweise und Inhalte lesen; kein Initialisieren, Update oder Fetch.\n\n"
+              "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
               "N  Gewähltes Repo lokal neu lesen. U ruft ein gewähltes Remote ab.\n"
               "X  Hintergrundscan stoppen und fertige Ergebnisse behalten.\n\n"
               "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
@@ -1211,11 +1273,23 @@ class RepoStatus:
     branches_scanned: bool = False
     branches_error: str = ""
     measured_at: str = ""
+    common_dir: Path | None = None
+    worktree_family_id: str = ""
+    worktrees: list = field(default_factory=list)
+    worktrees_measured_at: str = ""
+    worktrees_error: str = ""
+    submodules: list = field(default_factory=list)
+    submodules_scanned: bool = False
+    submodules_error: str = ""
 
     @property
     def branch_review_count(self) -> int:
         return sum(not branch.is_head and branch.coverage in ("uncovered", "unknown")
                    for branch in self.branches)
+
+    @property
+    def submodule_review_count(self) -> int:
+        return sum(submodule_needs_attention(module) for module in self.submodules)
 
     @property
     def dirty(self) -> bool:
@@ -1239,19 +1313,62 @@ class RepoStatus:
     @property
     def clean_and_synced(self) -> bool:
         return (self.sync_clean and not self.branch_review_count
-                and not self.publication_pending and not repo_matches_view(self, "access"))
+                and not self.submodule_review_count and not self.publication_pending
+                and not repo_matches_view(self, "access"))
 
     def severity(self) -> int:
         """Sortierschlüssel: Problematisches nach oben."""
         if repo_matches_view(self, "access"):
             return 0
-        if self.operation or self.dirty or self.stashes:
+        if self.operation or self.dirty or self.stashes or self.submodule_review_count:
             return 1
         if self.ahead or self.behind or self.branch_review_count or self.publication_pending:
             return 2
         if self.remote_state != "ok":
             return 3
         return 4
+
+
+@dataclass
+class WorktreeInfo:
+    path: Path
+    head_oid: str | None = None
+    branch: str = ""
+    bare: bool = False
+    detached: bool = False
+    locked: bool = False
+    lock_reason: str = ""
+    prunable: bool = False
+    prune_reason: str = ""
+    present: bool | None = None
+    in_scan_root: bool = False
+    is_current: bool = False
+
+
+@dataclass
+class SubmoduleInfo:
+    path: str
+    head_oid: str | None = None
+    index_oid: str | None = None
+    index_mode: str = ""
+    index_entries: list = field(default_factory=list)
+    checked_out_oid: str | None = None
+    initialized: bool = False
+    worktree_kind: str = "unavailable"
+    modified: int = 0
+    deleted: int = 0
+    untracked: int = 0
+    conflicts: int = 0
+    operation: str = ""
+    error: str = ""
+
+    @property
+    def conflicted(self) -> bool:
+        return any(stage != 0 for mode, oid, stage in self.index_entries)
+
+    @property
+    def content_dirty(self) -> bool:
+        return bool(self.modified or self.deleted or self.untracked or self.conflicts or self.operation)
 
 
 @dataclass
@@ -1893,7 +2010,7 @@ class ChangedFile(NamedTuple):
     rename_group: str = ""
 
 
-def committable_against_head(entry: ChangedFile) -> bool:
+def committable_against_head(entry: ChangedFile, module: SubmoduleInfo | None = None) -> bool:
     """Kann die Commit-Hilfe für diesen Eintrag überhaupt etwas committen?
 
     Sie baut ihren temporären Index aus HEAD und stagt dort genau die
@@ -1916,7 +2033,22 @@ def committable_against_head(entry: ChangedFile) -> bool:
     ``git commit -- sub/`` ebenfalls ab („pathspec did not match any files
     known to git“). Der Eintrag bleibt deshalb sichtbar, aber nicht anwählbar.
     """
-    return entry.xy != "AD" and not entry.path.endswith("/")
+    if entry.xy == "AD" or entry.path.endswith("/"):
+        return False
+    if module is None:
+        return True
+    if module.error or module.conflicted:
+        return False
+    if module.worktree_kind == "file":
+        return True
+    if module.initialized:
+        return is_object_id(module.checked_out_oid) and module.checked_out_oid != module.head_oid
+    return module.worktree_kind == "missing" and entry.code == "D"
+
+
+def module_content_only(module: SubmoduleInfo) -> bool:
+    return (not module.error and module.initialized and module.content_dirty
+            and module.head_oid == module.index_oid == module.checked_out_oid)
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -2602,11 +2734,18 @@ def finish_interrupted_commit(repo: Path, head_before: str | None,
     return True
 
 
+def _git_reported_path(repo: Path, *args: str, timeout: int) -> Path:
+    result = _required_git(repo, "rev-parse", *args, timeout=timeout)
+    value = result.stdout.removesuffix("\n")
+    if not value or "\0" in value:
+        raise GitReadError("Git returned an invalid path")
+    path = Path(value)
+    return path if path.is_absolute() else (repo / path).absolute()
+
+
 def _git_path(repo: Path, name: str, timeout: int) -> Path:
     """Einen von Git bestimmten Verwaltungs-Pfad absolut zurückgeben."""
-    result = _required_git(repo, "rev-parse", "--git-path", name, timeout=timeout)
-    path = Path(result.stdout.strip())
-    return path if path.is_absolute() else repo / path
+    return _git_reported_path(repo, "--git-path", name, timeout=timeout)
 
 
 def _acquire_git_lock(path: Path) -> tuple[int, tuple[int, int]]:
@@ -3349,12 +3488,18 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             pass
 
 
+def _decode_process_output(output: bytes | str | None) -> str:
+    # text=True übersetzt auch CR innerhalb NUL-getrennter Git-Pfade in LF.
+    return output if isinstance(output, str) else (output or b"").decode("utf-8", "surrogateescape")
+
+
 def _stop_and_collect_process_group(
         proc: subprocess.Popen) -> tuple[str, str]:
     """Eine eigene Prozessgruppe beenden und höchstens fünf Sekunden einsammeln."""
     _kill_process_group(proc)
     try:
-        return proc.communicate(timeout=5)
+        out, err = proc.communicate(timeout=5)
+        return _decode_process_output(out), _decode_process_output(err)
     except Exception:
         # Der ursprüngliche communicate()-Fehler bleibt die relevante Ursache;
         # Cleanupfehler dürfen ihn nicht ersetzen oder unendlich warten lassen.
@@ -3385,7 +3530,7 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
             raise GitCancelled(" ".join(str(part) for part in cmd[:3]))
         proc = subprocess.Popen(
             cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="surrogateescape",
+            text=False,
             env=env,
             start_new_session=True,
         )
@@ -3395,6 +3540,7 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
     with proc:
         try:
             out, err = proc.communicate(timeout=timeout)
+            out, err = _decode_process_output(out), _decode_process_output(err)
         except subprocess.TimeoutExpired:
             out, err = _stop_and_collect_process_group(proc)
             raise subprocess.TimeoutExpired(
@@ -4437,6 +4583,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     if st.operation:
         head_rows.append((t("info_operation"), operation_label(st.operation)))
     head_rows.append((t("info_stashes"), str(len(st.stashes))))
+    head_rows.append((t("info_family"), worktree_summary(st)))
+    head_rows.append((t("info_modules"), submodule_summary(st)))
 
     tags = read_git("tag", "--points-at", "HEAD")
     tag_names = [terminal_text(name) for name in tags.stdout.splitlines()
@@ -4873,6 +5021,331 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     return display_up, int(ahead), int(behind)
 
 
+def path_identity(path: Path) -> tuple:
+    try:
+        info = path.stat()
+        return ("inode", info.st_dev, info.st_ino)
+    except OSError:
+        return ("path", str(path.resolve()))
+
+
+def path_in_root(path: Path, root: Path) -> bool:
+    path, root = path.resolve(), root.resolve()
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        root_key = path_identity(root)
+        return any(path_identity(parent) == root_key for parent in (path, *path.parents))
+
+
+def parse_worktrees(output: str) -> list[WorktreeInfo]:
+    if output and not output.endswith("\0\0"):
+        raise GitReadError("incomplete worktree record")
+    records = []
+    fields = {}
+    known = {"worktree", "HEAD", "branch", "bare", "detached", "locked", "prunable"}
+    for item in output.split("\0"):
+        if item:
+            key, separator, value = item.partition(" ")
+            if not fields and key != "worktree":
+                raise GitReadError("worktree record has no path")
+            if key in known:
+                if key in fields:
+                    raise GitReadError("duplicate worktree attribute")
+                fields[key] = value if separator else None
+            continue
+        if not fields:
+            continue
+        path = fields.get("worktree")
+        if not path or not Path(path).is_absolute():
+            raise GitReadError("invalid worktree path")
+        bare, detached = "bare" in fields, "detached" in fields
+        oid, branch = fields.get("HEAD"), fields.get("branch", "")
+        if bare and (detached or oid is not None or branch):
+            raise GitReadError("conflicting bare worktree state")
+        if not bare:
+            if not is_object_id(oid) or (not detached and not (
+                    isinstance(branch, str) and branch.startswith("refs/heads/")
+                    and _valid_refspec_pattern(branch))):
+                raise GitReadError("invalid worktree HEAD")
+            if detached and branch:
+                raise GitReadError("conflicting worktree branch state")
+        records.append(WorktreeInfo(
+            Path(path), oid if oid and set(oid) != {"0"} else None,
+            branch.removeprefix("refs/heads/") if branch else "",
+            bare, detached, "locked" in fields, fields.get("locked") or "",
+            "prunable" in fields, fields.get("prunable") or ""))
+        fields = {}
+    if fields or len({str(entry.path) for entry in records}) != len(records):
+        raise GitReadError("incomplete or duplicate worktree record")
+    return records
+
+
+def collect_worktrees(st: RepoStatus, root: Path, cfg: dict) -> None:
+    timeout = cfg["git_timeout"]
+    common = _git_reported_path(st.path, "--git-common-dir", timeout=timeout)
+    info = common.stat()
+    family = hashlib.sha256(f"{info.st_dev}:{info.st_ino}".encode("ascii")).hexdigest()[:20]
+    result = _required_git(st.path, "worktree", "list", "--porcelain", "-z", timeout=timeout)
+    entries = parse_worktrees(result.stdout)
+    if not entries:
+        raise GitReadError("worktree registry is empty")
+    current = path_identity(st.path)
+    for entry in entries:
+        entry.is_current = path_identity(entry.path) == current
+        entry.in_scan_root = path_in_root(entry.path, root)
+        try:
+            entry.present = stat.S_ISDIR(entry.path.stat().st_mode)
+        except FileNotFoundError:
+            entry.present = False
+        except OSError:
+            entry.present = None
+    if not any(entry.is_current and not entry.bare for entry in entries):
+        raise GitReadError("current worktree absent from registry")
+    if sum(entry.is_current for entry in entries) != 1:
+        raise GitReadError("current worktree is ambiguous in registry")
+    st.common_dir, st.worktree_family_id, st.worktrees = common, family, entries
+    st.worktrees_measured_at = utc_now()
+
+
+def valid_relative_git_path(path) -> bool:
+    return (isinstance(path, str) and "\0" not in path and not path.startswith("/")
+            and all(part not in ("", ".", "..") for part in path.split("/")))
+
+
+def read_index_entries(repo: Path, timeout: int) -> dict:
+    result = _required_git(repo, "ls-files", "--stage", "-z", timeout=timeout)
+    entries = {}
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        header, separator, path = record.partition("\t")
+        fields = header.split(" ")
+        if (not separator or len(fields) != 3 or not re.fullmatch(r"[0-7]{6}", fields[0])
+                or not is_object_id(fields[1]) or fields[2] not in ("0", "1", "2", "3")
+                or not valid_relative_git_path(path)):
+            raise GitReadError("invalid index entry")
+        value = (fields[0], fields[1], int(fields[2]))
+        bucket = entries.setdefault(path, [])
+        if any(entry[2] == value[2] for entry in bucket):
+            raise GitReadError("duplicate index stage")
+        bucket.append(value)
+    return entries
+
+
+def read_head_gitlinks(repo: Path, oid: str | None, paths: set, timeout: int) -> dict:
+    if oid is None or not paths:
+        return {}
+    if not is_object_id(oid):
+        raise GitReadError("HEAD identity unknown during submodule inventory")
+    result = _required_git(repo, "ls-tree", "-r", "--full-tree", "-z", oid, "--", *sorted(paths),
+                           timeout=timeout, env={**NO_REPLACE_ENV, "GIT_LITERAL_PATHSPECS": "1"})
+    links = {}
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        header, separator, path = record.partition("\t")
+        fields = header.split(" ")
+        if not separator or len(fields) != 3:
+            raise GitReadError("invalid tree entry")
+        if fields[0] == "160000":
+            if fields[1] != "commit" or not is_object_id(fields[2]) or path in links:
+                raise GitReadError("invalid submodule tree entry")
+            links[path] = fields[2]
+    return links
+
+
+def collect_submodules(st: RepoStatus, cfg: dict) -> None:
+    timeout = cfg["git_timeout"]
+    entries = read_index_entries(st.path, timeout)
+    indexed = {path for path, values in entries.items() if any(mode == "160000" for mode, oid, stage in values)}
+    candidates = indexed | {entry.path for entry in st.files if entry.code != "U"}
+    head_links = read_head_gitlinks(st.path, st.head_oid, candidates, timeout)
+    paths = indexed | set(head_links)
+    modules = []
+    for path in sorted(paths):
+        module = SubmoduleInfo(path, head_oid=head_links.get(path), index_entries=entries.get(path, []))
+        current = next((entry for entry in module.index_entries if entry[2] == 0), None)
+        if current is not None:
+            module.index_mode = current[0]
+            if current[0] == "160000" and set(current[1]) != {"0"}:
+                module.index_oid = current[1]
+        child = st.path / path
+        try:
+            if not path_in_root(child, st.path):
+                raise GitReadError("submodule path leaves parent worktree")
+            if any((st.path.joinpath(*Path(path).parts[:index])).is_symlink()
+                   for index in range(1, len(Path(path).parts))):
+                raise GitReadError("submodule path traverses a symlink")
+            try:
+                info = child.lstat()
+            except FileNotFoundError:
+                info = None
+            module.worktree_kind = ("missing" if info is None else
+                                    "directory" if stat.S_ISDIR(info.st_mode) else "file")
+            if module.worktree_kind == "directory" and (child / ".git").exists():
+                actual = _git_reported_path(child, "--show-toplevel", timeout=timeout)
+                if path_identity(actual) != path_identity(child):
+                    raise GitReadError("submodule path is not its repository root")
+                module.initialized = True
+                module.worktree_kind = "repository"
+                module.checked_out_oid = current_head(child, timeout)
+                status = _required_git(child, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                                       "--ignore-submodules=none", timeout=timeout)
+                module.modified, module.deleted, module.untracked, module.conflicts, _ = parse_porcelain(status.stdout)
+                module.operation = repository_operation(child, timeout)
+                if current_head(child, timeout) != module.checked_out_oid:
+                    raise GitReadError("submodule HEAD changed during inventory")
+        except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            module.error = str(exc)
+        modules.append(module)
+    if paths:
+        after = read_index_entries(st.path, timeout)
+        after_indexed = {path for path, values in after.items() if any(mode == "160000" for mode, oid, stage in values)}
+        if (indexed != after_indexed or any(entries.get(path) != after.get(path) for path in paths)
+                or current_head(st.path, timeout) != st.head_oid
+                or current_symbolic_head_ref(st.path, timeout) != (
+                    None if st.branch == "(detached)" else "refs/heads/" + st.branch)):
+            raise GitReadError("parent HEAD or submodule index changed during inventory")
+    st.submodules, st.submodules_scanned = modules, True
+
+
+def collect_topology(st: RepoStatus, root: Path, cfg: dict) -> None:
+    try:
+        collect_worktrees(st, root, cfg)
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        st.worktrees_error = str(exc)
+    try:
+        collect_submodules(st, cfg)
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        st.submodules_error = str(exc)
+
+
+def worktree_summary(st: RepoStatus) -> str:
+    if st.worktrees_error:
+        return t("family_error", e=terminal_text(st.worktrees_error))
+    if not st.worktrees_measured_at:
+        return t("family_unknown")
+    return t("worktrees_summary", n=len(st.worktrees),
+             outside=sum(not entry.in_scan_root for entry in st.worktrees))
+
+
+def submodule_summary(st: RepoStatus) -> str:
+    if st.submodules_error:
+        return t("submodule_error", e=terminal_text(st.submodules_error))
+    if not st.submodules_scanned:
+        return t("submodule_unknown")
+    value = t("submodules_summary", n=len(st.submodules))
+    return value + " · " + t("modules_review", n=st.submodule_review_count) if st.submodule_review_count else value
+
+
+def inspection_summary(st: RepoStatus) -> str:
+    keys = []
+    if st.worktrees_error:
+        keys.append("W")
+    if st.submodules_error or any(module.error for module in st.submodules):
+        keys.append("O")
+    return "/".join(keys) + " " + t("inspection_unavailable") if keys else t("access_attention")
+
+
+def worktree_lines(st: RepoStatus, statuses: list) -> list[str]:
+    lines = [worktree_summary(st)]
+    if not st.worktrees_measured_at:
+        return lines
+    lines.extend(aligned_rows([(t("family_common"), terminal_text(st.common_dir)),
+                               (t("family_measured"), st.worktrees_measured_at)]))
+    local = {path_identity(status.path): status for status in statuses}
+    for entry in st.worktrees:
+        lines.extend(["", terminal_text(entry.path)])
+        notes = []
+        if entry.is_current:
+            notes.append(t("family_current"))
+        if entry.bare:
+            notes.append(t("family_bare"))
+        elif entry.detached:
+            notes.append(t("detached"))
+        else:
+            notes.append(f"[{terminal_text(entry.branch)}]")
+        if entry.head_oid:
+            notes.append(entry.head_oid)
+        if entry.present is False:
+            notes.append(t("family_missing"))
+        elif entry.present is None:
+            notes.append(t("family_unknown_presence"))
+        if entry.locked:
+            notes.append(t("family_locked", reason=terminal_text(entry.lock_reason) or t("none_label")))
+        if entry.prunable:
+            notes.append(t("family_prunable", reason=terminal_text(entry.prune_reason) or t("none_label")))
+        lines.append("  " + " · ".join(notes))
+        measured = local.get(path_identity(entry.path))
+        if measured is not None and not entry.bare:
+            worktree = (t("age_unknown") if measured.error and not measured.fetch_error else
+                        t("info_changes", m=measured.modified, d=measured.deleted,
+                          u=measured.untracked, c=measured.conflicts))
+            rows = [(t("info_branch"), terminal_text(measured.branch)),
+                    (t("info_worktree"), worktree), (t("info_stashes"), str(len(measured.stashes))),
+                    (t("info_measured"), measured.measured_at or t("age_unknown"))]
+            if measured.operation:
+                rows.append((t("info_operation"), operation_label(measured.operation)))
+            if measured.error:
+                rows.append((t("info_last_error"), terminal_text(measured.error_long or measured.error)))
+            lines.extend("  " + line for line in aligned_rows(rows))
+        elif not entry.bare:
+            lines.append("  " + t("family_unmeasured" if entry.in_scan_root else "family_outside"))
+    return lines
+
+
+def submodule_lines(st: RepoStatus) -> list[str]:
+    lines = [terminal_text(st.path), "", t("submodule_note"), ""]
+    if st.submodules_error or not st.submodules_scanned:
+        return lines + [submodule_summary(st)]
+    if not st.submodules:
+        return lines + [t("submodule_none")]
+    for module in st.submodules:
+        lines.extend(["", terminal_text(module.path)])
+        state = []
+        if module.conflicted:
+            state.append(t("conflict_label"))
+        if module.index_oid != module.head_oid:
+            state.append(t("submodule_staged"))
+        if module.initialized and module.checked_out_oid != module.index_oid:
+            state.append(t("submodule_checkout_changed"))
+        if module.error or module.worktree_kind == "unavailable":
+            checkout = t("age_unknown")
+        elif module.worktree_kind == "missing":
+            checkout = t("family_missing")
+        elif module.worktree_kind == "file":
+            checkout = t("submodule_replaced")
+        elif module.initialized:
+            checkout = module.checked_out_oid or t("info_no_commits")
+        else:
+            checkout = t("submodule_uninitialized")
+        index = module.index_oid or t("submodule_not_recorded")
+        if module.index_mode and module.index_mode != "160000":
+            value = next(oid for mode, oid, stage in module.index_entries if stage == 0)
+            index = f"{t('submodule_replaced')} ({module.index_mode} {value})"
+        elif module.conflicted:
+            index = t("conflict_label")
+        contents = (t("age_unknown") if module.error else t("info_changes", m=module.modified,
+                    d=module.deleted, u=module.untracked, c=module.conflicts))
+        rows = [(t("submodule_head"), module.head_oid or t("submodule_not_recorded")),
+                (t("submodule_index"), index),
+                (t("submodule_checkout"), checkout),
+                (t("submodule_contents"), contents)]
+        if state:
+            lines.append("  " + " · ".join(state))
+        if module.conflicted:
+            rows.append((t("submodule_stages"), ", ".join(
+                f"{stage}: {mode} {oid}" for mode, oid, stage in module.index_entries)))
+        if module.operation:
+            rows.append((t("info_operation"), operation_label(module.operation)))
+        if module.error:
+            rows.append((t("info_last_error"), terminal_text(module.error)))
+        lines.extend("  " + line for line in aligned_rows(rows))
+    return lines
+
+
 def utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
@@ -4947,14 +5420,22 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
         st.head_oid = current_head(repo, t_)
 
         # Arbeitsverzeichnis-Zustand
-        r = _required_git(repo, "status", "--porcelain=v1", "-z",
-                          "--untracked-files=all", timeout=t_)
+        try:
+            r = _required_git(repo, "status", "--porcelain=v1", "-z",
+                              "--untracked-files=all", "--ignore-submodules=none", timeout=t_)
+        except GitReadError:
+            # Git lehnt einen Symlink am Modulpfad schon beim Eltern-Status ab.
+            # Die Gitlinks erklären den Fehler, ohne dem fremden Pfad zu folgen.
+            collect_topology(st, root, cfg)
+            raise
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
             r.stdout)
         st.operation = repository_operation(repo, t_)
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
         st.stashes = [l for l in r.stdout.splitlines() if l.strip()]
+        collect_topology(st, root, cfg)
+        st.measured_at = utc_now()
 
         # Vergleich mit ALLEN Remotes (auf Basis des letzten fetch-Stands).
         configs = read_remote_configs(repo, cfg)
@@ -5085,7 +5566,8 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
         st.error = str(exc)
         st.remote_state = "error"
     finally:
-        st.measured_at = utc_now()
+        if not st.measured_at:
+            st.measured_at = utc_now()
     return st
 
 
@@ -5328,6 +5810,33 @@ def status_dict(st: RepoStatus) -> dict:
             branches_error=json_text(st.branches_error),
             branch_coverage_basis=BRANCH_COVERAGE_BASIS,
         )
+    if st.worktrees_measured_at or st.worktrees_error:
+        payload["worktrees_error"] = json_text(st.worktrees_error)
+        payload["worktree_family"] = {
+            "id": st.worktree_family_id, "common_dir": json_text(st.common_dir),
+            "measured_at": st.worktrees_measured_at,
+            "members": [{"path": terminal_text(entry.path), "head_oid": entry.head_oid,
+                         "branch": json_text(entry.branch), "bare": entry.bare,
+                         "detached": entry.detached, "locked": entry.locked,
+                         "lock_reason": json_text(entry.lock_reason), "prunable": entry.prunable,
+                         "prune_reason": json_text(entry.prune_reason), "present": entry.present,
+                         "in_scan_root": entry.in_scan_root, "is_current": entry.is_current}
+                        for entry in st.worktrees],
+        }
+    if st.submodules_scanned or st.submodules_error:
+        payload["submodules_error"] = json_text(st.submodules_error)
+        payload["submodule_review_count"] = st.submodule_review_count
+        payload["submodules"] = [{
+            "path": json_text(module.path), "head_oid": module.head_oid,
+            "index_oid": module.index_oid, "index_mode": module.index_mode,
+            "index_entries": [{"mode": mode, "oid": oid, "stage": stage}
+                              for mode, oid, stage in module.index_entries],
+            "checked_out_oid": module.checked_out_oid, "initialized": module.initialized,
+            "worktree_kind": module.worktree_kind,
+            "modified": module.modified, "deleted": module.deleted, "untracked": module.untracked,
+            "conflicts": module.conflicts, "conflicted": module.conflicted,
+            "operation": module.operation, "error": json_text(module.error),
+        } for module in st.submodules]
     return payload
 
 
@@ -5372,6 +5881,91 @@ def make_snapshot(root: Path, statuses: list, *, all_statuses: list | None = Non
         payload["view"] = {"id": view, "matches": len(statuses), "total": len(inventory),
                            "hidden_attention": hidden_dirty(inventory, statuses)}
     return payload
+
+
+def valid_worktree_family(family, error: str) -> bool:
+    if not isinstance(family, dict) or not isinstance(family.get("members"), list):
+        return False
+    if not valid_timestamp(family.get("measured_at")):
+        return False
+    if (not isinstance(family.get("id"), str)
+            or (family.get("common_dir") is not None and not isinstance(family["common_dir"], str))):
+        return False
+    if not error and (not re.fullmatch(r"[0-9a-f]{20}", family.get("id", ""))
+                      or not isinstance(family.get("common_dir"), str) or not family["members"]):
+        return False
+    paths = set()
+    for entry in family["members"]:
+        if not isinstance(entry, dict):
+            return False
+        path = entry.get("path")
+        if not isinstance(path, str) or "\0" in path or not Path(path).is_absolute() or path in paths:
+            return False
+        paths.add(path)
+        if entry.get("head_oid") is not None and not is_object_id(entry["head_oid"]):
+            return False
+        for key in ("branch", "lock_reason", "prune_reason"):
+            if not isinstance(entry.get(key), str):
+                return False
+        for key in ("bare", "detached", "locked", "prunable", "in_scan_root", "is_current"):
+            if type(entry.get(key)) is not bool:
+                return False
+        if entry.get("present") is not None and type(entry["present"]) is not bool:
+            return False
+    return True
+
+
+def valid_submodule_payload(modules) -> bool:
+    if not isinstance(modules, list):
+        return False
+    paths = set()
+    for module in modules:
+        if not isinstance(module, dict) or not valid_relative_git_path(module.get("path")):
+            return False
+        if module["path"] in paths:
+            return False
+        paths.add(module["path"])
+        for key in ("head_oid", "index_oid", "checked_out_oid"):
+            if module.get(key) is not None and not is_object_id(module[key]):
+                return False
+        if module.get("index_mode") != "" and (not isinstance(module.get("index_mode"), str)
+                                                 or not re.fullmatch(r"[0-7]{6}", module["index_mode"])):
+            return False
+        if type(module.get("initialized")) is not bool or type(module.get("conflicted")) is not bool:
+            return False
+        if module.get("worktree_kind") not in ("missing", "directory", "repository", "file", "unavailable"):
+            return False
+        if module["initialized"] != (module["worktree_kind"] == "repository"):
+            return False
+        if not module["initialized"] and module.get("checked_out_oid") is not None:
+            return False
+        if not isinstance(module.get("error"), str):
+            return False
+        if module.get("operation") not in ("", *(operation for _, operation in OPERATION_MARKERS)):
+            return False
+        for key in ("modified", "deleted", "untracked", "conflicts"):
+            if type(module.get(key)) is not int or module[key] < 0:
+                return False
+        if not isinstance(module.get("index_entries"), list):
+            return False
+        stages = set()
+        for entry in module["index_entries"]:
+            if (not isinstance(entry, dict) or not isinstance(entry.get("mode"), str)
+                    or not re.fullmatch(r"[0-7]{6}", entry["mode"]) or not is_object_id(entry.get("oid"))
+                    or type(entry.get("stage")) is not int or entry["stage"] not in (0, 1, 2, 3)
+                    or entry["stage"] in stages):
+                return False
+            stages.add(entry["stage"])
+        if module["conflicted"] != any(stage != 0 for stage in stages):
+            return False
+        current = next((entry for entry in module["index_entries"] if entry["stage"] == 0), None)
+        if module["index_mode"] != (current["mode"] if current else ""):
+            return False
+        expected = (current["oid"] if current and current["mode"] == "160000"
+                    and set(current["oid"]) != {"0"} else None)
+        if module.get("index_oid") != expected:
+            return False
+    return True
 
 
 def _valid_remote_payload(payload) -> bool:
@@ -5439,6 +6033,17 @@ def _valid_remote_payload(payload) -> bool:
         if not valid_timestamp(repo.get("measured_at", "")):
             return False
         if "branches_error" in repo and not isinstance(repo["branches_error"], str):
+            return False
+        for key in ("worktrees_error", "submodules_error"):
+            if key in repo and not isinstance(repo[key], str):
+                return False
+        if "worktree_family" in repo and not valid_worktree_family(repo["worktree_family"], repo.get("worktrees_error", "")):
+            return False
+        if "submodules" in repo and not valid_submodule_payload(repo["submodules"]):
+            return False
+        if "submodule_review_count" in repo and (
+                "submodules" not in repo or type(repo["submodule_review_count"]) is not int
+                or not 0 <= repo["submodule_review_count"] <= len(repo["submodules"])):
             return False
         if "branch_coverage_basis" in repo and repo["branch_coverage_basis"] != BRANCH_COVERAGE_BASIS:
             return False
@@ -5577,6 +6182,8 @@ FINDING_CATEGORIES = {
     "repo_field": "drift", "branch_inventory_failed": "local",
     "branch_coverage_unknown": "local", "operation": "local", "dirty": "local",
     "fetch_failed_side": "local",
+    "worktree_inventory_failed": "local", "submodule_inventory_failed": "local",
+    "submodule_inspection_failed": "local", "submodule_state": "local",
 }
 
 
@@ -5770,6 +6377,22 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
                     elif left["coverage"] == "uncovered":
                         emit("diff_branch_pending", rel=rel, br=name,
                                      n=left["uncovered_commits"])
+        if ("submodules" in x and "submodules" in y
+                and not x.get("submodules_error") and not y.get("submodules_error")):
+            mx = {module["path"]: module for module in x["submodules"]}
+            my = {module["path"]: module for module in y["submodules"]}
+            fields = ("head_oid", "index_oid", "index_mode", "index_entries", "checked_out_oid",
+                      "initialized", "worktree_kind", "modified", "deleted", "untracked",
+                      "conflicts", "conflicted", "operation")
+            for path in sorted(set(mx) | set(my)):
+                left, right = mx.get(path), my.get(path)
+                if (left and left.get("error")) or (right and right.get("error")):
+                    continue
+                before = {key: left.get(key) for key in fields} if left else None
+                after = {key: right.get(key) for key in fields} if right else None
+                if before != after:
+                    emit("diff_submodule_state", rel=rel, path=path,
+                         here_state=before, there_state=after)
         # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
         # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
         # und Stashes sind davon unberuehrt und werden weiter verglichen.
@@ -5800,6 +6423,14 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
             if r.get("fetch_error"):
                 fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
         for side_id, name, r in (("here", here_at, x), ("there", there_at, y)):
+            for field in ("worktrees_error", "submodules_error"):
+                if r.get(field):
+                    kind = "diff_worktree_inventory_failed" if field == "worktrees_error" else "diff_submodule_inventory_failed"
+                    emit(kind, rel=rel, m=name, e=r[field], side=side_id)
+            for module in r.get("submodules", []):
+                if module.get("error"):
+                    emit("diff_submodule_inspection_failed", rel=rel, path=module["path"],
+                         m=name, e=module["error"], side=side_id)
             if r.get("branches_error"):
                 emit("diff_branch_inventory_failed", rel=rel, m=name,
                              e=r["branches_error"], side=side_id)
@@ -5893,6 +6524,13 @@ def remote_access_problem(remote, named_branch: bool) -> bool:
                     or (named_branch and not status_value(remote, "branch_mapping_safe", True)))))
 
 
+def submodule_needs_attention(module) -> bool:
+    return bool(any(status_value(module, name) for name in (
+        "modified", "deleted", "untracked", "conflicts", "conflicted", "operation"))
+        or (status_value(module, "initialized")
+            and status_value(module, "checked_out_oid") != status_value(module, "index_oid")))
+
+
 def repo_matches_view(status, view: str) -> bool:
     """Eine fachliche Auswahlregel für Modell und JSON, ohne lokalisierte Texte."""
     if view == "all":
@@ -5901,8 +6539,9 @@ def repo_matches_view(status, view: str) -> bool:
     named_branch = status_value(status, "branch", "?") not in ("", "?", "(detached)")
     has_head = named_branch and is_object_id(status_value(status, "head_oid"))
     if view == "changes":
-        return any(status_value(status, key) for key in (
+        return (any(status_value(status, key) for key in (
             "modified", "deleted", "untracked", "conflicts", "stashes", "operation"))
+            or any(submodule_needs_attention(module) for module in status_value(status, "submodules", [])))
     if view == "incoming":
         return bool(status_value(status, "behind", 0) or any(
             status_value(remote, "behind", 0) for remote in remotes))
@@ -5914,7 +6553,9 @@ def repo_matches_view(status, view: str) -> bool:
                 status_value(branch, "coverage") == "uncovered"
                 for branch in status_value(status, "branches", [])))
     if view == "access":
-        return bool(status_value(status, "error") or status_value(status, "branches_error") or any(
+        return bool(status_value(status, "error") or status_value(status, "branches_error")
+                    or status_value(status, "worktrees_error") or status_value(status, "submodules_error")
+                    or any(status_value(module, "error") for module in status_value(status, "submodules", [])) or any(
             remote_access_problem(remote, named_branch)
             for remote in remotes))
     if view == "publish":
@@ -6008,7 +6649,7 @@ def snapshot_metadata(payload: dict) -> dict:
                                   "unknown_repos": len(payload["repos"]) - len(dates)}}
 
 
-def snapshot_limitations(payload: dict, side: str) -> list:
+def snapshot_limitations(payload: dict, side: str, other: dict | None = None) -> list:
     limits = []
     if "schema_version" not in payload:
         limits.append({"side": side, "code": "legacy_schema", "count": 1})
@@ -6019,6 +6660,11 @@ def snapshot_limitations(payload: dict, side: str) -> list:
         "local_measurement_unknown": sum(not repo.get("measured_at") for repo in repos),
         "fetch_age_unknown": sum(not remote.get("fetched_at") for repo in repos for remote in repo.get("remotes", [])),
     }
+    if other is not None:
+        measured = {repo["rel"] for repo in other["repos"] if "submodules" in repo}
+        counts["submodule_inventory_unknown"] = sum(
+            repo["rel"] in measured and "submodules" not in repo and not repo.get("submodules_error")
+            for repo in repos)
     limits.extend({"side": side, "code": code, "count": count} for code, count in counts.items() if count)
     return limits
 
@@ -6028,7 +6674,7 @@ def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
     findings = diff_findings(here, there, here_name, there_name)
     lines = [finding["message"] for finding in findings]
     sources = sources or {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
-    limits = snapshot_limitations(here, "here") + snapshot_limitations(there, "there")
+    limits = snapshot_limitations(here, "here", there) + snapshot_limitations(there, "there", here)
     note = ""
     if filter_info is not None:
         shown = filter_info["query"]
@@ -6182,6 +6828,8 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
         return "●", C_RED
     if st.stashes:
         return "⚑", C_YELLOW
+    if st.submodule_review_count:
+        return f"O{st.submodule_review_count}", C_YELLOW
     if st.ahead and st.behind:
         # Divergenz bekommt EIN Zeichen: die genauen Zahlen stehen im Detail und
         # würden die Markenspalte für alle anderen unnötig verbreitern.
@@ -6318,7 +6966,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
         if st.error:
             bits.append(f"{red}{terminal_text(t('error_prefix', e=st.error))}{reset}")
         elif repo_matches_view(st, "access") and not st.branches_error:
-            bits.append(f"{red}{t('access_attention')}{reset}")
+            bits.append(f"{red}{inspection_summary(st)}{reset}")
         if st.conflicts:
             bits.append(f"{red}{t('conflict_n', n=st.conflicts)}{reset}")
         if st.operation:
@@ -6327,6 +6975,8 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             bits.append(f"{yellow}{branch_inventory_summary(st)}{reset}")
         if st.publication_pending:
             bits.append(f"{cyan}{t('publication_pending')}{reset}")
+        if st.submodule_review_count:
+            bits.append(f"{yellow}{t('modules_review', n=st.submodule_review_count)}{reset}")
         if st.modified:
             bits.append(f"{red}M:{st.modified}{reset}")
         if st.deleted:
@@ -6364,7 +7014,7 @@ C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN, C_ASK, C_ASK_KEY = 1, 2, 3, 4, 5
 FILE_CODE_COLORS = {"M": C_RED, "D": C_RED, "U": C_YELLOW, "C": C_RED}
 
 
-def file_row(code: str, path: str) -> tuple[str, int]:
+def file_row(code: str, path: str, submodule: bool = False) -> tuple[str, int]:
     """Eine Datei-Zeile als (Text, Farbpaar) — für beide Ansichten dieselbe.
 
     Die aufgeklappte Repo-Liste und die Änderungsansicht (`A`) zeigen dieselben
@@ -6374,7 +7024,10 @@ def file_row(code: str, path: str) -> tuple[str, int]:
     einem KeyError zu beenden.
     """
     label = t("conflict_label") if code == "C" else ""
-    return f"{code}  {label}{path}", FILE_CODE_COLORS.get(code, C_DIM)
+    text = f"{code}  {label}{path}"
+    if submodule:
+        text += " [" + t("file_submodule") + "]"
+    return text, FILE_CODE_COLORS.get(code, C_DIM)
 
 
 def selected_pair(pair: int) -> tuple[int, bool]:
@@ -6828,7 +7481,7 @@ class TUI:
             part(t("clean_synced"), C_GREEN)
         else:
             if repo_matches_view(st, "access") and not st.branches_error:
-                part(t("access_attention"), C_RED)
+                part(inspection_summary(st), C_RED)
             if st.conflicts:
                 part("⚠" + t("conflict_n", n=st.conflicts), C_RED)
             if st.operation:
@@ -6837,6 +7490,8 @@ class TUI:
                 part(branch_inventory_summary(st), C_RED if st.branches_error else C_YELLOW)
             if st.publication_pending:
                 part(t("publication_pending"), C_CYAN)
+            if st.submodule_review_count:
+                part(t("modules_review", n=st.submodule_review_count), C_YELLOW)
             if st.modified:
                 part(f"M:{st.modified}", C_RED)
             if st.deleted:
@@ -6959,7 +7614,7 @@ class TUI:
         app_hints = " · ".join(f"{key.upper()} {app_label(app)}"
                                for key, app in self.cfg["apps"].items())
         short = w < 100
-        if short:
+        if short or cell_width(t("f2", apps=app_hints)) >= w:
             app_hints = "/".join(self.cfg["apps"]) + " Apps"
         suffix = "_tiny" if w < 65 else "_short" if short else ""
         footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
@@ -7006,7 +7661,8 @@ class TUI:
                 self.draw_repo_line(y, self.statuses[row[1]],
                                     row[1] == self.selected and self.focus == "repos")
             elif kind == "file":
-                text, pair = file_row(row[2], row[3])
+                text, pair = file_row(row[2], row[3], any(
+                    module.path == row[3] for module in self.statuses[row[1]].submodules))
                 safe_addstr(self.scr, y, 5, text, curses.color_pair(pair))
             elif kind == "stash":
                 safe_addstr(self.scr, y, 5, f"⚑  {row[2]}   {t('stash_row_hint')}",
@@ -8061,6 +8717,20 @@ class TUI:
         lines.extend(["", "", *t("git_help_body").splitlines()])
         self.show_pager(t("git_help_title"), lines)
 
+    def action_worktrees(self):
+        st = self.current()
+        if st:
+            self.show_busy(t("reading"))
+            fresh = self.refresh_one(st)
+            self.show_pager(t("worktrees_title", rel=fresh.rel), worktree_lines(fresh, self.all_statuses))
+
+    def action_submodules(self):
+        st = self.current()
+        if st:
+            self.show_busy(t("reading"))
+            fresh = self.refresh_one(st)
+            self.show_pager(t("submodules_title", rel=fresh.rel), submodule_lines(fresh))
+
     # -- Änderungen ansehen (A) ---------------------------------------------
 
     def action_file_changes(self):
@@ -8084,7 +8754,8 @@ class TUI:
             for y, index in enumerate(range(off, min(len(st.files), off + body_h)),
                                       start=1):
                 entry = st.files[index]
-                text, pair = file_row(entry.code, entry.path)
+                text, pair = file_row(entry.code, entry.path, any(
+                    module.path == entry.path for module in st.submodules))
                 safe_addstr(self.scr, y, 1, text,
                             color_attr(pair, index == sel))
             safe_addstr(self.scr, h - 1, 0, t("changes_footer").ljust(w - 1),
@@ -8303,6 +8974,10 @@ class TUI:
         if st.conflicts:
             self.message = t("commit_conflicts")
             return
+        if st.submodules_error:
+            self.message = submodule_summary(st)
+            return
+        modules = {module.path: module for module in st.submodules}
         # Alle Pfade starten ausgewaehlt; Space nimmt einzelne Pfade oder ein
         # zusammengehoeriges Rename-Paar aus dem Commit. Die Hilfe veraendert
         # den Arbeitsbaum vor dem Commit nicht (insbesondere keine .gitignore).
@@ -8310,11 +8985,17 @@ class TUI:
         # committen gibt, sind an- und abwaehlbar (committable_against_head).
         items = [
             {"code": entry.code, "path": entry.path,
-             "include": committable_against_head(entry),
-             "committable": committable_against_head(entry),
+             "include": committable_against_head(entry, modules.get(entry.path)),
+             "committable": committable_against_head(entry, modules.get(entry.path)),
+             "submodule": entry.path in modules,
+             "reference": entry.path in modules and modules[entry.path].worktree_kind != "file",
              "rename_group": entry.rename_group}
             for entry in st.files
         ]
+        if not any(item["committable"] for item in items) and any(item["submodule"] for item in items):
+            only_contents = all(item["submodule"] and module_content_only(modules[item["path"]]) for item in items)
+            self.message = t("submodule_only_contents" if only_contents else "submodule_commit_unavailable")
+            return
         sel = 0
         off = 0
         # Eigene Meldungszeile: Die Hilfe zeichnet ihr eigenes Bild, die Zeile
@@ -8335,9 +9016,10 @@ class TUI:
             # Die 6 Zellen daneben sind fest: der Statuscode, die zwei
             # Leerzeichen dahinter, das eine vor der Beschriftung und die zwei,
             # die safe_addstr() an den Rändern frei lässt.
-            label_width = max(cell_width(t(key)) for key in
-                              ("do_commit", "do_skip", "do_nothing_vs_head",
-                               "do_embedded_repo"))
+            label_keys = ["do_commit", "do_skip", "do_nothing_vs_head", "do_embedded_repo"]
+            if any(item["submodule"] for item in items):
+                label_keys.extend(("do_submodule_content", "do_submodule_skip", "do_commit_reference"))
+            label_width = max(cell_width(t(key)) for key in label_keys)
             path_width = max(1, w - label_width - 6)
             for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
                 it = items[i]
@@ -8345,11 +9027,12 @@ class TUI:
                     # Zwei verschiedene Gruende, zwei verschiedene Saetze: ein
                     # Ordner-Eintrag ist ein fremdes Repo, kein gestagter und
                     # dann geloeschter Pfad.
-                    label = t("do_embedded_repo" if it["path"].endswith("/")
-                              else "do_nothing_vs_head")
+                    label = t(("do_submodule_content" if module_content_only(modules[it["path"]])
+                               else "do_submodule_skip") if it["submodule"] else
+                              "do_embedded_repo" if it["path"].endswith("/") else "do_nothing_vs_head")
                     pair = C_DIM
                 elif it["include"]:
-                    label, pair = t("do_commit"), C_GREEN
+                    label, pair = t("do_commit_reference" if it["reference"] else "do_commit"), C_GREEN
                 else:
                     label, pair = t("do_skip"), C_DIM
                 safe_addstr(self.scr, y, 1,
@@ -8623,6 +9306,10 @@ class TUI:
             self.action_git_help()
         elif key == "I":
             self.action_repo_info()
+        elif key == "W":
+            self.action_worktrees()
+        elif key == "O":
+            self.action_submodules()
         elif key == "A":
             self.action_file_changes()
         elif key == "M":
@@ -9026,9 +9713,15 @@ def build_demo_sandbox(base: Path) -> Path:
     _demo_behind(repo, 1)
     _demo_ahead(repo, 2)
 
-    # 13) eigener Branch 'develop', 3 Commits voraus
+    # 13) eigener Branch, Submodul-Inhalt und drei Commits voraus
     repo, _ = _demo_repo(root, "iot-firmware", branch="develop")
+    _dgit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-b", "main",
+          "--name", "library", str(root / "_remotes" / "notes-vault.git"), "deps/library")
+    _demo_harden(repo / "deps/library")
+    _dgit(repo, "commit", "-qm", "add library submodule")
+    _dgit(repo, "push", "-q", "origin", "develop")
     _demo_ahead(repo, 3)
+    (repo / "deps/library/draft.txt").write_text("unfinished module content\n")
 
     # 14) Feature-Branch mit Slash im Namen + untracked
     repo, _ = _demo_repo(root, "data-pipeline", branch="feature/etl-rewrite")
@@ -9063,8 +9756,11 @@ def build_demo_sandbox(base: Path) -> Path:
         (repo / "README.md").write_text(f"# recipe-app\n\ndraft {i}\n")
         _dgit(repo, "stash")
 
-    # 19) Release-Branch, sauber & synchron
-    _demo_repo(root, "monorepo-sandbox", branch="release/2.1")
+    # 19) Release-Branch mit registriertem, nicht zusätzlich gescanntem Worktree
+    repo, _ = _demo_repo(root, "monorepo-sandbox", branch="release/2.1")
+    with _git_path(repo, "info/exclude", 10).open("a") as exclude:
+        exclude.write("\n.preview-worktree/\n")
+    _dgit(repo, "worktree", "add", "-q", "-b", "preview", str(repo / ".preview-worktree"))
 
     # 20) viele Commits voraus
     repo, _ = _demo_repo(root, "chess-engine")

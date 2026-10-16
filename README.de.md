@@ -160,7 +160,7 @@ Bestätigungen bleiben ausdrücklich als nicht ausgeführt markiert.
 
 ## Bedienung
 
-Alle Kürzel stehen dauerhaft im Footer — merken muss man sich nichts.
+Der Footer zeigt häufige Kürzel; `H` nennt alle Aktionen.
 Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 
 | Taste | Aktion |
@@ -180,6 +180,8 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | P | aktuellen Branch sicher zum privaten Sync-Remote pushen |
 | G | geschützter GitHub-Push: Vorschau der ausgehenden Commits/Dateien, Bestätigung mit J ⏎ |
 | H | Befehlsprotokoll dieser Sitzung und Git-Sicherheitsregeln anzeigen |
+| W | Worktree-Familie samt registrierten Pfaden außerhalb der Scan-Wurzel ansehen |
+| O | Submodul-Verweise, Inhalt und Initialisierung ansehen |
 | I | Repo-, Remote- und Branch-Details; dort `T` Remote prüfen, `X` Remote entfernen (nicht rückgängig machbar) |
 | S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
 | R | jedes sichere Remote im Hintergrund fetchen; die Liste bleibt bedienbar |
@@ -298,7 +300,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.28.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.29.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -471,11 +473,15 @@ der Messung verändertes Inventar wird ausdrücklich als nicht verfügbar gemeld
    bleiben beide, denn beide Unterschiede sind echt; sie sagen es nur, statt den
    ganzen Commit scheitern zu lassen.
 
-   Alles andere bleibt anwählbar, auch Pfade, die gegenüber `HEAD` am Ende
-   nichts beitragen — ein per `git rm --cached` entfernter Pfad, ein Submodul
-   mit nur schmutzigem Arbeitsbaum. Der Commit lässt sie dann einfach weg, genau
-   wie `git commit -- <pfad>`. Erst wenn KEIN gewählter Pfad etwas beiträgt,
-   sagt die Hilfe das, statt zu committen.
+   Submodul-Einträge kennzeichnen Gitlink-Verweise. Ein geänderter, initialisierter
+   Modul-Checkout lässt sich im Eltern-Commit festhalten; uncommittete Dateien
+   darin nicht. Reine Inhaltsänderungen sind mit einem `O`-Detailhinweis gesperrt.
+   Konflikte, nicht lesbare und nicht initialisierte Verweise werden nicht als
+   gewöhnliche Dateien angeboten. Ein entferntes oder durch eine Datei ersetztes
+   Modul bleibt bei belegtem Zustand auswählbar. Andere Pfade können gegenüber
+   `HEAD` weiterhin nichts beitragen, etwa ein nur per `git rm --cached`
+   entfernter Pfad. Die Hilfe lässt diese weg und erklärt, wenn keine gewählte
+   Datei eine Änderung beiträgt.
 2. `G` bietet fertige Teilmengen an — denn bei dreißig geänderten Dateien will
    man meist mehrere zusammenhängende Commits statt eines großen. Drei Sichten:
    nach Art der Änderung (geändert / neu / gelöscht), nach oberstem Ordner und
@@ -912,3 +918,37 @@ Umschalten zwischen vielen Platten.
 ## Lizenz
 
 **WTFPL** — siehe [LICENSE](LICENSE).
+
+## Worktree-Familien und Submodule (`W`, `O`)
+
+`W` gruppiert die gewählte Arbeitskopie mit Registrierungen desselben gemeinsamen
+Git-Verwaltungsverzeichnisses. Jede Arbeitskopie bleibt eine eigene Scan-Zeile.
+Die Familienansicht nennt Pfade, Branches und vollständige Commit-IDs sowie
+detached, unborn, bare, gesperrte, fehlende und zur Bereinigung vorgemerkte
+Zustände. Sie verwendet bereits vorhandene lokale Scan-Messungen; registrierte
+Pfade außerhalb der Scan-Wurzel bleiben ausdrücklich ungeprüft und erhalten
+keinen zusätzlichen Git-Statusscan. Zeiten von Register und Arbeitskopie stehen
+getrennt. Die Familienidentität gilt nur auf diesem Rechner.
+
+`O` trennt je direktem Submodul drei Verweise: Eltern-HEAD, Eltern-Index und
+Modul-Checkout. Geänderte Dateien, laufende Vorgänge und konfliktbehaftete
+Index-Stufen stehen daneben. Nicht initialisierte, fehlende und ersetzte Module
+bleiben sichtbar. Ignore-Einstellungen des Repos verbergen keinen Modul-Inhalt.
+Die Ansicht initialisiert, aktualisiert und fetcht kein Modul und führt keinen
+konfigurierten Modul-Update-Befehl aus. Verschachtelte Submodule werden nicht
+rekursiv inventarisiert.
+
+Beide Aktionen lesen das gewählte Repo lokal neu. `A` und die aufgeklappte Liste
+kennzeichnen Modul-Pfade; `C` speichert nur einen freigegebenen Modul-Verweis.
+Dateien im Modul zuerst dort committen. Ein Modul-Vorgang ohne Dateiänderungen
+erhält eine `O<n>`-Prüfmarke. Nicht lesbare Inventare gelten als nicht verfügbar,
+nicht als leer. `--list`, `--json`, Arbeitsansichten und Vergleiche erhalten diese
+Unterscheidungen. Absolute Worktree-Pfade und Familien-IDs werden nicht zwischen
+Rechnern verglichen; Unterschiede von Modul-Verweis/Inhalt sind lokale Befunde.
+Alte Snapshots ohne Modul-Inventar belegen nicht die Abwesenheit von Modulen.
+
+In `gmf --demo` zeigen `W` auf `monorepo-sandbox` und `O` auf `iot-firmware`
+beide Beispiele; ihr Aufbau nutzt nur lokale Repos. Die lokale Messzeit steht
+vor einem späteren Fetch fest, damit ein langsamer Fetch alten Dateistatus nicht
+frisch aussehen lässt. NUL-getrennte Git-Pfade behalten CR, LF und nicht
+dekodierbare Bytes intern; die Anzeige maskiert sie.

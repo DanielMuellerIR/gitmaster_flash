@@ -103,10 +103,15 @@ scripts should use the other fields. `category` is `drift`, `sync`, `local` or
 | `branch_coverage_unknown` | local | `count`, branches with unknown coverage |
 | `operation` | local | `operation`, stable Git operation ID |
 | `dirty` | local | `count`, changed/new files |
+| `worktree_inventory_failed` | local | `error`; `side` identifies the side |
+| `submodule_inventory_failed` | local | `error`; `side` identifies the side |
+| `submodule_inspection_failed` | local | `path`, `error`; `side` identifies the side |
+| `submodule_state` | local | `path`, `here_state`, `there_state` |
 | `fetch_failed_side` | local | `count`, repositories with failed fetches |
 
 Limitation codes are `legacy_schema`, `head_identity_unknown`,
-`branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`.
+`branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`
+and `submodule_inventory_unknown` (only when the counterpart has a module inventory).
 Limits alone do not change the exit status. Comparison exits are 0 for no
 findings, 1 for at least one finding, and 2 for an unreadable or incompatible
 comparison. Local notices and version warnings retain the existing exit-1
@@ -115,3 +120,29 @@ behavior. Empty inventories explicitly say nothing was compared.
 With a work-view filter, `here_matches` and `host_matches` count retained
 counterparts; `here_view_matches` and `host_view_matches` count actual view
 matches. `selection: "either-side"` records the union rule.
+
+## Optional worktree and module inventories
+
+`worktree_family` contains a local `id`, absolute `common_dir`, `measured_at`
+and `members`. Each member has `path`, `head_oid`, `branch`, `bare`, `detached`,
+`locked`, `lock_reason`, `prunable`, `prune_reason`, `present` (boolean or null
+when unknown), `in_scan_root` and `is_current`. `worktrees_error` explains a
+failed measurement. IDs and absolute paths group local working copies; they are
+not compared across machines. Registered external paths receive no extra scan.
+
+`submodules` contains direct modules with `path`, `head_oid` (parent HEAD),
+`index_oid`, `checked_out_oid`, `index_mode`, `index_entries` (each with `mode`,
+`oid`, `stage`), `initialized`, `conflicted`, `worktree_kind`, `modified`,
+`deleted`, `untracked`, `conflicts`, `operation` and `error`. `worktree_kind` is
+`repository`, `directory`, `missing`, `file` or `unavailable`.
+`submodules_error` explains an unproven overall inventory;
+`submodule_review_count` counts content changes, conflicts and operations.
+A successfully measured empty array proves no direct modules; an absent field
+proves no measurement. Errors take precedence over empty results. Module URLs
+and update commands are not exported.
+
+`submodule_state` compares references, initialization, file counters and operations
+as local states. A read failure produces its own finding, rather than an
+apparently missing module. Schema 1 may gain optional fields and finding types;
+consumers should preserve or skip unfamiliar types instead of interpreting
+them as known ones.
