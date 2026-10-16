@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.30.0"
+__version__ = "0.30.1"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -219,6 +219,10 @@ TR = {
                                          "de": "lokal  {rel}: Submodul '{path}' nicht geprüft {m}: {e}"},
     "diff_submodule_state": {"en": "local  {rel}: submodule '{path}' reference/content state differs",
                              "de": "lokal  {rel}: Verweis-/Inhaltszustand von Submodul '{path}' verschieden"},
+    "snapshot_submodule_path_identity_unknown": {"en": "ambiguous legacy path identity in {n} submodule(s)",
+                                                "de": "mehrdeutige alte Pfadidentität bei {n} Submodulen"},
+    "snapshot_same_limited": {"en": "No differences established in the comparable measurements; see the capability limits above.",
+                              "de": "Keine Unterschiede in den vergleichbaren Messungen belegt; die Fähigkeitsgrenzen stehen oben."},
     "snapshot_submodule_inventory_unknown": {"en": "submodule inventory absent in {n} compared repo(s)",
                                             "de": "Submodule-Inventar in {n} verglichenen Repos fehlt"},
     "operation_merge": {"en": "Merge", "de": "Merge"},
@@ -4384,7 +4388,8 @@ def print_file_diff(root: str, path: str, mode: str, *, as_json: bool = False) -
     if as_json:
         print(json.dumps({"schema_version": JSON_SCHEMA_VERSION, "kind": "file_diff",
                           "version": __version__, "root": terminal_text(repo),
-                          "path": json_text(path), "mode": mode, "ok": not bool(error),
+                          "path": json_text(path), "path_key": snapshot_path_key(path),
+                          "mode": mode, "ok": not bool(error),
                           "diff": text, "error": error}, indent=2, ensure_ascii=False))
     elif error:
         print(t("diff_failed", p=terminal_text(path), e=error), file=sys.stderr)
@@ -4589,7 +4594,7 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
         except (OSError, subprocess.SubprocessError):
             return subprocess.CompletedProcess(args, 1, "", "")
 
-    path = terminal_text(st.path)
+    path = display_git_path(st.path)
     branch = terminal_text(st.branch)
     # Label/Wert-Paare sammeln und erst am Ende ausrichten: so stehen die Werte
     # linksbündig untereinander, statt an unterschiedlich langen Labels zu kleben.
@@ -5322,11 +5327,11 @@ def worktree_lines(st: RepoStatus, statuses: list) -> list[str]:
     lines = [worktree_summary(st)]
     if not st.worktrees_measured_at:
         return lines
-    lines.extend(aligned_rows([(t("family_common"), terminal_text(st.common_dir)),
+    lines.extend(aligned_rows([(t("family_common"), display_git_path(st.common_dir)),
                                (t("family_measured"), st.worktrees_measured_at)]))
     local = {path_identity(status.path): status for status in statuses}
     for entry in st.worktrees:
-        lines.extend(["", terminal_text(entry.path)])
+        lines.extend(["", display_git_path(entry.path)])
         notes = []
         if entry.is_current:
             notes.append(t("family_current"))
@@ -5366,13 +5371,13 @@ def worktree_lines(st: RepoStatus, statuses: list) -> list[str]:
 
 
 def submodule_lines(st: RepoStatus) -> list[str]:
-    lines = [terminal_text(st.path), "", t("submodule_note"), ""]
+    lines = [display_git_path(st.path), "", t("submodule_note"), ""]
     if st.submodules_error or not st.submodules_scanned:
         return lines + [submodule_summary(st)]
     if not st.submodules:
         return lines + [t("submodule_none")]
     for module in st.submodules:
-        lines.extend(["", terminal_text(module.path)])
+        lines.extend(["", display_git_path(module.path)])
         state = []
         if module.conflicted:
             state.append(t("conflict_label"))
@@ -5820,6 +5825,54 @@ def json_text(value):
     return None if value is None else terminal_text(value)
 
 
+def snapshot_path_key(path) -> str:
+    return str(path).encode("utf-8", "surrogateescape").hex()
+
+
+def snapshot_path_identity(entry: dict) -> str | None:
+    if "path_key" in entry:
+        return entry["path_key"]
+    path = entry["path"]
+    if "\\" in path or any(0xD800 <= ord(char) <= 0xDFFF for char in path):
+        return None
+    return snapshot_path_key(path)
+
+
+def snapshot_path_label(entry: dict) -> str:
+    if "path_key" in entry:
+        return display_git_path(bytes.fromhex(entry["path_key"]).decode("utf-8", "surrogateescape"))
+    return entry["path"]
+
+
+def valid_snapshot_path(entry: dict, *, relative: bool) -> bool:
+    path = entry.get("path")
+    if not isinstance(path, str) or "\0" in path:
+        return False
+    raw = path
+    if "path_key" in entry:
+        key = entry["path_key"]
+        if not isinstance(key, str) or len(key) % 2 or not re.fullmatch(r"[0-9a-f]+", key):
+            return False
+        raw = bytes.fromhex(key).decode("utf-8", "surrogateescape")
+        if terminal_text(raw) != path:
+            return False
+    return valid_relative_git_path(raw) if relative else "\0" not in raw and Path(raw).is_absolute()
+
+
+def unique_snapshot_paths(entries: list) -> bool:
+    identities, labels = set(), {}
+    for entry in entries:
+        identity = snapshot_path_identity(entry)
+        key = identity if identity is not None else ("legacy", entry["path"])
+        if key in identities:
+            return False
+        if entry["path"] in labels and (identity is None or labels[entry["path"]] is None):
+            return False
+        identities.add(key)
+        labels[entry["path"]] = identity
+    return True
+
+
 def status_dict(st: RepoStatus) -> dict:
     payload = {
         "path": terminal_text(st.path), "rel": terminal_text(st.rel),
@@ -5884,7 +5937,8 @@ def status_dict(st: RepoStatus) -> dict:
         payload["worktree_family"] = {
             "id": st.worktree_family_id, "common_dir": json_text(st.common_dir),
             "measured_at": st.worktrees_measured_at,
-            "members": [{"path": terminal_text(entry.path), "head_oid": entry.head_oid,
+            "members": [{"path": terminal_text(entry.path), "path_key": snapshot_path_key(entry.path),
+                         "head_oid": entry.head_oid,
                          "branch": json_text(entry.branch), "bare": entry.bare,
                          "detached": entry.detached, "locked": entry.locked,
                          "lock_reason": json_text(entry.lock_reason), "prunable": entry.prunable,
@@ -5896,7 +5950,8 @@ def status_dict(st: RepoStatus) -> dict:
         payload["submodules_error"] = json_text(st.submodules_error)
         payload["submodule_review_count"] = st.submodule_review_count
         payload["submodules"] = [{
-            "path": json_text(module.path), "head_oid": module.head_oid,
+            "path": json_text(module.path), "path_key": snapshot_path_key(module.path),
+            "head_oid": module.head_oid,
             "index_oid": module.index_oid, "index_mode": module.index_mode,
             "index_entries": [{"mode": mode, "oid": oid, "stage": stage}
                               for mode, oid, stage in module.index_entries],
@@ -5963,14 +6018,11 @@ def valid_worktree_family(family, error: str) -> bool:
     if not error and (not re.fullmatch(r"[0-9a-f]{20}", family.get("id", ""))
                       or not isinstance(family.get("common_dir"), str) or not family["members"]):
         return False
-    paths = set()
     for entry in family["members"]:
         if not isinstance(entry, dict):
             return False
-        path = entry.get("path")
-        if not isinstance(path, str) or "\0" in path or not Path(path).is_absolute() or path in paths:
+        if not valid_snapshot_path(entry, relative=False):
             return False
-        paths.add(path)
         if entry.get("head_oid") is not None and not is_object_id(entry["head_oid"]):
             return False
         for key in ("branch", "lock_reason", "prune_reason"):
@@ -5981,19 +6033,15 @@ def valid_worktree_family(family, error: str) -> bool:
                 return False
         if entry.get("present") is not None and type(entry["present"]) is not bool:
             return False
-    return True
+    return unique_snapshot_paths(family["members"])
 
 
 def valid_submodule_payload(modules) -> bool:
     if not isinstance(modules, list):
         return False
-    paths = set()
     for module in modules:
-        if not isinstance(module, dict) or not valid_relative_git_path(module.get("path")):
+        if not isinstance(module, dict) or not valid_snapshot_path(module, relative=True):
             return False
-        if module["path"] in paths:
-            return False
-        paths.add(module["path"])
         for key in ("head_oid", "index_oid", "checked_out_oid"):
             if module.get(key) is not None and not is_object_id(module[key]):
                 return False
@@ -6034,7 +6082,7 @@ def valid_submodule_payload(modules) -> bool:
                     and set(current["oid"]) != {"0"} else None)
         if module.get("index_oid") != expected:
             return False
-    return True
+    return unique_snapshot_paths(modules)
 
 
 def _valid_remote_payload(payload) -> bool:
@@ -6448,8 +6496,12 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
                                      n=left["uncovered_commits"])
         if ("submodules" in x and "submodules" in y
                 and not x.get("submodules_error") and not y.get("submodules_error")):
-            mx = {module["path"]: module for module in x["submodules"]}
-            my = {module["path"]: module for module in y["submodules"]}
+            unknown = {module["path"] for module in x["submodules"] + y["submodules"]
+                       if snapshot_path_identity(module) is None}
+            mx = {snapshot_path_identity(module): module for module in x["submodules"]
+                  if module["path"] not in unknown}
+            my = {snapshot_path_identity(module): module for module in y["submodules"]
+                  if module["path"] not in unknown}
             fields = ("head_oid", "index_oid", "index_mode", "index_entries", "checked_out_oid",
                       "initialized", "worktree_kind", "modified", "deleted", "untracked",
                       "conflicts", "conflicted", "operation")
@@ -6460,8 +6512,8 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
                 before = {key: left.get(key) for key in fields} if left else None
                 after = {key: right.get(key) for key in fields} if right else None
                 if before != after:
-                    emit("diff_submodule_state", rel=rel, path=path,
-                         here_state=before, there_state=after)
+                    emit("diff_submodule_state", rel=rel, path=snapshot_path_label(left or right),
+                         path_key=path, here_state=before, there_state=after)
         # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
         # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
         # und Stashes sind davon unberuehrt und werden weiter verglichen.
@@ -6498,8 +6550,8 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
                     emit(kind, rel=rel, m=name, e=r[field], side=side_id)
             for module in r.get("submodules", []):
                 if module.get("error"):
-                    emit("diff_submodule_inspection_failed", rel=rel, path=module["path"],
-                         m=name, e=module["error"], side=side_id)
+                    emit("diff_submodule_inspection_failed", rel=rel, path=snapshot_path_label(module),
+                         path_key=snapshot_path_identity(module), m=name, e=module["error"], side=side_id)
             if r.get("branches_error"):
                 emit("diff_branch_inventory_failed", rel=rel, m=name,
                              e=r["branches_error"], side=side_id)
@@ -6731,6 +6783,9 @@ def snapshot_limitations(payload: dict, side: str, other: dict | None = None) ->
     }
     if other is not None:
         measured = {repo["rel"] for repo in other["repos"] if "submodules" in repo}
+        counts["submodule_path_identity_unknown"] = sum(
+            snapshot_path_identity(module) is None for repo in repos if repo["rel"] in measured
+            and not repo.get("submodules_error") for module in repo.get("submodules", []))
         counts["submodule_inventory_unknown"] = sum(
             repo["rel"] in measured and "submodules" not in repo and not repo.get("submodules_error")
             for repo in repos)
@@ -6777,8 +6832,12 @@ def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
             print(note)
         if offline and not here["repos"] and not there["repos"]:
             print(t("snapshot_empty"))
+        elif lines:
+            print("\n".join(lines))
+        elif offline and limits:
+            print(t("snapshot_same_limited"))
         else:
-            print("\n".join(lines) if lines else t("diff_same", h=terminal_text(there_name)))
+            print(t("diff_same", h=terminal_text(there_name)))
     return 1 if findings else 0
 
 
@@ -6920,7 +6979,7 @@ def compact_cells(statuses: list[RepoStatus]) -> list[tuple[str, str, int]]:
     cells = []
     for st in statuses:
         mark, pair = compact_mark(st)
-        cells.append((mark, st.rel, pair))
+        cells.append((mark, display_git_path(st.rel), pair))
     return cells
 
 
@@ -7013,7 +7072,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
     # Filter im Kopf hielte man einen ausgeblendeten Bestand für einen echten
     # Unterschied.
     print(f"gitmaster_flash {__version__}"
-          + (f" · {terminal_text(root)}" if root else "")
+          + (f" · {display_git_path(root)}" if root else "")
           + f" · {len(statuses)} {t('hdr_repos')}"
           + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else "")
           + (" · " + t("view_active", v=t("view_" + view)) if view != "all" else "")
@@ -7029,7 +7088,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             remote_bits.append(f"{color}{terminal_text(remote.badge())}{reset}")
         badge_txt = ("  " + "  ".join(remote_bits)) if remote_bits else ""
         if st.clean_and_synced:
-            print(f"{green}✔ {terminal_text(st.rel)}{reset}{badge_txt}")
+            print(f"{green}✔ {display_git_path(st.rel)}{reset}{badge_txt}")
             continue
         bits = []
         if st.error:
@@ -7067,7 +7126,7 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
                 f"{terminal_text(t('branch_not_on', b=st.branch, r=st.remote))}"
                 f"{reset}")
         bits.extend(remote_bits)
-        print(f"{red}✘{reset} {terminal_text(st.rel)}  {' '.join(bits)}")
+        print(f"{red}✘{reset} {display_git_path(st.rel)}  {' '.join(bits)}")
 
 
 # ---------------------------------------------------------------------------
@@ -7093,7 +7152,7 @@ def file_row(code: str, path: str, submodule: bool = False) -> tuple[str, int]:
     einem KeyError zu beenden.
     """
     label = t("conflict_label") if code == "C" else ""
-    text = f"{code}  {label}{path}"
+    text = f"{code}  {label}{display_git_path(path)}"
     if submodule:
         text += " [" + t("file_submodule") + "]"
     return text, FILE_CODE_COLORS.get(code, C_DIM)
@@ -7148,6 +7207,11 @@ def terminal_text(value) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+
+def display_git_path(value) -> str:
+    """Pfad-Escapes bleiben eindeutig; Befehlsprotokolle verwenden zsh_quote()."""
+    return terminal_text(str(value).replace("\\", "\\\\"))
 
 
 def zsh_quote(value) -> str:
@@ -7295,7 +7359,7 @@ def selected_repo_context(st: RepoStatus, width: int) -> str:
             r.public and r.ahead and not r.behind and r.branch_exists
             and not r.fetch_failed and r.transfer_safe for r in st.remotes):
         actions.append("G")
-    name = ellipsize(terminal_text(st.rel), max(8, min(20, width // 5)))
+    name = ellipsize(display_git_path(st.rel), max(8, min(20, width // 5)))
     branch = ellipsize(terminal_text(st.branch), max(8, min(20, width // 5)))
     return t("selected_context", rel=name, branch=branch, state=state,
              remotes=" / ".join(r.badge() for r in st.remotes) or t("none_label"),
@@ -7532,7 +7596,7 @@ class TUI:
         x = 1
         safe_addstr(self.scr, y, x, f"{arrow} ", sel)
         x += 2
-        name = st.rel
+        name = display_git_path(st.rel)
         safe_addstr(self.scr, y, x, name, sel | curses.A_BOLD)
         x += cell_width(terminal_text(name)) + 2
 
@@ -8189,7 +8253,7 @@ class TUI:
         r = subprocess.run(["open", "-a", path, str(st.path)],
                            capture_output=True, text=True)
         if r.returncode == 0:
-            self.message = t("app_opened", name=name, rel=st.rel)
+            self.message = t("app_opened", name=name, rel=display_git_path(st.rel))
         else:
             self.message = t("app_open_failed", name=name, e=r.stderr.strip()[:120])
 
@@ -8226,7 +8290,7 @@ class TUI:
             text = t("stash_preview_failed", e=preview)
         else:
             text = preview or t("stash_preview_empty")
-        title = t("stash_preview_title", rel=st.rel, s=label)
+        title = t("stash_preview_title", rel=display_git_path(st.rel), s=label)
         self.show_pager(title, text.splitlines())
 
     def _draw_pager_page(self, title: str, lines: list[str], top: int,
@@ -8551,7 +8615,7 @@ class TUI:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             safe_addstr(self.scr, 0, 0, " " + t("fetch_one_title" if fetch_only else "pull_choose",
-                                               rel=st.rel, b=st.branch),
+                                               rel=display_git_path(st.rel), b=st.branch),
                         curses.A_BOLD)
             height = max(1, h - 3)
             offset = scroll_window(selected, offset, height)
@@ -8575,7 +8639,7 @@ class TUI:
         st = self.current()
         if st:
             self.refresh_one(st)
-            self.message = t("local_refreshed", rel=st.rel)
+            self.message = t("local_refreshed", rel=display_git_path(st.rel))
 
     def action_fetch_one(self):
         st = self.current()
@@ -8643,7 +8707,7 @@ class TUI:
         lines = [t("pull_effect", n=check.behind), t("pull_caution"), "",
                  display_remote_url(check.transfer_url), "", *check.commits, "", *check.files,
                  "", format_git_command(args)]
-        if not self.confirm_in_pager(t("pull_title", r=selected, b=fresh.branch, rel=fresh.rel),
+        if not self.confirm_in_pager(t("pull_title", r=selected, b=fresh.branch, rel=display_git_path(fresh.rel)),
                                      lines, t("pull_confirm")):
             log_cancelled(fresh.path, args)
             self.message = t("cancelled")
@@ -8794,14 +8858,14 @@ class TUI:
         if st:
             self.show_busy(t("reading"))
             fresh = self.refresh_one(st)
-            self.show_pager(t("worktrees_title", rel=fresh.rel), worktree_lines(fresh, self.all_statuses))
+            self.show_pager(t("worktrees_title", rel=display_git_path(fresh.rel)), worktree_lines(fresh, self.all_statuses))
 
     def action_submodules(self):
         st = self.current()
         if st:
             self.show_busy(t("reading"))
             fresh = self.refresh_one(st)
-            self.show_pager(t("submodules_title", rel=fresh.rel), submodule_lines(fresh))
+            self.show_pager(t("submodules_title", rel=display_git_path(fresh.rel)), submodule_lines(fresh))
 
     # -- Änderungen ansehen (A) ---------------------------------------------
 
@@ -8821,7 +8885,7 @@ class TUI:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             safe_addstr(self.scr, 0, 0,
-                        (" " + t("changes_title", rel=terminal_text(st.rel)) + " · "
+                        (" " + t("changes_title", rel=display_git_path(st.rel)) + " · "
                          + t("diff_mode_" + mode)).ljust(w - 1), curses.A_BOLD)
             safe_addstr(self.scr, 1, 1, t("changes_modes"), curses.color_pair(C_CYAN))
             body_h = max(1, h - 4)
@@ -8856,9 +8920,9 @@ class TUI:
                 entry = files[sel]
                 ok, text = file_diff(st.path, entry.code, entry.path, self.cfg["git_timeout"], mode)
                 if not ok:
-                    self.message = t("diff_failed", p=terminal_text(entry.path), e=terminal_text(text))
+                    self.message = t("diff_failed", p=display_git_path(entry.path), e=terminal_text(text))
                     return
-                self.show_pager(t("diff_title_mode", p=terminal_text(entry.path), mode=t("diff_mode_" + mode)),
+                self.show_pager(t("diff_title_mode", p=display_git_path(entry.path), mode=t("diff_mode_" + mode)),
                                 (text or t("diff_empty")).splitlines())
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
@@ -8982,7 +9046,7 @@ class TUI:
         args = ("remote", "remove", name)
         lines = self._remote_removal_lines(st, name, facts, format_git_command(args))
         if not self.confirm_in_pager(
-                t("remove_title", rel=terminal_text(st.rel), r=name),
+                t("remove_title", rel=display_git_path(st.rel), r=name),
                 lines, t("remove_confirm", r=name)):
             log_cancelled(st.path, args)
             self.message = t("remove_cancelled")
@@ -9087,7 +9151,7 @@ class TUI:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             chosen = sum(1 for it in items if it["include"])
-            head = t("commit_title", rel=st.rel, n=chosen, total=len(items))
+            head = t("commit_title", rel=display_git_path(st.rel), n=chosen, total=len(items))
             safe_addstr(self.scr, 0, 0, (" " + head).ljust(w - 1), curses.A_BOLD)
             body_h = max(1, h - 4)
             off = scroll_window(sel, off, body_h)
@@ -9117,7 +9181,7 @@ class TUI:
                 else:
                     label, pair = t("do_skip"), C_DIM
                 safe_addstr(self.scr, y, 1,
-                            f"{it['code']}  {pad_cells(it['path'], path_width)} {label}",
+                            f"{it['code']}  {pad_cells(display_git_path(it['path']), path_width)} {label}",
                             color_attr(pair, i == sel))
             safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
             safe_addstr(self.scr, h - 2, 0, t("commit_footer").ljust(w - 1),
@@ -9169,7 +9233,7 @@ class TUI:
         if group.kind == "code":
             text = t("group_code", what=t(f"group_code_{group.key}"), n=count)
         else:
-            text = t(f"group_{group.kind}", name=group.key, n=count)
+            text = t(f"group_{group.kind}", name=display_git_path(group.key), n=count)
         # Ohne diesen Zusatz hiesse eine Gruppe "geloeschte Dateien (2)", obwohl
         # der mitgezogene Rename-Partner eine neue Datei ist.
         return text + (" " + t("group_with_rename") if group.completed else "")
@@ -9180,10 +9244,10 @@ class TUI:
         Liefert die Meldung fuer die Hilfe zurueck, statt `self.message` zu
         setzen: Das Bild der Repo-Liste ist hier nicht sichtbar.
         """
-        # Nicht committebare Eintraege bleiben aussen vor: Ein Vorschlag, der
-        # sie enthielte, liesse den Commit anschliessend scheitern.
-        groups = commit_groups([f for f in st.files
-                                if committable_against_head(f)])
+        # Die Modulprüfung des Wizards gilt auch für Gruppen; eine Vorschlags-
+        # auswahl darf gesperrte Inhalte oder ungeprüfte Verweise nicht freigeben.
+        eligible = {item["path"] for item in items if item.get("committable", True)}
+        groups = commit_groups([entry for entry in st.files if entry.path in eligible])
         if not groups:
             return t("group_none")
         picked = self._choose_commit_group(groups)
@@ -9194,7 +9258,7 @@ class TUI:
         # angehakt ist.
         chosen = set(picked.paths)
         for it in items:
-            it["include"] = it["path"] in chosen
+            it["include"] = it.get("committable", True) and it["path"] in chosen
         return t("group_applied", g=self.commit_group_label(picked))
 
     def _choose_commit_group(self, groups: list) -> tuple | None:
@@ -9235,7 +9299,7 @@ class TUI:
         approved_ui_ref = (f"refs/heads/{st.branch}"
                            if st.branch not in ("?", "(detached)")
                            else _SIGNATURE_UNSET)
-        to_commit = [it["path"] for it in items if it["include"]]
+        to_commit = [it["path"] for it in items if it["include"] and it.get("committable", True)]
         if not to_commit:
             self.message = t("nothing_selected")
             return True
@@ -9245,7 +9309,7 @@ class TUI:
         recent = [line for line in r.stdout.splitlines() if line.strip()]
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, 0, 0, (" " + t("commit_in", rel=st.rel)).ljust(w - 1),
+        safe_addstr(self.scr, 0, 0, (" " + t("commit_in", rel=display_git_path(st.rel))).ljust(w - 1),
                     curses.A_BOLD)
         # Layout von unten her planen: die Eingabezeile muss sichtbar bleiben.
         prompt_y = max(4, h - 2)
@@ -9356,7 +9420,7 @@ class TUI:
         self.refresh_one(st)
         undo = commit_undo_command(
             r.approved_head, r.committed_head, r.approved_ref)
-        self.message = t("committed_in", rel=st.rel, undo=undo)
+        self.message = t("committed_in", rel=display_git_path(st.rel), undo=undo)
         return True
 
     # -- Hauptschleife -------------------------------------------------------

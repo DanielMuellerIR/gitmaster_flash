@@ -300,7 +300,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.30.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.30.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -960,7 +960,8 @@ In `A` wählt `1` alle Änderungen, `2` vorgemerkte Änderungen (HEAD → Index)
 `3` übrige Änderungen (Index → Arbeitsbaum einschließlich neuer Dateien). Die
 Kopfzeile nennt die Ebene, die Dateiliste folgt ihr. Leere Ebenen bleiben
 umschaltbar. Eine vorgemerkte und danach bearbeitete Datei kann je Ebene andere
-Änderungen zeigen. Vor dem ersten Commit vergleicht vorgemerkt gegen den leeren
+Änderungen zeigen. `C` committet weiterhin gewählte aktuelle Arbeitsbaum-Pfade
+und erhält anderes Staging; die Diff-Ebene bestimmt die Vorschau. Vor dem ersten Commit vergleicht vorgemerkt gegen den leeren
 Ausgangsbaum. Submodule zeigen Gitlink-Verweise und eine Marke für schmutzigen
 Inhalt; `O` erklärt die Inhalte. Die Vorschau führt keine externen Diff- oder
 Textkonvertierungsprogramme aus. Index-Einträge und Dateiinhalt bleiben erhalten;
@@ -978,7 +979,7 @@ akzeptiert `combined` (Standard), `staged` oder `unstaged` und benötigt
 `--file-diff`. Fetches, Vergleiche und Scan-Filter lassen sich damit nicht
 verbinden. Text maskiert Terminal-Steuerzeichen und erhält Zeilenumbrüche.
 JSON ist ein eigener `kind: "file_diff"`-Datensatz mit `schema_version`, `version`,
-`root`, `path`, `mode`, `ok`, `diff` und `error`, kein gespeicherter Repo-Snapshot.
+`root`, `path`, `path_key`, `mode`, `ok`, `diff` und `error`, kein gespeicherter Repo-Snapshot.
 `diff` enthält maskierten Vorschautext, der sich nicht für `git apply` eignet.
 Git-Verwaltungspfade wie `.git/config` sind ausgeschlossen. Exit-Codes: 0 ohne
 Unterschied, 1 mit Unterschied, 2 bei Fehler.
@@ -1000,3 +1001,12 @@ Commit und drei Remotes braucht der optimierte Scan lokal 33 statt 57 Git-Aufruf
 mit Fetch 136 statt 160. Nur identische OID-Abdeckungszahlen innerhalb einer
 Ref-Messung werden geteilt; alle Ref-/HEAD-Nachprüfungen und Transfer-Preflights
 bleiben erhalten. Laufzeiten hängen von der Last ab.
+
+Pfad-Vorschauen unterscheiden einen echten Zeilenumbruch (`\n`) von einem
+wörtlichen Backslash mit n (`\\n`). Git-Befehle behalten ihre ausführbare
+Shell-Maskierung. Worktree-Mitglieder und Submodule exportieren zusätzlich
+`path_key`, die hexadezimalen UTF-8-/surrogateescape-Bytes des Originalpfads.
+So bleiben Snapshots gültig, wenn zwei Pfade denselben älteren Anzeigetext
+haben. Modul-Vergleiche verwenden diese Identität; mehrdeutige alte Namen
+erhalten eine Fähigkeitsgrenze statt einer geratenen Zuordnung. Commit-Vorschläge
+erhalten gesperrte Einträge, einschließlich Modul-Inhalten.

@@ -109,13 +109,14 @@ nicht in Befunden.
 | `dirty` | local | `count`, geänderte/neue Dateien |
 | `worktree_inventory_failed` | local | `error`; `side` nennt die Seite |
 | `submodule_inventory_failed` | local | `error`; `side` nennt die Seite |
-| `submodule_inspection_failed` | local | `path`, `error`; `side` nennt die Seite |
-| `submodule_state` | local | `path`, `here_state`, `there_state` |
+| `submodule_inspection_failed` | local | `path`, `path_key`, `error`; `side` nennt die Seite |
+| `submodule_state` | local | `path`, `path_key`, `here_state`, `there_state` |
 | `fetch_failed_side` | local | `count`, Repos mit fehlgeschlagenem Fetch |
 
 Die Grenz-Codes sind `legacy_schema`, `head_identity_unknown`,
 `branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`
-und `submodule_inventory_unknown` (nur wenn das Gegenstück ein Modul-Inventar hat).
+und `submodule_inventory_unknown` (nur wenn das Gegenstück ein Modul-Inventar hat)
+sowie `submodule_path_identity_unknown` für mehrdeutige alte Modul-Pfade.
 Grenzen allein ändern den Exit-Code nicht. Vergleiche enden mit 0 ohne Befunde,
 1 mit mindestens einem Befund und 2 bei unlesbarem oder inkompatiblem Vergleich.
 Lokale Hinweise und Versionswarnungen behalten das bestehende Exit-1-Verhalten.
@@ -151,3 +152,18 @@ als lokale Zustände. Ein Lesefehler erzeugt einen eigenen Befund statt eines
 vermeintlich fehlenden Moduls. Neue optionale Felder und Befundtypen können in
 Schema 1 hinzukommen; Verbraucher sollten unbekannte Typen erhalten oder
 überspringen, statt sie als bekannte Typen auszulegen.
+
+Seit 0.30.1 tragen Worktree-Mitglieder und Module zusätzlich `path_key`: die
+kleingeschriebenen Hex-Bytes des originalen UTF-8-/surrogateescape-Pfads.
+`path` bleibt der ältere maskierte Anzeigetext. Die Validierung prüft, dass der
+Schlüssel genau diesen Pfad beschreibt; unterschiedliche Schlüssel dürfen
+denselben alten Anzeigetext haben. Absolute Worktree-Pfade bleiben nur lokale
+Metadaten. Modul-Schlüssel bezeichnen relative Git-Pfade und dienen der Zuordnung.
+Datei-/Repo-Auswahl und Modul-Ansichten zeigen wörtliche Backslashes doppelt.
+
+Alte normale Modul-Pfade bleiben vergleichbar. Enthält ein alter Pfad eine
+mehrdeutige Maskierung ohne Schlüssel, nennt `submodule_path_identity_unknown`
+die Grenze. Solche Module und ihre möglichen Gegenstücke erzeugen keinen
+erfundenen Unterschied. Neue `submodule_state`- und `submodule_inspection_failed`-
+Befunde tragen den Pfadschlüssel mit (null bei unbekannter Altidentität);
+ihr `path` ist bei bekanntem Schlüssel der eindeutige Anzeigetext.

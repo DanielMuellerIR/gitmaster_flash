@@ -37,6 +37,23 @@ Erfolg.
 
 ## Prüfstand, 2026-10-16
 
+### 0.30.1
+
+| System | Python | Git | Ergebnis |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 827 Tests und sechs identische Bilder |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 143 Kernprüfungen einschließlich zwölf Integrationsfällen |
+| macOS 26.7.1, arm64 | 3.14.8 | 2.56.0 | zwölf neue Integrationsfälle |
+| Linux Mint 22.2, x86_64 | 3.12.3 | 2.43.0 | 773 ausgeführt, 54 zsh-Prüfungen übersprungen; sechs identische Bilder |
+
+Die realen Terminalabläufe wurden auf Deutsch und Englisch geprüft: gezielter
+Commit eines LF-Dateinamens, unveränderter Nachbarpfad mit wörtlichem Backslash-n,
+erhaltenes fremdes Staging, Offline-Vergleich bei gesperrten Git-/SSH-Aufrufen
+sowie bestätigter Push in ein temporäres lokales Bare-Remote. Commit-Vorschläge
+behielten gesperrte Modul-Inhalte bei. Nur Test-Repos wurden verändert.
+
+### 0.30.0
+
 | System | Python | Git | Ergebnis |
 |---|---|---|---|
 | macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 815 Tests; Python auch für Shell-Unterprozesse gebunden; sechs Bilder identisch |

@@ -781,3 +781,6 @@ liegengebliebene Arbeit aus.
 
 - Datei-Diffs verwenden `file_diff(..., mode)` und `files_for_diff_mode()`: combined gegen HEAD, staged gegen Index, unstaged ab Index einschließlich neuer Dateien. Externe Diff-/Textconv-Treiber bleiben deaktiviert. `--file-diff` erzeugt einen eigenen JSON-Ergebnistyp, keinen Repo-Snapshot, und startet weder Scan noch Netz.
 - Abdeckungszählungen gleicher OIDs dürfen nur im lokalen Dict einer `read_branch_inventory()`-Messung geteilt werden. Keine Übernahme in weitere Scans oder Transfer-Preflights; Ref-/HEAD-Nachprüfungen erhalten. Laufzeitmatrix und lokale Scan-Messung stehen in `tools/check-compatibility.py` und `tools/benchmark-scan.py`.
+
+- Worktree-/Modul-Pfade exportieren `path_key` über `snapshot_path_key()`; die Validierung bindet ihn an den älteren Anzeigetext. Vergleiche verwenden `snapshot_path_identity()`, mehrdeutige Altpfade liefern eine Fähigkeitsgrenze. `display_git_path()` hält echte Steuerzeichen und wörtliche Backslashes in Auswahlansichten auseinander; Befehlsprotokolle bleiben bei `zsh_quote()`.
+- Commit-Vorschläge verwenden die bereits geprüfte `committable`-Eigenschaft der Wizard-Einträge. Eine Gruppenauswahl darf gesperrte Submodul-Inhalte oder fehlerhafte Einträge nie wieder auswählen; der letzte Commit-Schritt prüft diese Eigenschaft ebenfalls.

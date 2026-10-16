@@ -105,13 +105,14 @@ scripts should use the other fields. `category` is `drift`, `sync`, `local` or
 | `dirty` | local | `count`, changed/new files |
 | `worktree_inventory_failed` | local | `error`; `side` identifies the side |
 | `submodule_inventory_failed` | local | `error`; `side` identifies the side |
-| `submodule_inspection_failed` | local | `path`, `error`; `side` identifies the side |
-| `submodule_state` | local | `path`, `here_state`, `there_state` |
+| `submodule_inspection_failed` | local | `path`, `path_key`, `error`; `side` identifies the side |
+| `submodule_state` | local | `path`, `path_key`, `here_state`, `there_state` |
 | `fetch_failed_side` | local | `count`, repositories with failed fetches |
 
 Limitation codes are `legacy_schema`, `head_identity_unknown`,
 `branch_inventory_unknown`, `local_measurement_unknown`, `fetch_age_unknown`
-and `submodule_inventory_unknown` (only when the counterpart has a module inventory).
+and `submodule_inventory_unknown` (only when the counterpart has a module inventory),
+plus `submodule_path_identity_unknown` for ambiguous legacy module paths.
 Limits alone do not change the exit status. Comparison exits are 0 for no
 findings, 1 for at least one finding, and 2 for an unreadable or incompatible
 comparison. Local notices and version warnings retain the existing exit-1
@@ -146,3 +147,17 @@ as local states. A read failure produces its own finding, rather than an
 apparently missing module. Schema 1 may gain optional fields and finding types;
 consumers should preserve or skip unfamiliar types instead of interpreting
 them as known ones.
+
+Since 0.30.1, worktree members and modules also carry `path_key`: lowercase hex
+bytes of the original UTF-8/surrogateescape path. `path` retains the older escaped
+display text. Validation checks that the key describes that path; different keys
+may share the same old display text. Absolute worktree paths remain local
+metadata. Module keys identify relative Git paths and are used for pairing.
+File/repository selection and module views double literal backslashes.
+
+Ordinary legacy module paths remain comparable. An ambiguous escaped legacy path
+without a key produces the `submodule_path_identity_unknown` limit. Such modules
+and their possible counterparts do not produce invented differences. New
+`submodule_state` and `submodule_inspection_failed` findings include the key;
+the key is null for an unknown legacy identity. With a known key, `path` is
+the unambiguous display label.

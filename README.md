@@ -277,7 +277,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.30.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.30.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -902,7 +902,9 @@ bytes internally; displays escape them.
 Within `A`, use `1` for all changes, `2` for staged changes (HEAD → index),
 and `3` for unstaged changes (index → working tree, including new files). The
 header names the active layer and the file list follows it. Empty layers remain
-switchable. A staged-and-edited file can show different changes in each layer.
+switchable. A staged-and-edited file can show different changes in each layer. `C` continues
+to commit selected current working-tree paths and preserves staging elsewhere;
+the diff layer affects previews.
 Before the first commit, staged compares against the empty starting tree.
 Submodules show Gitlink references and a dirty-content marker; `O` explains the
 contents. Diff previews do not run external diff or text-conversion programs.
@@ -920,7 +922,7 @@ The root must be the working-tree root, and the file path relative to it.
 `--file-diff`. This command cannot be combined with fetches, comparisons or scan
 filters. Text escapes terminal controls while retaining line breaks. JSON is a
 separate `kind: "file_diff"` result containing `schema_version`, `version`,
-`root`, `path`, `mode`, `ok`, `diff` and `error`; it is not a saved repo snapshot.
+`root`, `path`, `path_key`, `mode`, `ok`, `diff` and `error`; it is not a saved repo snapshot.
 The `diff` field contains escaped preview text; it is unsuitable for `git apply`.
 Git administration paths such as `.git/config` are excluded. Exit codes: 0 for
 no difference, 1 for a difference, 2 for failure.
@@ -941,3 +943,11 @@ With 25 branches pointing to the same commit and three remotes, the optimized
 scan uses 33 rather than 57 Git calls locally and 136 rather than 160 with fetch.
 Only identical OID coverage counts within one ref measurement are shared; every
 ref/HEAD recheck and transfer preflight remains in place. Timings depend on load.
+
+Path previews distinguish an actual newline (`\n`) from a literal backslash
+followed by n (`\\n`). Git commands retain their executable shell escaping.
+Worktree members and submodules additionally export `path_key`, the hexadecimal
+UTF-8/surrogateescape bytes of the original path. This keeps snapshots valid
+when two paths have the same older display text. Module comparisons use that
+identity; ambiguous legacy names receive a capability limit instead of guessed
+pairings. Commit suggestions preserve disabled entries, including module contents.

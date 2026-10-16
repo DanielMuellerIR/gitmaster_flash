@@ -35,6 +35,23 @@ An unavailable or below-floor runtime is a failed check, not a skipped success.
 
 ## Validation record, 2026-10-16
 
+### 0.30.1
+
+| System | Python | Git | Result |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 827 tests and six identical images |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 143 core checks including twelve integration cases |
+| macOS 26.7.1, arm64 | 3.14.8 | 2.56.0 | twelve new integration cases |
+| Linux Mint 22.2, x86_64 | 3.12.3 | 2.43.0 | 773 executed, 54 zsh checks skipped; six identical images |
+
+Real terminal flows ran in English and German: a selected LF-path commit, an
+unchanged neighboring literal-backslash-n path, preserved foreign staging, an
+offline comparison with Git/SSH disabled, and a confirmed push to a temporary
+local bare remote. Commit suggestions retained disabled module contents. Only
+test repositories were changed.
+
+### 0.30.0
+
 | System | Python | Git | Result |
 |---|---|---|---|
 | macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 815 tests; Python also pinned for shell subprocesses; six images identical |
