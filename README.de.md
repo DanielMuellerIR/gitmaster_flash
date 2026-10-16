@@ -298,7 +298,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.27.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.28.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -838,6 +838,36 @@ statt zu fragen. HTTPS-Zugangsdaten gehören in einen
 Credential-Helper (in einer angemeldeten macOS-GUI-Sitzung:
 `git config --global credential.helper osxkeychain`),
 oder man nutzt SSH mit einem Key im Agenten; beides läuft ohne Rückfrage.
+
+## Gespeicherte Vergleiche und Farbausgabe
+
+```sh
+gmf --json > vorher.json
+# ... später ...
+gmf --json > nachher.json
+gmf --compare vorher.json nachher.json
+gmf --compare vorher.json nachher.json --json --view changes
+gmf --list --color never
+```
+
+`--compare` liest ausschließlich die beiden Dateien, ohne Scan, SSH, Fetch oder
+Config-Erzeugung. Gespeicherte Pfadsuchen müssen übereinstimmen. Vollständige
+Snapshots speichern und Arbeitsansichten erst beim Vergleich anwenden, damit
+kein ausgefiltertes Gegenstück als fehlendes Repo erscheint. Erstellungszeit,
+lokale Messzeiten und unbekannte Fähigkeiten bleiben sichtbar; Zeitunterschiede
+allein sind keine Drift. Nicht vergleichbare Dateien führen zu Exit 2.
+
+JSON trägt jetzt `schema_version: 1`, unabhängig von der Programmversion.
+Vergleichsausgaben behalten die lesbaren `differences` und ergänzen stabile
+`findings` mit Typen, Kategorien, Seiten und Werten. Ältere Objekt-Snapshots
+bleiben mit ausdrücklichen Grenzen lesbar. Der vollständige Vertrag steht in
+[JSON-Format und Befundtypen](docs/json-format.de.md).
+
+`--color auto` ist der Standard für `--list`: Farben nur am Terminal und ohne
+`NO_COLOR` in der Umgebung. `always` erzwingt sie auch bei Umleitung und hat
+Vorrang vor `NO_COLOR`; `never` unterdrückt sie. JSON und Vergleichsberichte
+behalten ihr festes Textformat. Die curses-Oberfläche verwendet weiterhin die
+Terminal-Palette.
 
 ## Tests
 

@@ -72,7 +72,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.27.0"
+__version__ = "0.28.0"
+JSON_SCHEMA_VERSION = 1
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+MAX_SNAPSHOT_DEPTH = 128
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -154,6 +157,32 @@ TR = {
     "diff_ssh_bad_json": {"en": "unreadable JSON", "de": "unlesbares JSON"},
     "diff_ssh_bad_schema": {"en": "incompatible JSON structure",
                             "de": "inkompatible JSON-Struktur"},
+    "snapshot_error": {"en": "Cannot compare snapshots: {e}", "de": "Snapshots nicht vergleichbar: {e}"},
+    "snapshot_too_large": {"en": "snapshot exceeds 64 MiB", "de": "Snapshot überschreitet 64 MiB"},
+    "snapshot_duplicate_key": {"en": "duplicate JSON key: {name}", "de": "Doppelter JSON-Schlüssel: {name}"},
+    "snapshot_nonfinite": {"en": "non-finite JSON number: {value}", "de": "Nicht endliche JSON-Zahl: {value}"},
+    "snapshot_depth": {"en": "JSON nesting is too deep", "de": "JSON-Verschachtelung ist zu tief"},
+    "cli_compare_options": {"en": "--compare cannot be combined with --diff, --demo or fetch options",
+                            "de": "--compare ist nicht mit --diff, --demo oder Fetch-Optionen kombinierbar"},
+    "cli_fetch_remote_output": {"en": "--fetch-remote requires non-interactive --list/--json output",
+                                "de": "--fetch-remote benötigt eine nicht interaktive --list/--json-Ausgabe"},
+    "cli_fetch_remote_name": {"en": "--fetch-remote requires a remote name", "de": "--fetch-remote benötigt einen Remote-Namen"},
+    "snapshot_filtered_view": {"en": "Saved work views can omit a counterpart. Save complete --json snapshots and apply --view when comparing.",
+                               "de": "Gespeicherte Arbeitsansichten können ein Gegenstück auslassen. Vollständige --json-Snapshots speichern und --view erst beim Vergleich anwenden."},
+    "snapshot_filter_mismatch": {"en": "Saved path filters differ; save both snapshots with the same filter or without a filter.",
+                                 "de": "Gespeicherte Pfadfilter unterscheiden sich; beide Snapshots mit demselben oder ohne Filter speichern."},
+    "snapshot_source": {"en": "{name}: snapshot {at} ({age}), {n} recorded repo(s)",
+                        "de": "{name}: Snapshot {at} ({age}), {n} erfasste Repos"},
+    "snapshot_measurements": {"en": "  Local measurements: {first} … {last}; unknown: {n}",
+                              "de": "  Lokale Messungen: {first} … {last}; unbekannt: {n}"},
+    "snapshot_limit": {"en": "  Limit: {detail}", "de": "  Grenze: {detail}"},
+    "snapshot_legacy_schema": {"en": "legacy JSON without schema version", "de": "älteres JSON ohne Formatversion"},
+    "snapshot_head_identity_unknown": {"en": "HEAD identity unknown in {n} repo(s)", "de": "HEAD-Identität in {n} Repos unbekannt"},
+    "snapshot_branch_inventory_unknown": {"en": "branch inventory absent in {n} repo(s)", "de": "Branch-Inventar in {n} Repos fehlt"},
+    "snapshot_local_measurement_unknown": {"en": "local measurement time unknown in {n} repo(s)", "de": "lokale Messzeit in {n} Repos unbekannt"},
+    "snapshot_fetch_age_unknown": {"en": "successful fetch time unknown for {n} remote(s)", "de": "erfolgreiche Fetch-Zeit für {n} Remotes unbekannt"},
+    "snapshot_empty": {"en": "No repositories recorded on either side; nothing was compared.",
+                       "de": "Auf keiner Seite Repos erfasst; es wurde nichts verglichen."},
     "diff_version": {
         "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
         "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
@@ -4848,13 +4877,17 @@ def utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+def parse_timestamp(value: str) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+
+
 def valid_timestamp(value) -> bool:
     if value == "":
         return True
     if not isinstance(value, str):
         return False
     try:
-        return datetime.datetime.fromisoformat(value).utcoffset() is not None
+        return parse_timestamp(value).utcoffset() is not None
     except ValueError:
         return False
 
@@ -4863,7 +4896,7 @@ def measurement_age(value: str) -> str:
     if not value or not valid_timestamp(value):
         return t("age_unknown")
     seconds = (datetime.datetime.now(datetime.timezone.utc)
-               - datetime.datetime.fromisoformat(value)).total_seconds()
+               - parse_timestamp(value)).total_seconds()
     if seconds < 0:
         return t("age_clock")
     if seconds < 60:
@@ -5326,20 +5359,67 @@ def _remote_root(local_root: Path, spec_path: str | None) -> str:
         return str(local_root)
 
 
+def make_snapshot(root: Path, statuses: list, *, all_statuses: list | None = None,
+                  query: str = "", view: str = "all") -> dict:
+    inventory = statuses if all_statuses is None else all_statuses
+    payload = {"schema_version": JSON_SCHEMA_VERSION, "version": __version__,
+               "generated_at": utc_now(), "root": terminal_text(root),
+               "repos": [status_dict(status) for status in statuses]}
+    if query:
+        payload["filter"] = {"query": terminal_text(query), "matches": len(statuses),
+                             "total": len(inventory)}
+    if view != "all":
+        payload["view"] = {"id": view, "matches": len(statuses), "total": len(inventory),
+                           "hidden_attention": hidden_dirty(inventory, statuses)}
+    return payload
+
+
 def _valid_remote_payload(payload) -> bool:
     """Den --json-Vertrag direkt an der nicht vertrauenswürdigen ssh-Grenze prüfen."""
     if not isinstance(payload, dict):
         return False
     if not isinstance(payload.get("version"), str):
         return False
+    if "schema_version" in payload and (
+            type(payload["schema_version"]) is not int or payload["schema_version"] != JSON_SCHEMA_VERSION):
+        return False
+    if not valid_timestamp(payload.get("generated_at", "")):
+        return False
+    if "root" in payload and not isinstance(payload["root"], str):
+        return False
     repos = payload.get("repos")
     if not isinstance(repos, list):
+        return False
+    for name in ("filter", "view"):
+        if name not in payload:
+            continue
+        scope = payload[name]
+        if not isinstance(scope, dict):
+            return False
+        if name == "filter" and not isinstance(scope.get("query"), str):
+            return False
+        if name == "view" and scope.get("id") not in STATUS_VIEWS:
+            return False
+        if any(type(scope.get(key)) is not int or scope[key] < 0 for key in ("matches", "total")):
+            return False
+        if scope["matches"] != len(repos) or scope["total"] < scope["matches"]:
+            return False
+        if name == "filter" and not filter_terms(scope["query"]) and scope["total"] != scope["matches"]:
+            return False
+        if name == "view" and (type(scope.get("hidden_attention")) is not int
+                               or not 0 <= scope["hidden_attention"] <= scope["total"] - scope["matches"]):
+            return False
+    if "filter" in payload and "view" in payload and payload["filter"]["total"] != payload["view"]["total"]:
+        return False
+    if (payload.get("view", {}).get("id") == "all" and "filter" not in payload
+            and payload["view"]["total"] != len(repos)):
         return False
     for repo in repos:
         if not isinstance(repo, dict) or not isinstance(repo.get("rel"), str):
             return False
-        for field_name in ("modified", "deleted", "untracked", "conflicts", "stashes"):
-            if field_name in repo and type(repo[field_name]) is not int:
+        for field_name in ("modified", "deleted", "untracked", "conflicts", "stashes",
+                           "ahead", "behind", "upstream_ahead", "upstream_behind"):
+            if field_name in repo and (type(repo[field_name]) is not int or repo[field_name] < 0):
                 return False
         if "fetch_error" in repo and type(repo["fetch_error"]) is not bool:
             return False
@@ -5393,13 +5473,17 @@ def _valid_remote_payload(payload) -> bool:
         remotes = repo.get("remotes", [])
         if not isinstance(remotes, list):
             return False
+        remote_names = set()
         for remote in remotes:
             if not isinstance(remote, dict) or not isinstance(remote.get("name"), str):
                 return False
+            if not remote["name"] or remote["name"] in remote_names:
+                return False
+            remote_names.add(remote["name"])
             if not valid_timestamp(remote.get("fetched_at", "")):
                 return False
             for field_name in ("ahead", "behind"):
-                if field_name in remote and type(remote[field_name]) is not int:
+                if field_name in remote and (type(remote[field_name]) is not int or remote[field_name] < 0):
                     return False
             for field_name in ("public", "mixed_public", "sync", "branch_exists",
                                "target_mismatch", "multiple_pushurls",
@@ -5466,8 +5550,8 @@ def fetch_remote_status(host: str, root: str, *, fetch: bool,
         last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
         raise ssh_error(last[-1] if last else t("diff_ssh_no_output"))
     try:
-        payload = json.loads(r.stdout)
-    except json.JSONDecodeError:
+        payload = parse_snapshot_json(r.stdout)
+    except ValueError:
         raise ssh_error(t("diff_ssh_bad_json"))
     if not _valid_remote_payload(payload):
         raise ssh_error(t("diff_ssh_bad_schema"))
@@ -5485,8 +5569,29 @@ def _loc(name: str) -> str:
     return name if name == t("diff_here") else t("diff_on", m=name)
 
 
-def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> list:
-    """Compare two --json payloads -> list of difference lines. Pure -> testable.
+FINDING_CATEGORIES = {
+    "version": "warning", "ambiguous_repo": "drift", "only_on": "drift",
+    "remote_missing": "drift", "remote_security": "drift", "remote_branch": "drift",
+    "remote_state": "drift", "sync_even": "sync", "branch": "local", "head": "drift",
+    "local_branch_missing": "drift", "branch_coverage": "local", "branch_pending": "sync",
+    "repo_field": "drift", "branch_inventory_failed": "local",
+    "branch_coverage_unknown": "local", "operation": "local", "dirty": "local",
+    "fetch_failed_side": "local",
+}
+
+
+def json_safe_value(value):
+    if isinstance(value, str):
+        return terminal_text(value)
+    if isinstance(value, (tuple, list)):
+        return [json_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: json_safe_value(item) for key, item in value.items()}
+    return value
+
+
+def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> list:
+    """Zwei Zustandsobjekte in stabile Befunde und lokalisierte Anzeigetexte vergleichen.
 
     The split matters more than the comparison: `DRIFT` = should be identical but
     isn't (actionable); `SYNC` = both machines agree but sit ahead/behind the sync
@@ -5503,9 +5608,38 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
     Vergleich diese beiden Felder aus, sobald eine Seite `fetch_error` meldet, und
     nennt die betroffene Seite stattdessen EINMAL als `lokal`."""
     out = []
+
+    def emit(key: str, *, side: str | None = None, **data):
+        kind = key.removeprefix("diff_")
+        names = {"va": "here_value", "vb": "there_value", "oa": "here_oid",
+                 "ob": "there_oid", "n": "count", "e": "error", "op": "operation"}
+        if kind == "version":
+            names.update(va="here_version", vb="there_version")
+        elif kind == "branch":
+            names.update(ba="here_branch", bb="there_branch")
+        elif kind == "remote_state":
+            names.update(aa="here_ahead", ab="here_behind", ba="there_ahead", bb="there_behind")
+        elif kind == "sync_even":
+            names.update(aa="ahead", ab="behind")
+        values = {names.get(name, name): value for name, value in data.items()
+                  if name not in ("rel", "r", "br", "field", "a", "b", "m")}
+        display = dict(data)
+        if kind == "head":
+            for name in ("oa", "ob"):
+                display[name] = display[name] or t("info_no_commits")
+        elif kind == "operation":
+            display["op"] = operation_label(display["op"])
+        out.append({
+            "type": kind, "category": FINDING_CATEGORIES[kind],
+            "repo": json_safe_value(data.get("rel")), "remote": json_safe_value(data.get("r")),
+            "branch": json_safe_value(data.get("br")), "field": data.get("field"),
+            "side": side, "values": json_safe_value(values),
+            "message": terminal_text(t(key, **display)),
+        })
+
     if here.get("version") != there.get("version"):
-        out.append(t("diff_version", a=here_name, va=here.get("version"),
-                     b=there_name, vb=there.get("version")))
+        emit("diff_version", a=here_name, va=here.get("version"),
+                     b=there_name, vb=there.get("version"))
     here_at, there_at = _loc(here_name), _loc(there_name)
     # Je Seite gezaehlt, damit die Erklaerung EINMAL erscheint und nicht je Repo.
     fetch_gescheitert: dict[str, int] = {}
@@ -5521,7 +5655,7 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                  if len(groups_a.get(rel, ())) > 1
                  or len(groups_b.get(rel, ())) > 1}
     for rel in sorted(ambiguous):
-        out.append(t("diff_ambiguous_repo", rel=terminal_text(rel)))
+        emit("diff_ambiguous_repo", rel=terminal_text(rel))
     # Mehrdeutige Namen nicht willkürlich paaren. Die eigene DRIFT-Zeile ist
     # ehrlicher, als einen der kollidierenden Pfade still zu verlieren.
     ra = {rel: repos[0] for rel, repos in groups_a.items()
@@ -5529,9 +5663,9 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
     rb = {rel: repos[0] for rel, repos in groups_b.items()
           if rel not in ambiguous}
     for rel in sorted(set(ra) - set(rb)):
-        out.append(t("diff_only_on", rel=rel, m=here_at))
+        emit("diff_only_on", rel=rel, m=here_at, side="here")
     for rel in sorted(set(rb) - set(ra)):
-        out.append(t("diff_only_on", rel=rel, m=there_at))
+        emit("diff_only_on", rel=rel, m=there_at, side="there")
 
     for rel in sorted(set(ra) & set(rb)):
         x, y = ra[rel], rb[rel]
@@ -5541,14 +5675,13 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                         and x["head_oid"] != "" and y["head_oid"] != ""
                         and x["head_oid"] != y["head_oid"])
         if head_differs:
-            out.append(t("diff_head", rel=rel, br=x["branch"],
-                         oa=x["head_oid"] or t("info_no_commits"),
-                         ob=y["head_oid"] or t("info_no_commits"),
-                         a=here_at, b=there_at))
+            emit("diff_head", rel=rel, br=x["branch"],
+                         oa=x["head_oid"], ob=y["head_oid"],
+                         a=here_at, b=there_at)
         xr, yr = _remotes_by_name(x), _remotes_by_name(y)
-        for name, mine, other in ((here_at, xr, yr), (there_at, yr, xr)):
+        for side_id, name, mine, other in (("here", here_at, xr, yr), ("there", there_at, yr, xr)):
             for rn in sorted(set(mine) - set(other)):
-                out.append(t("diff_remote_missing", rel=rel, r=rn, m=name))
+                emit("diff_remote_missing", rel=rel, r=rn, m=name, side=side_id)
         # Sync-Remote zuerst: sein Stand ist die interessantere Zahl als z.B. github.
         for rn in sorted(set(xr) & set(yr),
                          key=lambda n: (not (xr[n].get("sync") or yr[n].get("sync")), n)):
@@ -5575,7 +5708,10 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             if (left != right or (valid_same_branch
                                   and pa.get("branch_mapping_safe")
                                   != pb.get("branch_mapping_safe"))):
-                out.append(t("diff_remote_security", rel=rel, r=rn))
+                changed = [name for name, a, b in zip(security_fields, left, right) if a != b]
+                if valid_same_branch and pa.get("branch_mapping_safe") != pb.get("branch_mapping_safe"):
+                    changed.append("branch_mapping_safe")
+                emit("diff_remote_security", rel=rel, r=rn, changed_fields=changed)
             if pa.get("fetch_failed") or pb.get("fetch_failed"):
                 # Scheiterte der Fetch dieses Remotes auf einer Seite, steht dort
                 # ein veralteter Tracking-Ref. Ahead/Behind und "kennt den Branch"
@@ -5583,6 +5719,9 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                 # genau der Fehlalarm, den dieser Vergleich vermeiden soll. Die
                 # Sicherheitsfelder oben bleiben vergleichbar: sie stammen aus der
                 # Konfiguration und nicht aus dem Fetch.
+                continue
+            if not valid_same_branch:
+                # Zähler verschiedener Branches beschreiben keinen Rechnerunterschied.
                 continue
             sa = (pa.get("ahead"), pa.get("behind"))
             sb = (pb.get("ahead"), pb.get("behind"))
@@ -5592,42 +5731,45 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
                 # DAS ist der echte Zustandsunterschied. Die Ahead/Behind-Zahlen
                 # der Seite ohne Branch wären daneben nur irreführende Nullen.
                 side = here_at if pa.get("branch_exists") else there_at
-                out.append(t("diff_remote_branch", rel=rel, r=rn,
-                             br=x.get("branch"), m=side))
+                emit("diff_remote_branch", rel=rel, r=rn,
+                             br=x.get("branch"), m=side,
+                             side="here" if pa.get("branch_exists") else "there")
             elif sa != sb:
-                out.append(t("diff_remote_state", rel=rel, r=rn,
+                emit("diff_remote_state", rel=rel, r=rn,
                              a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
-                             b=there_at, ba=pb.get("ahead"), bb=pb.get("behind")))
+                             b=there_at, ba=pb.get("ahead"), bb=pb.get("behind"))
             elif (not head_differs and (pa.get("sync") or pb.get("sync"))
                   and (pa.get("ahead") or pa.get("behind"))):
                 # Beide Rechner gleichauf, aber gemeinsam neben dem Sync-Remote:
                 # im reinen Zwei-Rechner-Vergleich unsichtbar, trotzdem Handlungsbedarf.
-                out.append(t("diff_sync_even", rel=rel, r=rn,
-                             aa=pa.get("ahead"), ab=pa.get("behind")))
+                emit("diff_sync_even", rel=rel, r=rn,
+                             aa=pa.get("ahead"), ab=pa.get("behind"))
         if x.get("branch") != y.get("branch"):
-            out.append(t("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
-                         b=there_at, bb=y.get("branch")))
+            emit("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
+                         b=there_at, bb=y.get("branch"))
         if ("branches" in x and "branches" in y
                 and not x.get("branches_error") and not y.get("branches_error")):
             bx = {branch["name"]: branch for branch in x["branches"]}
             by = {branch["name"]: branch for branch in y["branches"]}
-            for side, mine, other in ((here_at, bx, by), (there_at, by, bx)):
+            for side_id, side, mine, other in (("here", here_at, bx, by), ("there", there_at, by, bx)):
                 for name in sorted(set(mine) - set(other)):
-                    out.append(t("diff_local_branch_missing", rel=rel, br=name, m=side))
+                    emit("diff_local_branch_missing", rel=rel, br=name, m=side, side=side_id)
             for name in sorted(set(bx) & set(by)):
                 left, right = bx[name], by[name]
                 if left["oid"] != right["oid"]:
                     if not (head_differs and name == x.get("branch") == y.get("branch")):
-                        out.append(t("diff_head", rel=rel, br=name,
-                                     oa=left["oid"], ob=right["oid"], a=here_at, b=there_at))
+                        emit("diff_head", rel=rel, br=name,
+                                     oa=left["oid"], ob=right["oid"], a=here_at, b=there_at)
                 elif not left["current"] and not right["current"]:
                     a_coverage = (left["coverage"], left["uncovered_commits"])
                     b_coverage = (right["coverage"], right["uncovered_commits"])
                     if a_coverage != b_coverage:
-                        out.append(t("diff_branch_coverage", rel=rel, br=name))
+                        emit("diff_branch_coverage", rel=rel, br=name,
+                             here_coverage={"state": a_coverage[0], "uncovered_commits": a_coverage[1]},
+                             there_coverage={"state": b_coverage[0], "uncovered_commits": b_coverage[1]})
                     elif left["coverage"] == "uncovered":
-                        out.append(t("diff_branch_pending", rel=rel, br=name,
-                                     n=left["uncovered_commits"]))
+                        emit("diff_branch_pending", rel=rel, br=name,
+                                     n=left["uncovered_commits"])
         # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
         # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
         # und Stashes sind davon unberuehrt und werden weiter verglichen.
@@ -5652,29 +5794,32 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             werte["remote_state"] = (x.get("remote_state"), y.get("remote_state"))
         for field_name, (va, vb) in werte.items():
             if va != vb:
-                out.append(t("diff_repo_field", rel=rel, field=field_name,
-                             a=here_at, va=va, b=there_at, vb=vb))
-        for name, r in ((here_at, x), (there_at, y)):
+                emit("diff_repo_field", rel=rel, field=field_name,
+                             a=here_at, va=va, b=there_at, vb=vb)
+        for name, r in (("here", x), ("there", y)):
             if r.get("fetch_error"):
                 fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
-        for name, r in ((here_at, x), (there_at, y)):
+        for side_id, name, r in (("here", here_at, x), ("there", there_at, y)):
             if r.get("branches_error"):
-                out.append(t("diff_branch_inventory_failed", rel=rel, m=name,
-                             e=r["branches_error"]))
+                emit("diff_branch_inventory_failed", rel=rel, m=name,
+                             e=r["branches_error"], side=side_id)
             unknown = sum(not branch["current"] and branch["coverage"] == "unknown"
                           for branch in r.get("branches", []))
             if unknown:
-                out.append(t("diff_branch_coverage_unknown", rel=rel, m=name, n=unknown))
+                emit("diff_branch_coverage_unknown", rel=rel, m=name, n=unknown, side=side_id)
             if r.get("operation"):
-                out.append(t("diff_operation", rel=rel, m=name,
-                             op=operation_label(r["operation"])))
+                emit("diff_operation", rel=rel, m=name,
+                             op=r["operation"], side=side_id)
             n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
             if n:
-                out.append(t("diff_dirty", rel=rel, m=name, n=n))
-    for name in (here_at, there_at):
-        if fetch_gescheitert.get(name):
-            out.append(t("diff_fetch_failed_side", m=name, n=fetch_gescheitert[name]))
-    return [terminal_text(line) for line in out]
+                emit("diff_dirty", rel=rel, m=name, n=n, side=side_id)
+    for side_id, name in (("here", here_at), ("there", there_at)):
+        if fetch_gescheitert.get(side_id):
+            emit("diff_fetch_failed_side", m=name, n=fetch_gescheitert[side_id], side=side_id)
+    return out
+
+def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> list:
+    return [finding["message"] for finding in diff_findings(here, there, here_name, there_name)]
 
 
 # ---------------------------------------------------------------------------
@@ -5834,6 +5979,158 @@ def filter_comparison_repos(here: list, there: list, query: str,
             [repo for repo in right if repo["rel"] in selected])
 
 
+def comparison_selection(here: dict, there: dict, query: str, view: str):
+    if not query and view == "all":
+        return here, there, None
+    left, right = filter_comparison_repos(here["repos"], there["repos"], query, view)
+    info = {"query": terminal_text(query), "here_matches": len(left),
+            "here_total": len(here["repos"]), "host_matches": len(right),
+            "host_total": len(there["repos"])}
+    if view != "all":
+        info.update(view=view, selection="either-side",
+                    here_view_matches=len(filter_repo_dicts(here["repos"], query, view)),
+                    host_view_matches=len(filter_repo_dicts(there["repos"], query, view)))
+    return dict(here, repos=left), dict(there, repos=right), info
+
+
+def snapshot_metadata(payload: dict) -> dict:
+    dates = [repo["measured_at"] for repo in payload["repos"] if repo.get("measured_at")]
+    dates.sort(key=parse_timestamp)
+    return {"version": payload["version"], "schema_version": payload.get("schema_version"),
+            "generated_at": payload.get("generated_at", ""), "root": payload.get("root", ""),
+            "recorded_repos": len(payload["repos"]),
+            "filter": ({key: payload["filter"][key] for key in ("query", "matches", "total")}
+                       if "filter" in payload else None),
+            "view": ({key: payload["view"][key] for key in ("id", "matches", "total", "hidden_attention")}
+                     if "view" in payload else None),
+            "local_measurement": {"earliest": dates[0] if dates else "",
+                                  "latest": dates[-1] if dates else "",
+                                  "unknown_repos": len(payload["repos"]) - len(dates)}}
+
+
+def snapshot_limitations(payload: dict, side: str) -> list:
+    limits = []
+    if "schema_version" not in payload:
+        limits.append({"side": side, "code": "legacy_schema", "count": 1})
+    repos = payload["repos"]
+    counts = {
+        "head_identity_unknown": sum("head_oid" not in repo or repo["head_oid"] == "" for repo in repos),
+        "branch_inventory_unknown": sum("branches" not in repo and not repo.get("branches_error") for repo in repos),
+        "local_measurement_unknown": sum(not repo.get("measured_at") for repo in repos),
+        "fetch_age_unknown": sum(not remote.get("fetched_at") for repo in repos for remote in repo.get("remotes", [])),
+    }
+    limits.extend({"side": side, "code": code, "count": count} for code, count in counts.items() if count)
+    return limits
+
+
+def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
+                     *, as_json: bool, filter_info=None, sources=None, offline=False) -> int:
+    findings = diff_findings(here, there, here_name, there_name)
+    lines = [finding["message"] for finding in findings]
+    sources = sources or {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
+    limits = snapshot_limitations(here, "here") + snapshot_limitations(there, "there")
+    note = ""
+    if filter_info is not None:
+        shown = filter_info["query"]
+        if filter_info.get("view"):
+            shown = " · ".join(filter(None, [shown, t("view_active", v=t("view_" + filter_info["view"]))]))
+        note = t("diff_filter_note", q=shown, n=len(here["repos"]),
+                 total=filter_info["here_total"], m=len(there["repos"]),
+                 mt=filter_info["host_total"], h=terminal_text(there_name))
+        if not here["repos"] and not there["repos"]:
+            print(t("filter_cli_no_hit", q=shown), file=sys.stderr)
+    if as_json:
+        payload = {"schema_version": JSON_SCHEMA_VERSION, "here": json_text(here["version"]),
+                   "host": terminal_text(there_name), "differences": lines,
+                   "findings": findings, "sources": json_safe_value(sources), "limitations": limits}
+        if filter_info is not None:
+            payload["filter"] = filter_info
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        if offline:
+            for side, name in (("here", here_name), ("there", there_name)):
+                source = sources[side]
+                print(t("snapshot_source", name=terminal_text(name), at=source["generated_at"] or t("age_unknown"),
+                        age=measurement_age(source["generated_at"]), n=source["recorded_repos"]))
+                local = source["local_measurement"]
+                print(t("snapshot_measurements", first=local["earliest"] or t("age_unknown"),
+                        last=local["latest"] or t("age_unknown"), n=local["unknown_repos"]))
+                for limit in limits:
+                    if limit["side"] == side:
+                        print(t("snapshot_limit", detail=t("snapshot_" + limit["code"], n=limit["count"])))
+        if note:
+            print(note)
+        if offline and not here["repos"] and not there["repos"]:
+            print(t("snapshot_empty"))
+        else:
+            print("\n".join(lines) if lines else t("diff_same", h=terminal_text(there_name)))
+    return 1 if findings else 0
+
+
+def parse_snapshot_json(text: str):
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(t("snapshot_duplicate_key", name=terminal_text(key)))
+            result[key] = value
+        return result
+
+    def nonfinite(value):
+        raise ValueError(t("snapshot_nonfinite", value=value))
+
+    try:
+        payload = json.loads(text, object_pairs_hook=unique_keys, parse_constant=nonfinite)
+    except RecursionError:
+        raise ValueError(t("snapshot_depth")) from None
+    # Die Decoder verschiedener Python-Versionen haben unterschiedliche Grenzen.
+    # Iteratoren begrenzen den Zusatzspeicher auch bei sehr breiten JSON-Listen.
+    stack = [iter((payload,))]
+    while stack:
+        try:
+            value = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if isinstance(value, (dict, list)):
+            if len(stack) > MAX_SNAPSHOT_DEPTH:
+                raise ValueError(t("snapshot_depth"))
+            stack.append(iter(value.values() if isinstance(value, dict) else value))
+    return payload
+
+
+def load_snapshot(path: Path) -> dict:
+    with path.open("rb") as stream:
+        data = stream.read(MAX_SNAPSHOT_BYTES + 1)
+    if len(data) > MAX_SNAPSHOT_BYTES:
+        raise ValueError(t("snapshot_too_large"))
+    payload = parse_snapshot_json(data.decode("utf-8-sig"))
+    if not _valid_remote_payload(payload):
+        raise ValueError(t("diff_ssh_bad_schema"))
+    return payload
+
+
+def run_offline_comparison(paths: list[str], *, as_json: bool, query: str, view: str) -> int:
+    try:
+        files = [Path(path).expanduser() for path in paths]
+        here, there = (load_snapshot(path) for path in files)
+        for payload in (here, there):
+            if payload.get("view", {}).get("id", "all") != "all":
+                raise ValueError(t("snapshot_filtered_view"))
+        scopes = [set(filter_terms(payload.get("filter", {}).get("query", ""))) for payload in (here, there)]
+        if scopes[0] != scopes[1]:
+            raise ValueError(t("snapshot_filter_mismatch"))
+        sources = {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
+        for side, path in zip(("here", "there"), files):
+            sources[side]["file"] = terminal_text(path)
+        here, there, info = comparison_selection(here, there, query, view)
+        return print_comparison(here, there, files[0].name, files[1].name, as_json=as_json,
+                                filter_info=info, sources=sources, offline=True)
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(t("snapshot_error", e=terminal_text(exc)), file=sys.stderr)
+        return 2
+
+
 def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
              query: str = "", view: str = "all") -> int:
     """Rechner vergleichen; Config-Erzeugung und optionaler Fetch sind die Ausnahmen."""
@@ -5853,56 +6150,12 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    here = {"version": __version__, "root": terminal_text(root),
-            "repos": [status_dict(s) for s in collect_all(root, cfg, fetch=fetch)]}
-    # Der Filter greift auf BEIDEN Seiten mit demselben Suchtext. Nur hier zu
-    # filtern ergäbe lauter "nur dort"-Unterschiede, die es gar nicht gibt.
-    note = ""
-    filter_info = None
-    if query or view != "all":
-        here_all, there_all = here["repos"], there.get("repos") or []
-        left, right = filter_comparison_repos(here_all, there_all, query, view)
-        here["repos"] = left
-        there = dict(there, repos=right)
-        # `terminal_text()` wie in `print_list()`: Der Suchtext kommt roh von der
-        # Kommandozeile und darf im Terminal keine Steuerzeichen ausfuehren.
-        # Gefiltert wird weiter mit dem Rohtext — nur die Ausgabe wird entschaerft.
-        shown = terminal_text(query)
-        filter_info = {
-            "query": shown,
-            "here_matches": len(here["repos"]), "here_total": len(here_all),
-            "host_matches": len(there["repos"]), "host_total": len(there_all),
-        }
-        if view != "all":
-            filter_info["view"] = view
-            filter_info["selection"] = "either-side"
-            filter_info["here_view_matches"] = len(filter_repo_dicts(here_all, query, view))
-            filter_info["host_view_matches"] = len(filter_repo_dicts(there_all, query, view))
-            shown = " · ".join(filter(None, [shown, t("view_active", v=t("view_" + view))]))
-        note = t("diff_filter_note", q=shown,
-                 n=len(here["repos"]), total=len(here_all),
-                 m=len(there["repos"]), mt=len(there_all), h=host)
-        # Passt der Filter auf keiner Seite, wurde nichts verglichen. Ohne diesen
-        # Hinweis stünde am Ende "keine Unterschiede" mit Exit-Code 0 da — genau
-        # das Bild, das ein wirklich übereinstimmendes Paar Rechner erzeugt.
-        if not here["repos"] and not there["repos"]:
-            print(t("filter_cli_no_hit", q=shown), file=sys.stderr)
-    lines = diff_status(here, there, t("diff_here"), host)
-    if as_json:
-        # Die JSON-Form bleibt wie `--json` frei von Zusatztexten; der Hinweis
-        # oben steht dafür auf stderr.
-        payload = {"here": here.get("version"), "host": host,
-                   "differences": lines}
-        if filter_info is not None:
-            payload["filter"] = filter_info
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-    else:
-        # Der Hinweis zählt nicht als Unterschied und geht deshalb getrennt
-        # heraus: Der Exit-Code beschreibt weiterhin nur die Vergleichszeilen.
-        if note:
-            print(note)
-        print("\n".join(lines) if lines else t("diff_same", h=host))
-    return 1 if lines else 0
+    here = make_snapshot(root, collect_all(root, cfg, fetch=fetch))
+    sources = {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
+    here, there, info = comparison_selection(here, there, query, view)
+    return print_comparison(here, there, t("diff_here"), host, as_json=as_json,
+                            filter_info=info, sources=sources)
+
 
 
 # ---------------------------------------------------------------------------
@@ -6021,10 +6274,20 @@ def compact_position(index: int, rows: int) -> tuple[int, int]:
     return index % rows, index // rows
 
 
+def color_enabled(policy: str = "auto") -> bool:
+    if policy not in ("auto", "always", "never"):
+        raise ValueError("unknown color policy: " + policy)
+    return policy == "always" or (policy == "auto" and "NO_COLOR" not in os.environ
+                                  and sys.stdout.isatty())
+
+
 def print_list(statuses: list[RepoStatus], root: Path | None = None,
-               query: str = "", hidden: int = 0, view: str = "all") -> None:
+               query: str = "", hidden: int = 0, view: str = "all",
+               color: str = "auto") -> None:
     green, red, yellow, cyan, reset = (
         "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
+    if not color_enabled(color):
+        green = red = yellow = cyan = reset = ""
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
     # umgeleiteten Datei, die man spaeter gegen die eines anderen Macs diffed —
     # ohne Version haelt man einen Versionsunterschied fuer einen Repo-Unterschied.
@@ -8869,9 +9132,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("root", nargs="?", default=".",
                     help="start directory for the repo scan (default: current dir)")
     ap.add_argument("--list", action="store_true",
-                    help="non-interactive colored text list")
+                    help="non-interactive text list")
     ap.add_argument("--json", action="store_true",
                     help="non-interactive JSON output (machine-readable)")
+    ap.add_argument("--compare", nargs=2, metavar=("HERE_JSON", "THERE_JSON"),
+                    help="compare two saved --json snapshots without scanning, SSH or fetch")
+    ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                    help="colors for --list: auto uses a terminal unless NO_COLOR is set")
     ap.add_argument("--fetch", action="store_true",
                     help="`git fetch` each repo before output (with --list/--json)")
     ap.add_argument("--fetch-remote", metavar="NAME",
@@ -8900,14 +9167,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="(internal, for the gmf wrapper) write the ⏎ target path here")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
+    global UI_LANG
+    UI_LANG = resolve_lang(DEFAULT_CONFIG, args.lang)
+    if args.compare:
+        if args.diff or args.demo or args.fetch or args.fetch_remote is not None:
+            ap.error(t("cli_compare_options"))
+        return run_offline_comparison(args.compare, as_json=args.json,
+                                      query=canonical_filter_query(args.filter), view=args.view)
     if args.fetch_remote is not None:
         if args.diff or (sys.stdout.isatty() and not (args.list or args.json)):
-            ap.error("--fetch-remote requires non-interactive --list/--json output")
+            ap.error(t("cli_fetch_remote_output"))
         if not args.fetch_remote or args.fetch_remote.startswith("-"):
-            ap.error("--fetch-remote requires a remote name")
+            ap.error(t("cli_fetch_remote_name"))
         args.fetch = True
-
-    global UI_LANG
 
     if args.demo:
         # Demo ignoriert die persönliche Config bewusst: generische Apps + Sprache,
@@ -8956,21 +9228,12 @@ def main(argv: list[str] | None = None) -> int:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
             # dieselbe Fassung dahintersteht. Die Repos liegen unter "repos".
-            payload = {"version": __version__, "root": terminal_text(root),
-                       "repos": [status_dict(s) for s in statuses]}
-            if query:
-                payload["filter"] = {
-                    "query": terminal_text(query),
-                    "matches": len(statuses), "total": len(all_statuses),
-                }
-            if args.view != "all":
-                payload["view"] = {"id": args.view, "matches": len(statuses),
-                                   "total": len(all_statuses),
-                                   "hidden_attention": hidden_dirty(all_statuses, statuses)}
+            payload = make_snapshot(root, statuses, all_statuses=all_statuses,
+                                    query=query, view=args.view)
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print_list(statuses, root, query,
-                       hidden_dirty(all_statuses, statuses), view=args.view)
+                       hidden_dirty(all_statuses, statuses), view=args.view, color=args.color)
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.

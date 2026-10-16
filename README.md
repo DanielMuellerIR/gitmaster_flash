@@ -276,7 +276,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.27.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.28.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -788,6 +788,35 @@ with `<remote> needs a login (no credential helper or SSH key).` instead of aski
 Store HTTPS credentials in a credential helper (in a logged-in macOS GUI session:
 `git config --global credential.helper osxkeychain`) or use SSH with a key in the
 agent; both work without any prompt.
+
+## Saved comparisons and color output
+
+```sh
+gmf --json > before.json
+# ... later ...
+gmf --json > after.json
+gmf --compare before.json after.json
+gmf --compare before.json after.json --json --view changes
+gmf --list --color never
+```
+
+`--compare` reads only the two files, without scanning, SSH, fetch or config
+creation. Saved path searches must match. Save complete snapshots and apply
+work views when comparing, so an excluded counterpart does not become a false
+missing repo. Creation times, local measurement times and unknown capabilities
+remain visible; time differences alone are not drift. Incompatible files exit 2.
+
+JSON now carries `schema_version: 1`, independently of the program version.
+Comparison output retains readable `differences` and adds stable `findings`
+with types, categories, sides and values. Older object snapshots remain readable
+with explicit limits. The complete contract is in
+[JSON format and finding types](docs/json-format.md).
+
+`--color auto` is the default for `--list`: colors only at a terminal and without
+`NO_COLOR` in the environment. `always` forces them even through a pipe and takes
+precedence over `NO_COLOR`; `never` suppresses them. JSON and comparison reports
+retain their fixed text format. The curses UI continues to use the terminal
+palette.
 
 ## Tests
 
