@@ -153,6 +153,21 @@ exit "$rc"
     def _remote_payload(self) -> dict:
         return json.loads(self.remote_stdout.read_text())
 
+    def test_noncurrent_branch_is_transferred_in_remote_json_and_compared(self):
+        _, remote = self._clone_pair()
+        git(remote, "config", "user.name", "Test")
+        git(remote, "config", "user.email", "test@example.invalid")
+        git(remote, "switch", "-c", "topic")
+        (remote / "topic.txt").write_text("unpublished work\n")
+        git(remote, "add", "topic.txt")
+        git(remote, "commit", "-qm", "topic work")
+        git(remote, "switch", "main")
+        result = self._run_gmf()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("local branch 'topic' only", result.stdout)
+        branches = self._remote_payload()["repos"][0]["branches"]
+        self.assertEqual({b["name"] for b in branches}, {"main", "topic"})
+
     def test_equal_remote_distances_keep_different_local_commits_visible(self):
         local, remote = self._clone_pair()
         for repo, content in ((local, "local work\n"), (remote, "remote work\n")):

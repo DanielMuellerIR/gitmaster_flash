@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 # Ein reiner lokaler Scan darf alle zwölf Worker nutzen. Beim Fetch bleiben wir
 # dagegen bewusst unter dem verbreiteten sshd-Default ``MaxStartups 10:30:100``:
@@ -191,6 +191,32 @@ TR = {
                            "de": "eine Liste von Zeichenketten erwartet"},
     "set_err_names": {"en": "Enter a list of folder names.",
                       "de": "Eine Liste von Ordnernamen eingeben."},
+    "other_branches_review": {"en": "Other branches to review: {n}",
+                              "de": "Weitere Branches prüfen: {n}"},
+    "branch_inventory_failed": {"en": "Branch inventory unavailable: {e}",
+                                "de": "Branch-Inventar nicht lesbar: {e}"},
+    "info_branch_coverage": {"en": "Known remote refs", "de": "Bekannte Remote-Refs"},
+    "branch_covered": {"en": "commit contained in locally known remote refs",
+                       "de": "Commit in lokal bekannten Remote-Refs enthalten"},
+    "branch_uncovered": {"en": "commits outside locally known remote refs: {n}",
+                         "de": "Commits außerhalb lokal bekannter Remote-Refs: {n}"},
+    "branch_coverage_unknown": {"en": "coverage not provable from shallow history",
+                                "de": "Abdeckung mit flacher Historie nicht belegbar"},
+    "branch_needs_review": {"en": "review", "de": "prüfen"},
+    "diff_local_branch_missing": {"en": "DRIFT  {rel}: local branch '{br}' only {m}",
+                                  "de": "DRIFT  {rel}: lokaler Branch '{br}' nur {m}"},
+    "diff_branch_pending": {
+        "en": "SYNC   {rel}: branch '{br}' has {n} commit(s) outside known remote refs on both machines",
+        "de": "SYNC   {rel}: Branch '{br}' auf beiden Rechnern mit {n} Commits außerhalb bekannter Remote-Refs"},
+    "diff_branch_coverage": {
+        "en": "local  {rel}: cached remote coverage of branch '{br}' differs",
+        "de": "lokal  {rel}: gespeicherte Remote-Abdeckung von Branch '{br}' verschieden"},
+    "diff_branch_inventory_failed": {
+        "en": "local  {rel}: branch inventory unavailable {m}: {e}",
+        "de": "lokal  {rel}: Branch-Inventar nicht lesbar {m}: {e}"},
+    "diff_branch_coverage_unknown": {
+        "en": "local  {rel}: remote coverage unknown for other branches {m}: {n}",
+        "de": "lokal  {rel}: Remote-Abdeckung weiterer Branches {m} unbekannt: {n}"},
     "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) {m}",
                    "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}"},
     # Einmal je Lauf, nicht je Repo: sonst wiederholt ein einziger fehlgeschlagener
@@ -1092,6 +1118,14 @@ class RepoStatus:
     # Fehler überleben einen lokalen Refresh (carry_fetch_failure) — ein lokaler
     # Lesefehler wird dagegen bei jedem Refresh neu festgestellt oder ist weg.
     fetch_error: bool = False
+    branches: list = field(default_factory=list)  # BranchInfo; vollständiges lokales Inventar
+    branches_scanned: bool = False
+    branches_error: str = ""
+
+    @property
+    def branch_review_count(self) -> int:
+        return sum(not branch.is_head and branch.coverage in ("uncovered", "unknown")
+                   for branch in self.branches)
 
     @property
     def dirty(self) -> bool:
@@ -1099,17 +1133,18 @@ class RepoStatus:
 
     @property
     def clean_and_synced(self) -> bool:
-        return (not self.error and not self.operation and not self.dirty
+        return (not self.error and not self.branches_error and not self.branch_review_count
+                and not self.operation and not self.dirty
                 and not self.stashes and self.ahead == 0
                 and self.behind == 0 and self.remote_state == "ok")
 
     def severity(self) -> int:
         """Sortierschlüssel: Problematisches nach oben."""
-        if self.error:
+        if self.error or self.branches_error:
             return 0
         if self.operation or self.dirty or self.stashes:
             return 1
-        if self.ahead or self.behind:
+        if self.ahead or self.behind or self.branch_review_count:
             return 2
         if self.remote_state != "ok":
             return 3
@@ -1219,6 +1254,9 @@ class BranchInfo:
     subject: str = ""
     merged: bool = False          # vollständig in HEAD enthalten
     upstream_remote: str = ""
+    upstream_ref: str = ""
+    coverage: str = ""            # covered | uncovered | unknown; leer = nicht geprüft
+    uncovered_commits: int | None = None
 
 
 @dataclass(frozen=True)
@@ -3812,8 +3850,8 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     # denselben Branch dann oben `main` und im Block darunter `heads/main`
     # (Review-Fund 2026-09-10).
     fields = ("%(HEAD)", "%(refname)", "%(upstream:short)", "%(upstream:track)",
-              "%(objectname:short)", "%(committerdate:short)", "%(contents:subject)",
-              "%(upstream:remotename)")
+              "%(objectname)", "%(committerdate:short)", "%(contents:subject)",
+              "%(upstream:remotename)", "%(upstream)")
     r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_,
                 env=NO_REPLACE_ENV)
     if r.returncode != 0:
@@ -3836,11 +3874,15 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
         if not line.strip():
             continue
         parts = line.split("\0")
-        if len(parts) < 8:
+        if len(parts) != 9:
             if strict:
                 raise GitReadError("git branch returned malformed output")
             continue
-        head, ref, upstream, track, oid, date, subject, upstream_remote = parts[:8]
+        head, ref, upstream, track, oid, date, subject, upstream_remote, upstream_ref = parts
+        # `git branch` liefert bei detached HEAD zusätzlich eine virtuelle
+        # Zeile ohne Branch-Ref. Sie gehört nicht ins lokale Branch-Inventar.
+        if not ref.startswith("refs/heads/"):
+            continue
         name = branch_name(ref)
         # `upstream:track` ist dank LC_ALL=C stabil englisch: "[ahead 2, behind 1]",
         # "[gone]" oder leer.
@@ -3852,9 +3894,89 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
             behind=int(behind.group(1)) if behind else 0,
             upstream_gone="gone" in track,
             oid=oid, date=date, subject=subject, merged=name in merged,
-            upstream_remote=upstream_remote,
+            upstream_remote=upstream_remote, upstream_ref=upstream_ref,
         ))
     return branches
+
+
+BRANCH_COVERAGE_BASIS = "local-remote-tracking-refs"
+BRANCH_COVERAGE_STATES = ("covered", "uncovered", "unknown")
+_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+
+def is_object_id(value) -> bool:
+    return isinstance(value, str) and bool(_OBJECT_ID_RE.fullmatch(value))
+
+
+def read_ref_snapshot(repo: Path, timeout: int) -> dict[str, tuple[str, str]]:
+    """Branch- und Remote-Refs samt direktem oder symbolischem Ziel festhalten."""
+    r = _required_git(repo, "for-each-ref",
+                      "--format=%(refname)%00%(objectname)%00%(symref)",
+                      "refs/heads", "refs/remotes", timeout=timeout,
+                      env=NO_REPLACE_ENV)
+    refs = {}
+    for line in r.stdout.split("\n"):
+        if not line:
+            continue
+        fields = line.split("\0")
+        if len(fields) != 3 or not is_object_id(fields[1]):
+            raise GitReadError("git for-each-ref returned malformed inventory")
+        name, oid, symref = fields
+        if not name.startswith(("refs/heads/", "refs/remotes/")) or name in refs:
+            raise GitReadError("git for-each-ref returned ambiguous inventory")
+        refs[name] = (oid, symref)
+    return refs
+
+
+def read_branch_inventory(repo: Path, cfg: dict) -> list[BranchInfo]:
+    """Abdeckung durch bekannte direkte Remote-Refs, keine Zusage über Server.
+
+    Gezählt wird gegen feste OIDs. Ein nachträglich bewegter Ref darf nicht
+    einzelne Branches unter einer anderen Ausgangslage messen. Symbolische
+    Remote-Refs sind kein Abdeckungsbeleg: Sie könnten auf lokale Branches zeigen.
+    """
+    timeout = cfg["git_timeout"]
+    head_ref = current_symbolic_head_ref(repo, timeout)
+    detached_oid = current_head(repo, timeout) if head_ref is None else None
+    refs = read_ref_snapshot(repo, timeout)
+    branches = read_branches(repo, cfg, strict=True)
+    expected = {name: oid for name, (oid, _) in refs.items()
+                if name.startswith("refs/heads/")}
+    if len(expected) != len(branches) or expected != {
+            "refs/heads/" + branch.name: branch.oid for branch in branches}:
+        raise GitReadError("local branches changed during inventory")
+    expected_current = head_ref.removeprefix("refs/heads/") if head_ref in expected else None
+    if next((b.name for b in branches if b.is_head), None) != expected_current:
+        raise GitReadError("checked-out branch changed during inventory")
+    remote_oids = sorted({oid for name, (oid, symref) in refs.items()
+                          if name.startswith("refs/remotes/") and not symref})
+    shallow_value = _required_git(repo, "rev-parse", "--is-shallow-repository",
+                                  timeout=timeout).stdout.strip()
+    if shallow_value not in ("true", "false"):
+        raise GitReadError("git rev-parse returned malformed shallow state")
+    shallow = shallow_value == "true"
+    for branch in branches:
+        counted = _required_git(repo, "rev-list", "--count", branch.oid,
+                                *(('--not', *remote_oids) if remote_oids else ()),
+                                timeout=timeout, env=NO_REPLACE_ENV)
+        value = counted.stdout.strip()
+        if not _NUMBER_RE.fullmatch(value):
+            raise GitReadError("git rev-list returned malformed branch coverage")
+        count = int(value)
+        branch.coverage = "covered" if not count else ("unknown" if shallow else "uncovered")
+        branch.uncovered_commits = None if branch.coverage == "unknown" else count
+    if read_ref_snapshot(repo, timeout) != refs:
+        raise GitReadError("refs changed during branch inventory")
+    if (current_symbolic_head_ref(repo, timeout) != head_ref or
+            (head_ref is None and current_head(repo, timeout) != detached_oid)):
+        raise GitReadError("HEAD changed during branch inventory")
+    return branches
+
+
+def branch_inventory_summary(st: RepoStatus) -> str:
+    if st.branches_error:
+        return t("branch_inventory_failed", e=terminal_text(st.branches_error))
+    return t("other_branches_review", n=st.branch_review_count) if st.branch_review_count else ""
 
 
 def repo_has_head(repo: Path, timeout: int) -> bool:
@@ -4246,7 +4368,10 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
                     state.fetch_error_detail)))
         specs.append(("remote", name, f"  {terminal_text(name)}{suffix}", rows))
 
-    specs.extend(branch_block_specs(read_branches(st.path, cfg)))
+    branches = ([] if st.branches_error else (st.branches if st.branches_scanned
+                                             else read_branches(st.path, cfg)))
+    if not st.branches_error:
+        specs.extend(branch_block_specs(branches))
     # Eine gemeinsame Label-Breite für ALLE Detailzeilen der Seite: erst dadurch
     # stehen die Werte über Remotes und Branches hinweg in derselben Spalte.
     width = max((cell_width(label) for _, _, _, rows in specs for label, _ in rows),
@@ -4261,7 +4386,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     if branch_specs:
         render_info_blocks(view, branch_specs, width)
     else:
-        lines.append("  " + t("none_label"))
+        lines.append("  " + (branch_inventory_summary(st) if st.branches_error
+                              else t("none_label")))
     return view
 
 
@@ -4281,9 +4407,11 @@ def branch_block_specs(branches: list[BranchInfo]) -> list:
             labels.append(t("info_branch_merged"))
         if branch.upstream_gone:
             labels.append(t("info_branch_upstream_gone"))
+        if branch.coverage in ("uncovered", "unknown"):
+            labels.append(t("branch_needs_review"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
         rows = [(t("info_branch_commit"),
-                 f"{terminal_text(branch.oid)} · {terminal_text(branch.date)}"
+                 f"{terminal_text(branch.oid[:12])} · {terminal_text(branch.date)}"
                  f" · {terminal_text(branch.subject)}")]
         if branch.upstream:
             rows.append((t("info_upstream"),
@@ -4291,6 +4419,11 @@ def branch_block_specs(branches: list[BranchInfo]) -> list:
                          f"({t('info_delta', a=branch.ahead, b=branch.behind)})"))
         else:
             rows.append((t("info_upstream"), t("none_label")))
+        if branch.coverage:
+            value = (t("branch_uncovered", n=branch.uncovered_commits)
+                     if branch.coverage == "uncovered" else
+                     t("branch_covered" if branch.coverage == "covered" else "branch_coverage_unknown"))
+            rows.append((t("info_branch_coverage"), value))
         specs.append(("branch", branch.name,
                       f"  {terminal_text(branch.name)}{suffix}", rows))
     return specs
@@ -4699,6 +4832,17 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False) -> Re
         st.remotes = collect_remote_statuses(
             repo, st.branch, st.remote, cfg, configs,
             fetch_failures=fetch_failures)
+        try:
+            st.branches = read_branch_inventory(repo, cfg)
+            current = next((b for b in st.branches if b.is_head), None)
+            if not detached and st.head_oid:
+                if current is None or (current.name, current.oid) != (st.branch, st.head_oid):
+                    st.head_oid = ""
+                    raise GitReadError("HEAD changed during branch inventory")
+            st.branches_scanned = True
+        except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            st.branches = []
+            st.branches_error = str(exc)
         summarize_fetch_failures(st)
         removed_during_fetch = set(fetch_failures) - set(configs)
         if removed_during_fetch:
@@ -4912,7 +5056,7 @@ def json_text(value):
 
 
 def status_dict(st: RepoStatus) -> dict:
-    return {
+    payload = {
         "path": terminal_text(st.path), "rel": terminal_text(st.rel),
         "branch": json_text(st.branch),
         "head_oid": st.head_oid, "operation": st.operation,
@@ -4954,6 +5098,20 @@ def status_dict(st: RepoStatus) -> dict:
         # das Repo. `diff_status` blendet damit `error` und `remote_state` aus.
         "fetch_error": st.fetch_error,
     }
+    if st.branches_scanned or st.branches_error:
+        payload.update(
+            branches=[{
+                "name": json_text(b.name), "oid": b.oid, "current": b.is_head,
+                "upstream": json_text(b.upstream_ref),
+                "upstream_remote": json_text(b.upstream_remote),
+                "ahead": b.ahead, "behind": b.behind,
+                "upstream_gone": b.upstream_gone, "merged": b.merged,
+                "coverage": b.coverage, "uncovered_commits": b.uncovered_commits,
+            } for b in st.branches],
+            branches_error=json_text(st.branches_error),
+            branch_coverage_basis=BRANCH_COVERAGE_BASIS,
+        )
+    return payload
 
 
 # --- Comparing two machines (--diff) ---------------------------------------
@@ -5006,12 +5164,43 @@ def _valid_remote_payload(payload) -> bool:
                 return False
         if "head_oid" in repo:
             oid = repo["head_oid"]
-            if oid is not None and (not isinstance(oid, str) or
-                    (oid != "" and not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid))):
+            if oid is not None and oid != "" and not is_object_id(oid):
                 return False
         if "operation" in repo and repo["operation"] not in (
                 "", *(operation for _, operation in OPERATION_MARKERS)):
             return False
+        if "branches_error" in repo and not isinstance(repo["branches_error"], str):
+            return False
+        if "branch_coverage_basis" in repo and repo["branch_coverage_basis"] != BRANCH_COVERAGE_BASIS:
+            return False
+        if "branches" in repo:
+            if not isinstance(repo["branches"], list):
+                return False
+            names = set()
+            for branch in repo["branches"]:
+                if not isinstance(branch, dict) or not isinstance(branch.get("name"), str):
+                    return False
+                if not branch["name"] or branch["name"] in names or not is_object_id(branch.get("oid")):
+                    return False
+                names.add(branch["name"])
+                if branch.get("coverage") not in BRANCH_COVERAGE_STATES:
+                    return False
+                count = branch.get("uncovered_commits")
+                if (branch["coverage"] == "unknown" and count is not None) or (
+                        branch["coverage"] != "unknown" and (type(count) is not int or count < 0)):
+                    return False
+                if (branch["coverage"] == "covered" and count != 0) or (
+                        branch["coverage"] == "uncovered" and count == 0):
+                    return False
+                for key in ("current", "upstream_gone", "merged"):
+                    if type(branch.get(key)) is not bool:
+                        return False
+                for key in ("upstream", "upstream_remote"):
+                    if not isinstance(branch.get(key), str):
+                        return False
+                for key in ("ahead", "behind"):
+                    if type(branch.get(key)) is not int or branch[key] < 0:
+                        return False
         remotes = repo.get("remotes", [])
         if not isinstance(remotes, list):
             return False
@@ -5227,6 +5416,27 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
         if x.get("branch") != y.get("branch"):
             out.append(t("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
                          b=there_at, bb=y.get("branch")))
+        if ("branches" in x and "branches" in y
+                and not x.get("branches_error") and not y.get("branches_error")):
+            bx = {branch["name"]: branch for branch in x["branches"]}
+            by = {branch["name"]: branch for branch in y["branches"]}
+            for side, mine, other in ((here_at, bx, by), (there_at, by, bx)):
+                for name in sorted(set(mine) - set(other)):
+                    out.append(t("diff_local_branch_missing", rel=rel, br=name, m=side))
+            for name in sorted(set(bx) & set(by)):
+                left, right = bx[name], by[name]
+                if left["oid"] != right["oid"]:
+                    if not (head_differs and name == x.get("branch") == y.get("branch")):
+                        out.append(t("diff_head", rel=rel, br=name,
+                                     oa=left["oid"], ob=right["oid"], a=here_at, b=there_at))
+                elif not left["current"] and not right["current"]:
+                    a_coverage = (left["coverage"], left["uncovered_commits"])
+                    b_coverage = (right["coverage"], right["uncovered_commits"])
+                    if a_coverage != b_coverage:
+                        out.append(t("diff_branch_coverage", rel=rel, br=name))
+                    elif left["coverage"] == "uncovered":
+                        out.append(t("diff_branch_pending", rel=rel, br=name,
+                                     n=left["uncovered_commits"]))
         # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
         # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
         # und Stashes sind davon unberuehrt und werden weiter verglichen.
@@ -5257,6 +5467,13 @@ def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> lis
             if r.get("fetch_error"):
                 fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
         for name, r in ((here_at, x), (there_at, y)):
+            if r.get("branches_error"):
+                out.append(t("diff_branch_inventory_failed", rel=rel, m=name,
+                             e=r["branches_error"]))
+            unknown = sum(not branch["current"] and branch["coverage"] == "unknown"
+                          for branch in r.get("branches", []))
+            if unknown:
+                out.append(t("diff_branch_coverage_unknown", rel=rel, m=name, n=unknown))
             if r.get("operation"):
                 out.append(t("diff_operation", rel=rel, m=name,
                              op=operation_label(r["operation"])))
@@ -5443,7 +5660,7 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
     Reihenfolge nach Dringlichkeit: kaputter Zugriff, Konflikt, offene Änderungen,
     Stash, Abstand zum Sync-Remote — und ✔, wenn nichts davon zutrifft.
     """
-    if st.error or any(remote.fetch_failed for remote in st.remotes):
+    if st.error or st.branches_error or any(remote.fetch_failed for remote in st.remotes):
         return "✘", C_RED
     if st.conflicts:
         return "⚠", C_RED
@@ -5460,6 +5677,8 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
     if st.ahead or st.behind:
         return (f"↑{st.ahead}" if st.ahead else f"↓{st.behind}"), (
             C_RED if st.behind else C_YELLOW)
+    if st.branch_review_count:
+        return f"B{st.branch_review_count}", C_YELLOW
     if st.remote_state in ("no-remote", "no-branch", "detached"):
         return "?", C_YELLOW
     return "✔", C_GREEN
@@ -5577,6 +5796,8 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             bits.append(f"{red}{t('conflict_n', n=st.conflicts)}{reset}")
         if st.operation:
             bits.append(f"{yellow}{t('operation_active', op=operation_label(st.operation))}{reset}")
+        if st.branches_error or st.branch_review_count:
+            bits.append(f"{yellow}{branch_inventory_summary(st)}{reset}")
         if st.modified:
             bits.append(f"{red}M:{st.modified}{reset}")
         if st.deleted:
@@ -6040,6 +6261,8 @@ class TUI:
                 part("⚠" + t("conflict_n", n=st.conflicts), C_RED)
             if st.operation:
                 part(t("operation_active", op=operation_label(st.operation)), C_YELLOW)
+            if st.branches_error or st.branch_review_count:
+                part(branch_inventory_summary(st), C_RED if st.branches_error else C_YELLOW)
             if st.modified:
                 part(f"M:{st.modified}", C_RED)
             if st.deleted:

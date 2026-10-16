@@ -716,6 +716,15 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   Rechnern gleich aus, und `--diff` verschwiege den Ziel-Drift gerade dann, wenn
   die Konfiguration ohnehin nicht belegbar ist.
 
+- Das Branch-Inventar liest vollständige OIDs und zählt mit `NO_REPLACE_ENV` gegen
+  festgehaltene, direkte Remote-Tracking-Refs. Diese Abdeckung beschreibt nur lokal
+  bekannte Refs, nie den aktuellen Serverstand. Ein fehlender Upstream ist kein
+  Beleg für offene Commits. Symbolische Remote-Refs sind keine Abdeckungsbelege;
+  ein positiver Rest bei flacher Historie bleibt unbekannt. Ref-Snapshots und HEAD-Ref
+  werden am Ende erneut geprüft. Ein Fehler bleibt als `branches_error` sichtbar;
+  ein nicht gemessenes Inventar fehlt im JSON. Alte Payloads ohne Inventar erzeugen
+  keine erfundenen fehlenden Branches. `R` holt weiterhin nur den aktuellen Branch.
+
 ## Bewusst nicht umgesetzt
 
 Keine offenen Aufgaben, sondern getroffene Entscheidungen und bekannte Grenzen.

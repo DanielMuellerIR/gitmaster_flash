@@ -83,12 +83,13 @@ The mark is the whole status, condensed into one field:
 | ↻ | Git operation in progress (merge, rebase, cherry-pick, revert, sequence or bisect) |
 | ⚑ | stash present |
 | ↑n / ↓n | ahead of / behind the sync remote |
+| Bn | n other local branches need review |
 | ⇅ | diverged (both ahead and behind) |
 | ✘ | repository scan error or last fetch failed for a remote |
 | ? | no sync remote, no remote branch, or detached HEAD |
 
 When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
-`↻`, `●`, `⚑`, the sync distance, and finally `?`. A pending Git operation needs
+`↻`, `●`, `⚑`, the sync distance, other branches, and finally `?`. A pending Git operation needs
 attention even when its working tree is clean. Red means an error, conflict,
 local change, missing incoming commits or divergence; yellow marks a stash,
 outgoing commits or missing sync relationship; green `✔` means clean and
@@ -220,7 +221,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.24.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.25.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -349,6 +350,16 @@ Local branches:
     commit:       9f8e7d6 · 2026-07-11 · try a simpler cache key
     upstream:     (none)
 ```
+
+Other local branches are included in the main overview, too: `B2` means two
+non-current branches need review. Their info blocks show how many commits are
+outside **locally known, direct remote-tracking refs**. A branch without an
+upstream can still be fully covered by another remote's refs. This is a statement
+about cached refs, not proof of the current server state. `R` still fetches only
+the checked-out branch; it does not refresh every other branch. Symbolic remote
+refs pointing at local branches do not count as coverage. In a shallow clone,
+a positive remainder is shown as unknown because missing history may hide a path.
+An unreadable or concurrently changed inventory is labelled as unavailable.
 
 ## Commit helper (`C`)
 
@@ -519,6 +530,17 @@ not as a shared `SYNC` state. Older JSON without commit IDs remains readable but
 cannot prove commit equality. Active Git operations are reported as local work,
 even with a clean working tree. JSON carries `head_oid` (null before the first
 commit, empty when unknown) and the stable `operation` code.
+
+The comparison also checks every local branch name and full commit ID, including
+branches checked out on neither machine. A shared non-current branch with commits
+outside known remote refs produces a `SYNC` finding. Differences in cached coverage
+are labelled local; they do not prove different server contents. JSON adds
+`branches`, `branches_error` and `branch_coverage_basis: "local-remote-tracking-refs"`.
+Each branch has its name, full `oid`, `current` flag, full upstream ref, upstream
+remote, ahead/behind counts, merge state, and `coverage` (`covered`, `uncovered`,
+`unknown`) with `uncovered_commits` (null when unknown). An unmeasured inventory
+is omitted; older payloads without it cannot prove branch equality and do not
+invent missing branches. Neither comparison nor inventory changes any ref.
 
 **Branch, index, and working tree stay untouched** — no remotes are added and
 nothing is committed or pushed. It tells you what differs; fixing is yours.

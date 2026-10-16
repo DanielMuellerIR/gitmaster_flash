@@ -88,12 +88,13 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 | ↻ | laufender Git-Vorgang (Merge, Rebase, Cherry-Pick, Revert, Sequenz oder Bisect) |
 | ⚑ | Stash vorhanden |
 | ↑n / ↓n | vor/zurück gegenüber dem Sync-Remote |
+| Bn | n weitere lokale Branches brauchen Prüfung |
 | ⇅ | divergiert (gleichzeitig vor und zurück) |
 | ✘ | Fehler beim Repo-Scan oder letzter Fetch eines Remotes fehlgeschlagen |
 | ? | kein Sync-Remote, kein Remote-Branch oder detached HEAD |
 
 Treffen mehrere Zustände zu, zeigt die Marke den dringendsten: zuerst `✘`, dann
-`⚠`, `↻`, `●`, `⚑`, den Abstand zum Sync-Remote und schließlich `?`. Ein offener
+`⚠`, `↻`, `●`, `⚑`, den Abstand zum Sync-Remote, weitere Branches und schließlich `?`. Ein offener
 Git-Vorgang braucht auch bei sauberem Arbeitsbaum Aufmerksamkeit. Rot steht für
 Fehler, Konflikt, lokale Änderung, fehlende eingehende Commits oder Divergenz;
 Gelb für Stash, ausgehende Commits oder eine fehlende Sync-Beziehung; das grüne
@@ -237,7 +238,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.24.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.25.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -372,6 +373,17 @@ Lokale Branches:
     Commit:       9f8e7d6 · 2026-07-11 · einfacheren Cache-Key probiert
     Upstream:     (keine)
 ```
+
+Weitere lokale Branches erscheinen auch in der Hauptübersicht: `B2` bedeutet,
+dass zwei nicht ausgecheckte Branches Prüfung brauchen. Ihre Info-Blöcke zeigen,
+wie viele Commits außerhalb **lokal bekannter, direkter Remote-Tracking-Refs**
+liegen. Ein Branch ohne Upstream kann über die Refs eines anderen Remotes vollständig
+abgedeckt sein. Das beschreibt gespeicherte Refs, nicht den aktuellen Serverstand.
+`R` holt weiterhin nur den ausgecheckten Branch; andere Branches werden dadurch
+nicht vollständig aktualisiert. Symbolische Remote-Refs auf lokale Branches zählen
+nicht als Abdeckung. Bei flachen Klonen bleibt ein positiver Rest unbekannt, weil
+fehlende Historie einen Verbindungsweg verdecken kann. Ein unlesbares oder während
+der Messung verändertes Inventar wird ausdrücklich als nicht verfügbar gemeldet.
 
 ## Commit-Hilfe (`C`)
 
@@ -549,6 +561,19 @@ Commit-IDs bleibt lesbar, kann Commit-Gleichheit aber nicht belegen. Laufende
 Git-Vorgänge erscheinen als lokale Arbeit, auch bei sauberem Arbeitsbaum. JSON
 enthält `head_oid` (null vor dem ersten Commit, leer bei unbekanntem Stand) und
 den stabilen Code `operation`.
+
+Der Vergleich prüft außerdem jeden lokalen Branch-Namen und die vollständige
+Commit-ID, auch bei auf keinem Rechner ausgecheckten Branches. Ein gemeinsamer
+Nebenbranch mit Commits außerhalb bekannter Remote-Refs erzeugt einen `SYNC`-Befund.
+Unterschiedliche gespeicherte Abdeckung gilt als lokal; sie belegt keine verschiedenen
+Serverinhalte. JSON ergänzt `branches`, `branches_error` und
+`branch_coverage_basis: "local-remote-tracking-refs"`. Pro Branch stehen Name, volle
+`oid`, `current`, voller Upstream-Ref, Upstream-Remote, Voraus-/Zurück-Zahlen,
+Merge-Zustand und `coverage` (`covered`, `uncovered`, `unknown`) mit
+`uncovered_commits` (null bei unbekanntem Stand). Ein nicht gemessenes Inventar
+wird ausgelassen; ältere Payloads ohne Inventar können Branch-Gleichheit nicht
+belegen und erzeugen keine erfundenen fehlenden Branches. Vergleich und Inventar
+verändern keinen Ref.
 
 **Branch, Index und Arbeitsbaum bleiben unangetastet** — keine Remotes angelegt,
 nichts committet oder gepusht. Es sagt, was anders ist; das Reparieren bleibt bei
