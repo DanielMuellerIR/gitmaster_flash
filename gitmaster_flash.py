@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.30.1"
+__version__ = "0.30.2"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -9863,6 +9863,10 @@ def build_demo_sandbox(base: Path) -> Path:
     _dgit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-b", "main",
           "--name", "library", str(root / "_remotes" / "notes-vault.git"), "deps/library")
     _demo_harden(repo / "deps/library")
+    # Die Clone-Adresse ist temporär; im Commit steht eine stabile, zu origin
+    # relative URL, damit auch dieser Demo-Baum überall dieselbe OID erhält.
+    _dgit(repo, "config", "-f", ".gitmodules", "submodule.library.url", "../notes-vault.git")
+    _dgit(repo, "add", ".gitmodules")
     _dgit(repo, "commit", "-qm", "add library submodule")
     _dgit(repo, "push", "-q", "origin", "develop")
     _demo_ahead(repo, 3)

@@ -64,6 +64,24 @@ class PackageIntegrationTests(unittest.TestCase):
             self.assertEqual(g.terminal_text(raw), module['path'])
         json.dumps(payload, ensure_ascii=False).encode('utf-8')
 
+    def test_demo_commit_ids_are_identical_under_different_roots(self):
+        inventories = []
+        for name in ('one', 'two'):
+            base = self.root / name
+            base.mkdir()
+            root = g.build_demo_sandbox(base)
+            repos = g.find_repos(root, self.cfg['skip_dirs'])
+            self.assertEqual(len(repos), 27)
+            inventories.append({str(repo.relative_to(root)): g.current_head(repo, 10) for repo in repos})
+            module = root / 'iot-firmware'
+            self.assertEqual(g.run_git(module, 'config', '-f', '.gitmodules', '--get',
+                                       'submodule.library.url').stdout.strip(), '../notes-vault.git')
+            g._dgit(module, 'submodule', 'sync', '--', 'deps/library')
+            self.assertEqual(Path(g.run_git(module, 'config', '--get',
+                                            'submodule.library.url').stdout.strip()).resolve(),
+                             (root / '_remotes/notes-vault.git').resolve())
+        self.assertEqual(inventories[0], inventories[1])
+
     def test_worktree_registry_with_display_aliases_is_not_rejected(self):
         for branch, path in (('one', 'line\nname'), ('two', 'line\\nname')):
             g._dgit(self.repo, 'worktree', 'add', '-qb', branch, str(self.root / path))

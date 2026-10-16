@@ -35,6 +35,20 @@ An unavailable or below-floor runtime is a failed check, not a skipped success.
 
 ## Validation record, 2026-10-16
 
+### 0.30.2
+
+| System | Python | Git | Result |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 828 tests and six identical images |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 144 core checks including 13 integration cases |
+| macOS 26.7.1, arm64 | 3.14.8 | 2.56.0 | 13 integration cases |
+| Linux Mint 22.2, x86_64 | 3.12.3 | 2.43.0 | 774 executed, 54 zsh checks skipped; six identical images |
+
+The HEAD OIDs of all 27 demo repositories also match between macOS and Linux.
+Each regression builds two complete sandboxes to check independence from the
+temporary root path. The committed submodule URL is relative; local clone setup
+stays offline.
+
 ### 0.30.1
 
 | System | Python | Git | Result |

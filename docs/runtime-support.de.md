@@ -37,6 +37,20 @@ Erfolg.
 
 ## Prüfstand, 2026-10-16
 
+### 0.30.2
+
+| System | Python | Git | Ergebnis |
+|---|---|---|---|
+| macOS 26.7.1, arm64 | 3.15.0 | 2.56.0 | 828 Tests und sechs identische Bilder |
+| macOS 26.7.1, arm64 | 3.9.6 | 2.56.0 | 144 Kernprüfungen einschließlich 13 Integrationsfällen |
+| macOS 26.7.1, arm64 | 3.14.8 | 2.56.0 | 13 Integrationsfälle |
+| Linux Mint 22.2, x86_64 | 3.12.3 | 2.43.0 | 774 ausgeführt, 54 zsh-Prüfungen übersprungen; sechs identische Bilder |
+
+Zusätzlich stimmen die HEAD-OIDs aller 27 Demo-Repos zwischen macOS und Linux
+überein. Zwei vollständige Sandboxes je Regression prüfen die Unabhängigkeit
+vom temporären Wurzelpfad. Die Submodul-URL im Commitbaum ist relativ; der lokale
+Clone-Aufbau bleibt netzfrei.
+
 ### 0.30.1
 
 | System | Python | Git | Ergebnis |

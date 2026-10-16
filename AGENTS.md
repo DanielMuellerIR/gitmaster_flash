@@ -784,3 +784,5 @@ liegengebliebene Arbeit aus.
 
 - Worktree-/Modul-Pfade exportieren `path_key` über `snapshot_path_key()`; die Validierung bindet ihn an den älteren Anzeigetext. Vergleiche verwenden `snapshot_path_identity()`, mehrdeutige Altpfade liefern eine Fähigkeitsgrenze. `display_git_path()` hält echte Steuerzeichen und wörtliche Backslashes in Auswahlansichten auseinander; Befehlsprotokolle bleiben bei `zsh_quote()`.
 - Commit-Vorschläge verwenden die bereits geprüfte `committable`-Eigenschaft der Wizard-Einträge. Eine Gruppenauswahl darf gesperrte Submodul-Inhalte oder fehlerhafte Einträge nie wieder auswählen; der letzte Commit-Schritt prüft diese Eigenschaft ebenfalls.
+
+- Demo-Commitbäume enthalten keine temporären absoluten URLs. Das Submodul-Beispiel klont lokal, speichert in `.gitmodules` aber die stabile relative URL und stagt sie vor dem Commit erneut. `test_demo_commit_ids_are_identical_under_different_roots` vergleicht die HEAD-OIDs aller 27 Demo-Repos zwischen zwei Sandboxes.
