@@ -183,19 +183,53 @@ Groß-/Kleinschreibung ist egal, `f` wirkt wie `F`.
 | W | Worktree-Familie samt registrierten Pfaden außerhalb der Scan-Wurzel ansehen |
 | O | Submodul-Verweise, Inhalt und Initialisierung ansehen |
 | I | Repo-, Remote- und Branch-Details; dort `T` Remote prüfen, `X` Remote entfernen (nicht rückgängig machbar) |
-| S | neuesten Stash als Diff ansehen (read-only, scrollbar) |
+| S | Stashes nach Dateien ansehen; einzeln/alle anwenden, poppen oder löschen |
 | R | jedes sichere Remote im Hintergrund fetchen; die Liste bleibt bedienbar |
 | N | ausgewähltes Repo nur lokal neu lesen |
 | U | ein Remote des ausgewählten Repos abrufen |
 | X | laufenden Hintergrund-Fetch stoppen; fertige Ergebnisse behalten |
 | Q | beenden |
 
-Die Stash-Vorschau enthält auch unversionierte und binäre Dateien; ein
-fehlgeschlagener oder unerwartet leerer Git-Report wird ausdrücklich
-gekennzeichnet. Das Anwenden oder Löschen eines Stashs bleibt danach eine
-Terminal-Aufgabe: Git kann Ziel-Branch, Index und Arbeitsbaum nicht atomar gegen
-parallele Änderungen binden und das Löschen nicht an einen bestimmten
-Reflog-Eintrag koppeln.
+Die Stash-Ansicht zeigt **alle Stashes mit ihren Dateinamen**. ↑/↓ wählt,
+→ klappt einen Stash oder eine Datei auf, ← klappt zu. Enter oder Leertaste
+schaltet einen Abschnitt um. Änderungen stehen direkt unter ihrer Datei; der
+gewählte Dateiname bleibt über dem scrollenden Inhalt sichtbar. Unversionierte,
+binäre und ausschließlich vorgemerkte Änderungen sind enthalten. Abweichende
+vorgemerkte Änderungen bekommen einen eigenen beschrifteten Abschnitt.
+
+- **A — Apply:** gewählten Stash anwenden und behalten.
+- **P — Pop:** anwenden und seinen Eintrag erst nach Erfolg löschen.
+- **D — Löschen:** gewählten Stash ohne Anwenden entfernen; kein Rückgängig in gmf.
+- **\* — einzeln/alle:** Aktionsziel auf alle angezeigten Stashes oder zurück auf
+  den gewählten umstellen. Das Ziel steht über der Liste und wird nach einer Aktion zurückgesetzt.
+
+Jede Aktion zeigt die betroffenen Stashes und Dateinamen vorab und verlangt `J ⏎`.
+Apply/Pop beginnt mit sauberem Index und Arbeitsbaum ohne laufenden Git-Vorgang.
+Es stellt mit `--index` sowohl Dateiinhalte als auch die gespeicherte Vormerkung
+wieder her. Bei allen Stashes läuft Apply/Pop **ältester zuerst** und stoppt beim
+ersten Fehler oder Konflikt. Vorherige Erfolge bleiben; es gibt kein automatisches
+Zurücksetzen. Ein fehlgeschlagenes Anwenden kann Dateien bereits geändert haben,
+aber sein Stash bleibt erhalten. Vor dem Fortsetzen Konflikte prüfen. Die Ansicht
+liest das Repo nach jedem Versuch neu ein. Hat ein früherer Stash vorgemerkte
+Änderungen wiederhergestellt, stoppt die Sammelaktion zum Schutz dieser Vormerkung
+vor dem nächsten Anwenden, selbst bei getrennten Dateien. Diese Änderungen vor
+dem Fortsetzen prüfen und committen.
+
+Die Vorschau bindet Apply an die gespeicherte Commit-ID und prüft Ziel und
+Stash-Liste vor der Ausführung erneut. Git kann Branch, Index, Arbeitsbaum und
+Stash-Nummern nicht atomar gegen andere Programme schützen; während der Aktion
+andere Git-Aktionen und Editoren für dieses Repo schließen. Löschen ist endgültig
+und hat eine eigene Warnung. Nach unklarem Ergebnis vor einem erneuten Versuch
+Dateien und Stash-Liste prüfen.
+
+Einen rein lesenden Bericht mit derselben Dateigruppierung liefert
+`gmf REPO --stashes` (oder `python3 gitmaster_flash.py REPO --stashes --json`).
+Er startet weder Scan noch Netzzugriff und wendet nichts an oder löscht etwas.
+Exit-Codes: 0 für einen Bericht (auch bei leerer Stash-Liste), 2 bei Lesefehlern
+oder ungültigen Optionen. JSON hat den Ergebnistyp `stashes`, mit Stash-OIDs,
+Selektoren und Betreff sowie `files` mit `path`, byteerhaltendem `path_key`,
+Arbeitsbaum-/Index-Statuscodes, `untracked` und beschrifteten `diff`-Zeilen.
+Die bisherigen Stash-Zähler und Exit-Codes von `--list`/Snapshot-`--json` bleiben gleich.
 
 ## Arbeitsansichten (`B`)
 
@@ -300,7 +334,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.30.3 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.31.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -394,9 +428,8 @@ und bewahrt Gits redigierte Antwort als Beleg auf. Lokale Branches erscheinen mi
 letztem Commit, Upstream, Vorsprung/Rückstand und Merge-Zustand; gmf löscht aber
 keine Branches. Git würde dabei auch ihre Reflogs löschen, und darin kann der
 letzte lokale Verweis auf Commits liegen. Das Löschen bleibt deshalb nach Prüfung
-dieser Details eine ausdrückliche Terminal-Aufgabe. Stashes werden rein lesend
-angezeigt; Anwenden und Löschen bleiben ebenfalls ausdrückliche
-Terminal-Aufgaben.
+dieser Details eine ausdrückliche Terminal-Aufgabe. `S` öffnet die separate
+Stash-Ansicht mit Dateivorschauen und bestätigtem Apply, Pop und Löschen.
 
 Die Werte stehen linksbündig in einer Spalte, und identische Fetch-/Push-Adressen
 teilen sich eine `Fetch+Push`-Zeile — getrennt erscheinen sie nur, wenn sie

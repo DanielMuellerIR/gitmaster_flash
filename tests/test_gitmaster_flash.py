@@ -664,8 +664,8 @@ class ScrollWindowTests(unittest.TestCase):
         self.assertNotIn("self.offset = sel_row - body_h + 1", source)
         self.assertNotIn("self.compact_col = sel_col - columns + 1", source)
         self.assertNotIn("self.log_top = self.log_selected - visible + 1", source)
-        # Definition + fünf Listen + Protokoll + Kompaktspalten + Einstellungen + Arbeitsansichten.
-        self.assertEqual(source.count("scroll_window("), 10)
+        # Definition + fünf Listen + Protokoll + Kompaktspalten + Einstellungen + Arbeitsansichten + Stashes.
+        self.assertEqual(source.count("scroll_window("), 11)
 
 
 class TestSeveritySort(unittest.TestCase):
@@ -4695,14 +4695,17 @@ class StashAndReadFailureTests(unittest.TestCase):
             path.write_text("new\n"); git(repo, "stash", "push", "-qm", "new")
             shown = {}
 
-            def capture(_self, title, lines):
-                shown["title"] = title
-                shown["text"] = "\n".join(lines)
+            def capture(_self, status, entries):
+                shown["entries"] = entries
+                newest = entries[0]
+                item = gmf_module.stash_files(repo, newest.oid, 10)[0]
+                shown["text"] = "\n".join(gmf_module.stash_file_diff(repo, newest.oid, item, 10))
 
-            with mock.patch.object(TUI, "show_pager", new=capture):
+            with mock.patch.object(TUI, "browse_stashes", new=capture):
                 ui.action_stash_show()
 
-            self.assertIn("new", shown["title"])
+            self.assertIn("new", shown["entries"][0].label)
+            self.assertEqual(len(shown["entries"]), 2)
             self.assertIn("+new", shown["text"])
             self.assertNotIn("+old", shown["text"])
 

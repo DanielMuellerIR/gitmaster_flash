@@ -477,11 +477,20 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `remove_changed` ab; Abbrüche landen als `⊘`-Zeile im Protokoll. Beim
   Sync-Remote warnt der Dialog zusätzlich, dass `P` danach nicht mehr geht,
   sperrt aber nicht. Branches löscht die Ansicht nicht: Dort gilt das
-  Reflog-Argument unverändert, und ein Branch ist ohnehin lokal. Auch Stashes
-  zeigt gmf nur als Diff an. Anwenden kann das Ziel nicht atomar gegen einen parallelen
-  Checkout sowie Index- oder Arbeitsbaumänderungen binden; Löschen kann keinen
-  einzelnen Reflog-Eintrag atomar festhalten. Beides bleibt dem Terminal
-  vorbehalten.
+  Reflog-Argument unverändert, und ein Branch ist ohnehin lokal.
+- Die Stash-Ansicht (`S`) gruppiert alle Stashes nach Dateien und bietet seit
+  0.31.0 bestätigtes Apply, Pop und Löschen für einen oder alle Einträge.
+  Apply verwendet die freigegebene OID mit `--index`, damit auch ein ausschließlich
+  im gespeicherten Index liegender Inhalt erhalten bleibt; Pop löscht erst nach
+  erfolgreichem Apply.
+  Jede Löschung prüft zuvor die gesamte Stash-Liste samt Nummerierung erneut.
+  Apply/Pop startet sauber, alle laufen ältester zuerst und stoppen beim ersten
+  Fehler. Eine durch einen früheren Stash geänderte Vormerkung stoppt vor dem
+  nächsten Apply: Git kann sie bei gescheitertem `--index` sonst zurücksetzen.
+  Erfolge bleiben erhalten; nie automatisch zurückrollen oder nach einem
+  Timeout weiterlöschen. Die Vorschau nennt die weiterhin nicht atomar schließbare
+  Lücke gegenüber parallelen Branch-/Index-/Arbeitsbaum-/Reflog-Änderungen.
+  `--stashes [--json]` bleibt rein lesend und nutzt dieselben Dateileser.
 - Pull (`L`) bietet einen Remote oder zuerst Fetch aller Remotes mit anschließender
   Quellenwahl. Nur Fast-Forward bei sauberem Tree; eingehende Commits und Dateinamen
   werden vor J/Y ⏎ gezeigt. Branch, HEAD, Index, Arbeitsbaum, Ziel-OID und Remote-Config

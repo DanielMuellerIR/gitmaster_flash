@@ -170,18 +170,49 @@ The footer shows common shortcuts; `H` lists all actions. Case does not matter �
 | W | inspect the worktree family, including registered paths outside the scan root |
 | O | inspect submodule references, contents and initialization state |
 | I | repository, remote and branch details; there: `T` tests a remote, `X` removes one (cannot be undone) |
-| S | view the latest stash as a diff (read-only, scrollable) |
+| S | browse stashes by file; apply, pop or delete selected/all stashes |
 | R | fetch every safe remote in the background; the list stays usable |
 | N | reread the selected repo locally, without fetching |
 | U | fetch one remote of the selected repo |
 | X | stop the background fetch; retain completed results |
 | Q | quit |
 
-The stash preview includes untracked and binary files; a failed or unexpectedly
-empty Git preview is labelled explicitly. Applying or deleting a stash remains a
-terminal task after that review: Git cannot atomically bind the target branch,
-index and working tree against concurrent changes, nor bind deletion to one
-specific reflog entry.
+The stash view lists **all stashes with their filenames**. Use ↑/↓ to select,
+→ to expand a stash or file, and ← to collapse it. Enter or Space toggles a
+section. Changes appear directly below their file; the selected filename stays
+above the scrolling content. Untracked, binary and staged-only changes are
+included. Differing staged changes have their own labelled section.
+
+- **A — Apply:** apply the selected stash and keep it.
+- **P — Pop:** apply it, then delete its entry only after success.
+- **D — Delete:** remove the selected stash without applying it; no undo in gmf.
+- **\* — selected/all:** switch the action scope to all displayed stashes or back
+  to the selected one. The scope is shown above the list and resets after an action.
+
+Each action previews the affected stashes and filenames and requires `Y ⏎`.
+Apply/pop starts with a clean index and working tree and no ongoing Git operation.
+It uses `--index` to restore both file contents and saved staging.
+For all stashes, apply/pop runs **oldest first**, stopping at the first error or
+conflict. Earlier successes remain; no automatic rollback runs. A failed apply
+can already have changed files, but its stash is kept. Check conflicts before
+continuing. If an earlier stash restored staged changes, the batch stops before the next
+apply to protect that staging, even for separate files; review and commit those
+changes before continuing. The view refreshes the repository after every attempt.
+
+The preview binds apply to the saved commit ID and rechecks the target and stash
+list before execution. Git cannot atomically protect the branch, index, working
+tree or stash numbering against other programs; close other Git operations and
+editors for this repo during the action. Deletion is permanent and has a separate
+warning. After an uncertain result, inspect files and the stash list before retrying.
+
+For a read-only report with the same file grouping, use `gmf REPO --stashes`
+(or `python3 gitmaster_flash.py REPO --stashes --json`). It starts no scan or
+network access and applies/deletes nothing. Exit codes: 0 for a report (including
+an empty stash list), 2 for a read error or invalid options. JSON uses the result
+kind `stashes`, with stash OIDs, selectors and subjects plus `files` containing
+`path`, byte-preserving `path_key`, working/staged status codes, `untracked` and
+labelled `diff` lines. The usual `--list`/snapshot `--json` stash counts and exit
+codes remain unchanged.
 
 ## Work views (`B`)
 
@@ -277,7 +308,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.30.3 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.31.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -367,8 +398,8 @@ keeps Git's redacted response as evidence. Local branches are listed with their
 last commit, upstream, ahead/behind and merge state, but gmf does not delete
 branches: Git would also delete their reflogs, which can contain the last local
 reference to commits. Deletion remains an explicit terminal task after reviewing
-those details. Stashes are previewed read-only; applying or deleting them
-remains an explicit terminal task as well.
+those details. `S` opens the separate stash view with file previews and
+confirmed apply, pop and delete actions.
 
 Values line up in one column, and identical fetch/push addresses share a single
 `fetch+push` line — they are only listed separately when they really differ

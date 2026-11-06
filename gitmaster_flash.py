@@ -23,7 +23,7 @@ Keys (common actions in the footer; H has full help; case-insensitive — f == F
   H     explain the Git safety rules
   I     show repository details, remote addresses, and clickable GitHub URLs
         (there: T tests a remote, X removes one after a warning — no undo)
-  S     view the latest stash as a diff (read-only, scrollable)
+  S     browse stashes by file; apply, pop or delete selected/all stashes
   R     reload everything and fetch each safe remote separately (shows progress)
   Q     quit
 
@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.30.3"
+__version__ = "0.31.0"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -409,7 +409,7 @@ TR = {
     "conflict_n": {"en": "conflict:{n}", "de": "Konflikt:{n}"},
     # Detailzeilen
     "conflict_label": {"en": "C=conflict ", "de": "C=Konflikt "},
-    "stash_row_hint": {"en": "(S preview)", "de": "(S Vorschau)"},
+    "stash_row_hint": {"en": "(S browse)", "de": "(S öffnen)"},
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
@@ -586,14 +586,38 @@ TR = {
                 "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
                       "dann landet man automatisch dort.)"},
     # Stash
+    "stash_title": {"en": "Stashes · {rel}", "de": "Stashes · {rel}"},
+    "stash_keys": {"en": "↑↓ select · →/← expand/collapse · A apply · P pop · D delete · * all/one · Q back", "de": "↑↓ wählen · →/← auf/zu · A Apply · P Pop · D löschen · * alle/einzeln · Q zurück"},
+    "stash_scope": {"en": "Scope: {scope}", "de": "Ziel: {scope}"},
+    "stash_all": {"en": "ALL stashes", "de": "ALLE Stashes"},
+    "stash_apply": {"en": "Apply (keep stash)", "de": "Apply (Stash behalten)"},
+    "stash_pop": {"en": "Pop (apply, then delete)", "de": "Pop (anwenden, dann löschen)"},
+    "stash_drop": {"en": "Delete stash permanently", "de": "Stash endgültig löschen"},
+    "stash_worktree": {"en": "Working tree", "de": "Arbeitsbaum"},
+    "stash_index": {"en": "Staged changes", "de": "Vorgemerkte Änderungen"},
+    "stash_untracked": {"en": "Untracked / ignored file", "de": "Unversionierte / ignorierte Datei"},
+    "stash_guard": {"en": "Stash list or target changed. Reopen the view and review again.", "de": "Stash-Liste oder Ziel geändert. Ansicht neu öffnen und erneut prüfen."},
+    "stash_clean": {"en": "Apply/pop requires a clean index and working tree, without an ongoing Git operation.", "de": "Apply/Pop braucht einen sauberen Index und Arbeitsbaum ohne laufenden Git-Vorgang."},
+    "stash_warning": {"en": "Close other Git operations/editors for this repo. Git cannot atomically protect the target or stash numbering against parallel changes.", "de": "Andere Git-Aktionen/Editoren für dieses Repo schließen. Git kann Ziel und Stash-Nummern nicht atomar gegen parallele Änderungen schützen."},
+    "stash_order": {"en": "Apply keeps stashes; pop deletes each only after success. Stop at first error/conflict; earlier successes remain. No automatic rollback.", "de": "Apply behält Stashes; Pop löscht jeden erst nach Erfolg. Stopp beim ersten Fehler/Konflikt; vorherige Erfolge bleiben. Kein automatisches Zurücksetzen."},
+    "stash_delete_warning": {"en": "Deletion removes these stash entries, including their saved files. There is no undo in gmf.", "de": "Löschen entfernt diese Stash-Einträge samt gespeicherten Dateien. In gmf gibt es kein Rückgängig."},
+    "stash_question": {"en": "{yes} · {action} × {n}? ", "de": "{yes} · {action} × {n}? "},
+    "stash_done": {"en": "{action}: {n} stash(es) completed.", "de": "{action}: {n} Stash(es) erledigt."},
+    "stash_stopped": {"en": "Stopped after {n} completed stash(es): {e}", "de": "Nach {n} erledigten Stash(es) gestoppt: {e}"},
+    "stash_apply_failed": {"en": "Apply failed; the stash was kept. Files may already be changed; inspect conflicts before continuing.", "de": "Anwenden fehlgeschlagen; der Stash bleibt erhalten. Dateien können bereits geändert sein; vor dem Fortsetzen Konflikte prüfen."},
+    "stash_index_failed": {"en": "Saved staging could not be restored; the stash was kept. Inspect file contents and staging before continuing.", "de": "Gespeicherte Vormerkung nicht wiederhergestellt; der Stash bleibt erhalten. Vor dem Fortsetzen Dateiinhalte und Vormerkung prüfen."},
+    "stash_batch_hint": {"en": "Batch: if a stash restores staged changes, review and commit them before applying the next stash.", "de": "Sammelaktion: Stellt ein Stash vorgemerkte Änderungen wieder her, diese vor dem nächsten Stash prüfen und committen."},
+    "stash_batch_staged": {"en": "An earlier stash restored staged changes. Stopped before applying the next stash to preserve that staging; remaining stashes were kept. Review and commit the restored changes before continuing.", "de": "Ein früherer Stash hat vorgemerkte Änderungen wiederhergestellt. Vor dem nächsten Stash gestoppt, damit diese Vormerkung erhalten bleibt; übrige Stashes behalten. Wiederhergestellte Änderungen vor dem Fortsetzen prüfen und committen."},
+    "stash_unknown": {"en": "Result uncertain; no further action. Inspect files and stash list before retrying.", "de": "Ergebnis unklar; keine weitere Aktion. Vor erneutem Versuch Dateien und Stash-Liste prüfen."},
+    "stash_applied_kept": {"en": "Applied, but deletion was not confirmed; stash kept where still present. Do not apply again without checking.", "de": "Angewendet, aber Löschen nicht bestätigt; Stash soweit vorhanden behalten. Vor erneutem Anwenden prüfen."},
+    "stash_cli_options": {"en": "--stashes is read-only and only accepts a repository root, --json and --lang.", "de": "--stashes ist rein lesend und erlaubt nur einen Repo-Ordner, --json und --lang."},
+    "stash_cli_help": {"en": "read all stashes grouped by file; optionally with --json (never applies/deletes)", "de": "alle Stashes nach Dateien lesen; optional mit --json (kein Anwenden/Löschen)"},
     "no_stash": {"en": "No stash in this repo.", "de": "Kein Stash in diesem Repo."},
     "stash_preview_failed": {"en": "Stash preview failed: {e}",
                               "de": "Stash-Vorschau fehlgeschlagen: {e}"},
     "stash_preview_empty": {
         "en": "(stash exists, but Git produced no displayable patch)",
         "de": "(Stash vorhanden, aber Git erzeugte keinen darstellbaren Patch)"},
-    "stash_preview_title": {"en": "Stash preview · {rel} · {s}",
-                            "de": "Stash-Vorschau · {rel} · {s}"},
     # Pager
     "pager_footer": {"en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
                      "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}"},
@@ -784,7 +808,11 @@ TR = {
               "I  Repository, remote and branch details. T tests the selected remote.\n"
               "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
               "A  Shows every changed file and its diff without modifying the repository.\n"
-              "   Discarding or unstaging remains an explicit terminal operation.",
+              "   Discarding or unstaging remains an explicit terminal operation.\n\n"
+              "S  Browse all stashes by file; arrows expand/collapse.\n"
+              "   A applies, P pops, D deletes; * switches selected/all. Confirm with Y ⏎.\n"
+              "   Apply/pop starts clean; all runs oldest first and stops at the first error.\n"
+              "   Keep other programs from changing this repo during the action.",
         "de": "W  Worktree-Familie des gewählten Repos lesen. Externe Pfade bleiben ungeprüft.\n"
               "O  Submodule-Verweise und Inhalte lesen; kein Initialisieren, Update oder Fetch.\n\n"
               "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
@@ -802,7 +830,11 @@ TR = {
               "I  Repo-, Remote- und Branch-Details. T prüft das gewählte Remote.\n"
               "   X entfernt es nach Warnung: Tracking-Refs und Reflogs sind danach endgültig weg.\n\n"
               "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
-              "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion."},
+              "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion.\n\n"
+              "S  Alle Stashes nach Dateien ansehen; Pfeile klappen auf/zu.\n"
+              "   A wendet an, P poppt, D löscht; * wechselt einzeln/alle. J ⏎ bestätigt.\n"
+              "   Apply/Pop beginnt sauber; alle laufen ältester zuerst bis zum ersten Fehler.\n"
+              "   Währenddessen das Repo nicht in anderen Programmen ändern."},
     # Repo-Info
     "repo_info_title": {"en": "Repository info · {rel}", "de": "Repo-Info · {rel}"},
     "info_path": {"en": "Path", "de": "Pfad"},
@@ -2991,6 +3023,235 @@ def latest_stash(repo: Path, timeout: int) -> tuple[str, str] | None:
     if not separator or not oid or not label:
         raise GitReadError("git stash list returned malformed output")
     return oid, label
+
+
+@dataclass(frozen=True)
+class StashEntry:
+    oid: str
+    selector: str
+    subject: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.selector} {self.subject}"
+
+
+@dataclass(frozen=True)
+class StashFile:
+    path: str
+    working: str = ""
+    staged: str = ""
+    untracked: bool = False
+
+
+class StashTarget(NamedTuple):
+    head_ref: str | None
+    head_oid: str | None
+    index: dict
+    status: str
+    paths: tuple
+
+    @property
+    def head_identity(self) -> tuple:
+        return self.head_ref, self.head_oid
+
+
+def read_stashes(repo: Path, timeout: int) -> list[StashEntry]:
+    result = _required_git(repo, "stash", "list", "-z", "--format=%H%x00%gd%x00%gs",
+                           timeout=timeout, env=RAW_OBJECT_ENV)
+    fields = result.stdout.split("\0")
+    if fields.pop() != "" or len(fields) % 3:
+        raise GitReadError("invalid stash list")
+    entries = []
+    for i in range(0, len(fields), 3):
+        oid, selector, subject = fields[i:i + 3]
+        if not is_object_id(oid) or selector != f"stash@{{{i // 3}}}":
+            raise GitReadError("invalid stash identity")
+        entries.append(StashEntry(oid, selector, subject))
+    return entries
+
+
+def stash_files(repo: Path, oid: str, timeout: int) -> list[StashFile]:
+    """Arbeitsbaum, Index und neue Dateien eines festgehaltenen Stashs erfassen."""
+    if not is_object_id(oid):
+        raise GitReadError("invalid stash object ID")
+    parents = commit_parents(repo, oid, timeout)
+    if len(parents) not in (2, 3):
+        raise GitReadError("invalid stash parents")
+    files: dict[str, dict] = {}
+    layers = [("working", (parents[0], oid)), ("staged", (parents[0], parents[1]))]
+    if len(parents) == 3:
+        layers.append(("untracked", (parents[2],)))
+    for layer, revisions in layers:
+        result = _required_git(
+            repo, "diff-tree", "--root", "-r", "--no-commit-id", "--name-status", "-z",
+            "--no-renames", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color",
+            "--ignore-submodules=none",
+            *revisions, "--", timeout=timeout, env=RAW_OBJECT_ENV)
+        fields = result.stdout.split("\0")
+        if fields.pop() != "" or len(fields) % 2:
+            raise GitReadError("invalid stash file list")
+        for code, path in zip(fields[::2], fields[1::2]):
+            if not valid_relative_git_path(path) or code not in ("A", "M", "D", "T"):
+                raise GitReadError("invalid stash file")
+            item = files.setdefault(path, {})
+            item[layer] = True if layer == "untracked" else code
+    return [StashFile(path, **attributes) for path, attributes in sorted(files.items())]
+
+
+def stash_file_diff(repo: Path, oid: str, item: StashFile, timeout: int) -> list[str]:
+    if not is_object_id(oid) or not valid_relative_git_path(item.path):
+        raise GitReadError("invalid stash file identity")
+    parents = commit_parents(repo, oid, timeout)
+    if len(parents) not in (2, 3):
+        raise GitReadError("invalid stash parents")
+    lines = []
+    previous = None
+    for layer, revisions, present in (
+            ("stash_worktree", (parents[0], oid), item.working),
+            ("stash_index", (parents[0], parents[1]), item.staged),
+            ("stash_untracked", (parents[2],) if len(parents) == 3 else (), item.untracked)):
+        if not present:
+            continue
+        result = _required_git(
+            repo, "diff-tree", "--root", "-r", "--no-commit-id", "-p",
+            "--no-renames", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color",
+            "--submodule=short", "--ignore-submodules=none",
+            *revisions, "--", item.path, timeout=timeout,
+            env={**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"})
+        if layer == "stash_index" and result.stdout == previous:
+            continue
+        previous = result.stdout
+        lines.extend([t(layer), *result.stdout.splitlines()])
+    return lines or [t("stash_preview_empty")]
+
+
+def stash_target(repo: Path, timeout: int, *, clean: bool) -> StashTarget:
+    identity = (current_symbolic_head_ref(repo, timeout), current_head(repo, timeout))
+    operation = repository_operation(repo, timeout)
+    status = _required_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                           timeout=timeout).stdout
+    if operation or (clean and status):
+        raise GitReadError(t("stash_clean"))
+    index = read_index_entries(repo, timeout)
+    if any(entry[2] for bucket in index.values() for entry in bucket):
+        raise GitReadError(t("stash_clean"))
+    paths = tuple((item.path, _path_signature(repo / item.path))
+                  for item in parse_porcelain(status)[4])
+    if identity != (current_symbolic_head_ref(repo, timeout), current_head(repo, timeout)):
+        raise GitReadError(t("stash_guard"))
+    return StashTarget(*identity, index, status, paths)
+
+
+def safe_stash_args(action: str, target: str) -> tuple[str, ...]:
+    if action == "apply" and is_object_id(target):
+        return (*NO_GIT_HOOKS_ARGS, "-c", "submodule.recurse=false", "stash", "apply", "--index", target)
+    if action == "drop" and re.fullmatch(r"stash@\{[0-9]+\}", target):
+        return (*NO_GIT_HOOKS_ARGS, "stash", "drop", target)
+    raise ValueError("invalid stash action target")
+
+
+def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashEntry],
+                     action: str, timeout: int, target: StashTarget | None) -> tuple[int, str]:
+    """OID-gebunden anwenden; vor jeder Löschung die gesamte Nummerierung prüfen.
+
+    Git bietet keine atomare Bindung an fremde Checkouts oder Reflog-Schreiber.
+    Pop ist deshalb Apply plus separat geprüfte Löschung, niemals ein blindes Pop.
+    """
+    if (action not in ("apply", "pop", "drop") or not chosen
+            or len(set(chosen)) != len(chosen) or any(e not in snapshot for e in chosen)):
+        raise ValueError("invalid stash action")
+    remaining = list(snapshot)
+    completed = 0
+    applied = False
+    initial_index = target.index if target else None
+
+    def unchanged() -> bool:
+        return read_stashes(repo, timeout) == [
+            StashEntry(e.oid, f"stash@{{{i}}}", e.subject) for i, e in enumerate(remaining)]
+
+    try:
+        if not unchanged():
+            return 0, t("stash_guard")
+        if action != "drop" and (target is None or stash_target(repo, timeout, clean=True) != target):
+            return 0, t("stash_guard")
+        for entry in chosen:
+            applied = False
+            if not unchanged():
+                return completed, t("stash_guard")
+            if action != "drop":
+                # Auch zwischen zwei Stashes keinen Branchwechsel oder neuen Git-Vorgang übernehmen.
+                if stash_target(repo, timeout, clean=False) != target:
+                    return completed, t("stash_guard")
+                # Git kann bei gescheitertem --index die vorherige Vormerkung
+                # zurücksetzen. Nie einen zweiten Stash auf diesen Index anwenden.
+                if completed and target.index != initial_index:
+                    return completed, t("stash_batch_staged")
+                result = run_git_logged(repo, *safe_stash_args("apply", entry.oid), timeout=timeout,
+                                        env=TRANSFER_OBJECT_ENV)
+                if result.returncode:
+                    reason = ("stash_index_failed" if "Index was not unstashed" in result.stderr
+                              else "stash_apply_failed")
+                    return completed, t(reason) + " " + terminal_text(last_error_line(result))
+                applied = True
+                updated_target = stash_target(repo, timeout, clean=False)
+                if updated_target.head_identity != target.head_identity:
+                    return completed, t("stash_applied_kept")
+                target = updated_target
+            if action in ("pop", "drop"):
+                if not unchanged():
+                    return completed, t("stash_applied_kept" if applied else "stash_guard")
+                if applied and stash_target(repo, timeout, clean=False) != target:
+                    return completed, t("stash_applied_kept")
+                index = remaining.index(entry)
+                result = run_git_logged(repo, *safe_stash_args("drop", f"stash@{{{index}}}"),
+                                        timeout=timeout, env=RAW_OBJECT_ENV)
+                if result.returncode:
+                    return completed, t("stash_applied_kept" if applied else "stash_guard")
+                remaining.pop(index)
+                completed += 1
+                if not unchanged():
+                    return completed, t("stash_unknown")
+            else:
+                completed += 1
+    except (subprocess.TimeoutExpired, OSError):
+        return completed, t("stash_applied_kept" if applied else "stash_unknown")
+    except GitReadError as exc:
+        return completed, t("stash_applied_kept") if applied else str(exc)
+    return completed, ""
+
+
+def print_stashes(repo: Path, *, as_json: bool) -> int:
+    """Dateigruppiertes, rein lesendes Gegenstück der Stash-Ansicht."""
+    try:
+        repo = repo.expanduser().resolve()
+        entries = read_stashes(repo, 10)
+        stashes = []
+        for entry in entries:
+            files = []
+            for item in stash_files(repo, entry.oid, 10):
+                files.append({"path": display_git_path(item.path), "path_key": snapshot_path_key(item.path),
+                              "working": item.working, "staged": item.staged,
+                              "untracked": item.untracked,
+                              "diff": [json_text(line) for line in stash_file_diff(repo, entry.oid, item, 10)]})
+            stashes.append({"oid": entry.oid, "selector": entry.selector,
+                            "subject": json_text(entry.subject), "files": files})
+        payload = {"kind": "stashes", "version": __version__, "root": json_text(repo), "stashes": stashes}
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            if not stashes:
+                print(t("no_stash"))
+            for entry in stashes:
+                print(f"{entry['selector']} {entry['subject']}")
+                for item in entry["files"]:
+                    print("  " + item["path"])
+                    for line in item["diff"]:
+                        print("    " + line)
+        return 0
+    except (GitReadError, OSError, subprocess.TimeoutExpired) as exc:
+        print(t("stash_preview_failed", e=terminal_text(exc)), file=sys.stderr)
+        return 2
 
 
 # Git darf uns nie nach Zugangsdaten fragen. Seinen Prompt ("Username for
@@ -8298,28 +8559,150 @@ class TUI:
         return True
 
     def action_stash_show(self):
-        """Neuesten Stash als Diff anzeigen (read-only), scrollbar. Für den
-        Fall redundanter Alt-Stashes: erst schauen, dann entscheiden."""
         st = self.current()
-        if not st or not st.stashes:
-            self.message = t("no_stash")
+        if not st:
             return
+        timeout = self.cfg["git_timeout"]
         try:
-            snapshot = latest_stash(st.path, self.cfg["git_timeout"])
+            entries = read_stashes(st.path, timeout)
+            self.browse_stashes(st, entries)
         except (GitReadError, OSError) as exc:
-            self.message = t("stash_preview_failed", e=str(exc)[:120])
-            return
-        if snapshot is None:
-            self.message = t("no_stash")
-            return
-        oid, label = snapshot
-        ok, preview = stash_preview(st.path, self.cfg["git_timeout"], oid)
-        if not ok:
-            text = t("stash_preview_failed", e=preview)
-        else:
-            text = preview or t("stash_preview_empty")
-        title = t("stash_preview_title", rel=display_git_path(st.rel), s=label)
-        self.show_pager(title, text.splitlines())
+            self.message = t("stash_preview_failed", e=terminal_text(exc))
+
+    def browse_stashes(self, st: RepoStatus, entries: list[StashEntry]):
+        files: dict[str, list[StashFile]] = {}
+        patches: dict[tuple, list[str]] = {}
+        opened = {entries[0].selector} if entries else set()
+        expanded = set()
+        selected = offset = 0
+        all_stashes = False
+        message = ""
+        timeout = self.cfg["git_timeout"]
+        while entries:
+            self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            rows = []
+            for entry in entries:
+                is_open = entry.selector in opened
+                rows.append(("stash", entry, None, f"{'▾' if is_open else '▸'} {terminal_text(entry.label)}"))
+                if not is_open:
+                    continue
+                if entry.oid not in files:
+                    files[entry.oid] = stash_files(st.path, entry.oid, timeout)
+                if not files[entry.oid]:
+                    rows.append(("empty", entry, None, "  " + t("stash_preview_empty")))
+                for item in files[entry.oid]:
+                    key = (entry.selector, item.path)
+                    is_expanded = key in expanded
+                    code = "U" if item.untracked else item.working or item.staged
+                    rows.append(("file", entry, item,
+                                 f"  {'▾' if is_expanded else '▸'} {code} {display_git_path(item.path)}"))
+                    if is_expanded:
+                        if key not in patches:
+                            patches[key] = stash_file_diff(st.path, entry.oid, item, timeout)
+                        for line in patches[key]:
+                            for part in wrap_cells(terminal_text(line), max(1, w - 7)):
+                                rows.append(("diff", entry, item, "      " + part))
+            selected = min(selected, len(rows) - 1)
+            _, entry, item, _ = rows[selected]
+            body_h = max(1, h - 7)
+            offset = scroll_window(selected, offset, body_h)
+            safe_addstr(self.scr, 0, 0, " " + t("stash_title", rel=display_git_path(st.rel)), curses.A_BOLD)
+            scope = t("stash_all") if all_stashes else terminal_text(entry.label)
+            safe_addstr(self.scr, 1, 0, t("stash_scope", scope=scope), curses.color_pair(C_YELLOW))
+            if item:
+                safe_addstr(self.scr, 2, 0, display_git_path(item.path), curses.A_BOLD)
+            for y, i in enumerate(range(offset, min(len(rows), offset + body_h)), 3):
+                row_kind, _, _, text = rows[i]
+                pair = (C_CYAN if row_kind == "stash" else C_YELLOW if row_kind == "file"
+                        else C_GREEN if text.lstrip().startswith("+")
+                        else C_RED if text.lstrip().startswith("-") else C_DIM)
+                safe_addstr(self.scr, y, 0, text, color_attr(pair, i == selected))
+            for y, line in enumerate(wrap_cells(t("stash_keys"), max(1, w - 1))[:2], h - 2):
+                safe_addstr(self.scr, y, 0, line, curses.color_pair(C_DIM))
+            safe_addstr(self.scr, h - 3, 0, terminal_text(message), curses.color_pair(C_YELLOW))
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch in (ord("q"), ord("Q"), 27):
+                self.message = message
+                return
+            if ch in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_NPAGE, curses.KEY_PPAGE):
+                step = body_h if ch in (curses.KEY_NPAGE, curses.KEY_PPAGE) else 1
+                direction = 1 if ch in (curses.KEY_DOWN, curses.KEY_NPAGE) else -1
+                selected = max(0, min(len(rows) - 1, selected + direction * step))
+            elif ch == ord("*"):
+                all_stashes = not all_stashes
+            elif ch in (curses.KEY_RIGHT, curses.KEY_LEFT, ord(" "), 10, 13):
+                key = (entry.selector, item.path) if item else entry.selector
+                bucket = expanded if item else opened
+                toggle = ch not in (curses.KEY_LEFT, curses.KEY_RIGHT)
+                close = ch == curses.KEY_LEFT or (toggle and key in bucket)
+                if close:
+                    if key not in bucket and item:
+                        opened.discard(entry.selector)
+                        selected = next(i for i, row in enumerate(rows)
+                                        if row[0] == "stash" and row[1] == entry)
+                    else:
+                        bucket.discard(key)
+                        selected = next(i for i, row in enumerate(rows)
+                                        if row[0] == ("file" if item else "stash")
+                                        and row[1] == entry and row[2] == item)
+                else:
+                    bucket.add(key)
+            elif ch in map(ord, "aApPdD"):
+                action = {"a": "apply", "p": "pop", "d": "drop"}[chr(ch).lower()]
+                chosen = list(reversed(entries)) if all_stashes else [entry]
+                previous_index = entries.index(entry)
+                message = self.change_stashes(st, entries, chosen, action)
+                self.show_pager(t("stash_title", rel=display_git_path(st.rel)), message.splitlines())
+                entries = read_stashes(st.path, timeout)
+                all_stashes = False
+                selected = next((i for i, current in enumerate(entries)
+                                 if current.oid == entry.oid and current.subject == entry.subject),
+                                min(previous_index, max(0, len(entries) - 1)))
+                offset = 0
+                opened = {entries[selected].selector} if entries else set()
+                expanded.clear()
+                patches.clear()
+                if not entries:
+                    self.message = message
+                    return
+        self.message = t("no_stash")
+
+    def change_stashes(self, st: RepoStatus, entries: list[StashEntry],
+                       chosen: list[StashEntry], action: str) -> str:
+        timeout = self.cfg["git_timeout"]
+        label = t("stash_" + action)
+        try:
+            target = stash_target(st.path, timeout, clean=True) if action != "drop" else None
+            if read_stashes(st.path, timeout) != entries:
+                return t("stash_guard")
+            lines = [label, "", t("stash_warning"), "",
+                     t("stash_delete_warning" if action == "drop" else "stash_order"), ""]
+            if action != "drop" and len(chosen) > 1:
+                lines += [t("stash_batch_hint"), ""]
+            if target:
+                lines += [f"HEAD: {terminal_text(target.head_ref or '(detached)')} · {target.head_oid}", ""]
+            for entry in chosen:
+                lines.append(terminal_text(entry.label) + f" · {entry.oid[:12]}")
+                lines.extend("    " + display_git_path(item.path)
+                             for item in stash_files(st.path, entry.oid, timeout))
+                if action != "drop":
+                    lines.append(format_git_command(safe_stash_args("apply", entry.oid)))
+                if action != "apply":
+                    lines.append(format_git_command(safe_stash_args("drop", entry.selector)))
+                lines.append("")
+            question = t("stash_question", action=label, n=len(chosen), yes=t("yes_accent"))
+            if not self.confirm_in_pager(t("stash_title", rel=display_git_path(st.rel)), lines, question):
+                log_cancelled(st.path, ("stash", action))
+                return t("cmdlog_cancelled")
+            self.show_busy(label)
+            count, error = run_stash_action(st.path, entries, chosen, action, timeout, target)
+            return t("stash_stopped", n=count, e=error) if error else t("stash_done", action=label, n=count)
+        except (GitReadError, OSError) as exc:
+            return t("stash_preview_failed", e=terminal_text(exc))
+        finally:
+            self.refresh_one(st)
 
     def _draw_pager_page(self, title: str, lines: list[str], top: int,
                          reserved: int, footer_key: str) -> tuple[int, int, int]:
@@ -10014,6 +10397,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="non-interactive JSON output (machine-readable)")
     ap.add_argument("--file-diff", metavar="PATH",
                     help="read one relative file diff; root must be its repository root")
+    ap.add_argument("--stashes", action="store_true",
+                    help=t("stash_cli_help"))
     ap.add_argument("--diff-mode", choices=DIFF_MODES,
                     help="with --file-diff: combined (default), staged or unstaged")
     ap.add_argument("--compare", nargs=2, metavar=("HERE_JSON", "THERE_JSON"),
@@ -10050,6 +10435,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     global UI_LANG
     UI_LANG = resolve_lang(DEFAULT_CONFIG, args.lang)
+    if args.stashes:
+        if (args.file_diff is not None or args.diff_mode is not None or args.compare or args.diff
+                or args.demo or args.fetch or args.fetch_remote is not None or args.list
+                or args.filter or args.view != "all" or args.color != "auto"):
+            ap.error(t("stash_cli_options"))
+        return print_stashes(Path(args.root), as_json=args.json)
     if args.file_diff is not None:
         if (args.compare or args.diff or args.demo or args.fetch or args.fetch_remote is not None
                 or args.list or args.filter or args.view != "all" or args.cd_file or args.color != "auto"):
