@@ -199,6 +199,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse(list((self.repo / "dist").glob("*.tar.gz")))
 
+    @unittest.skipUnless(shutil.which("shasum"), "shasum for release verification unavailable")
     def test_unchanged_build_releases_an_archive_with_matching_checksum(self):
         result = self.release_with_build("true")
         self.assertEqual(result.returncode, 0, result.stderr)

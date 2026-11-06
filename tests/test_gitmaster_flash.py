@@ -1475,9 +1475,11 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
                 check.transfer_url, check.branch, check.head_oid,
                 check.target_oid), timeout=10)
         self.assertEqual(pushed.returncode, 0, pushed.stderr)
-        self.assertEqual(
-            git_output(self.repo, "rev-parse", check.remote_ref),
-            check.target_oid)
+        observed = git_output(self.repo, "rev-parse", check.remote_ref)
+        self.assertIn(observed, (check.target_oid, check.head_oid))
+        # Git kann einen zur URL passenden Tracking-Ref schon selbst nachziehen.
+        # Für die eigene CAS den noch ausstehenden Zustand ausdrücklich herstellen.
+        git(self.repo, "update-ref", "--no-deref", check.remote_ref, check.target_oid, observed)
 
         self.assertEqual(gmf_module.update_tracking_after_push(
             self.repo, check, 10), "ok")

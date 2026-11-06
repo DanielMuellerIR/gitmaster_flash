@@ -3,6 +3,7 @@ import copy
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -225,6 +226,7 @@ class StashTests(unittest.TestCase):
             self.assertEqual(self.act('pop',entries),(1,''))
         self.assertFalse(marker.exists())
 
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
     def test_byte_paths_and_wrapper_cli_work_without_changing_files(self):
         name='line\nname.txt';(self.repo/name).write_text('saved\n')
         self.git('stash','push','-u','-qm','byte path')

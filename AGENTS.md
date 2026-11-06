@@ -16,6 +16,11 @@ Standardbibliothek, curses). Name: Anspielung auf Grandmaster Flash.
   `./build.sh --check`, prüft das Archiv per Entpacken und `--version`,
   überschreibt nie. Nichts davon pusht nach GitHub.
 
+- `install-linux.sh` — Linux-Installer für Bash, Fish und Zsh; prüft Voraussetzungen
+  und Selbsttests. Benutzerdateien unter XDG-Config; bei Bash/Zsh markierter Block
+  und Backup der Startdatei, bei Fish Autoload-Funktion. Keine Paketinstallation.
+  `--check` prüft Laufzeit und Selbsttests ohne Registrierung.
+
 ## Regeln
 
 - Keine externen Abhängigkeiten einführen; alles bleibt Standardbibliothek.

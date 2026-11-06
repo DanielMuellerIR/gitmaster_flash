@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -585,6 +585,23 @@ TR = {
                       "then you land there automatically.)",
                 "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
                       "dann landet man automatisch dort.)"},
+    "linux_description": {"en": "Install the Linux shell wrapper in your user account.", "de": "Linux-Shell-Wrapper im Benutzerkonto einrichten."},
+    "linux_shell_help": {"en": "target shell; auto uses $SHELL", "de": "Ziel-Shell; auto verwendet $SHELL"},
+    "linux_check_help": {"en": "check dependencies and run self-tests without installing", "de": "Abhängigkeiten und Selbsttests prüfen, ohne zu installieren"},
+    "linux_only": {"en": "This installer requires Linux. Use install.sh on macOS.", "de": "Dieser Installer benötigt Linux. Unter macOS install.sh verwenden."},
+    "linux_shell": {"en": "Choose bash, fish or zsh with --shell.", "de": "Mit --shell bash, fish oder zsh wählen."},
+    "linux_absolute": {"en": "Installation paths must be absolute.", "de": "Installationspfade müssen absolut sein."},
+    "linux_dependencies": {"en": "Requires Python 3.9+ with curses, Git 2.36+ and {shell}.", "de": "Benötigt Python 3.9+ mit curses, Git 2.36+ und {shell}."},
+    "linux_complex_rc": {"en": "Startup file contains << syntax; automatic registration refused. Keep it unchanged and configure the wrapper manually.", "de": "Startdatei enthält <<-Syntax; automatische Registrierung abgelehnt. Unverändert lassen und den Wrapper von Hand einrichten."},
+    "linux_syntax": {"en": "Invalid or incomplete {shell} startup file/wrapper; nothing registered.", "de": "Ungültige oder unvollständige {shell}-Startdatei/Wrapper; nichts registriert."},
+    "linux_file_conflict": {"en": "Existing, linked or changed file protected: {p}", "de": "Vorhandene, verlinkte oder geänderte Datei geschützt: {p}"},
+    "linux_registration_conflict": {"en": "Existing gmf definition or damaged registration; resolve it manually first.", "de": "Vorhandene gmf-Definition oder beschädigte Registrierung; zuerst von Hand klären."},
+    "linux_testing": {"en": "Running self-tests before installation ...", "de": "Selbsttests vor der Installation laufen ..."},
+    "linux_tests_failed": {"en": "Self-tests failed; not installing.", "de": "Selbsttests fehlgeschlagen; keine Installation."},
+    "linux_check_ok": {"en": "CHECK OK: Linux / {shell}; no files installed.", "de": "CHECK OK: Linux / {shell}; keine Dateien installiert."},
+    "linux_installed": {"en": "Installed gmf for {shell}: {p}", "de": "gmf für {shell} eingerichtet: {p}"},
+    "linux_activate": {"en": "Open a new terminal, or run: {command}", "de": "Neues Terminal öffnen oder ausführen: {command}"},
+    "linux_failed": {"en": "Installation failed: {e}", "de": "Installation fehlgeschlagen: {e}"},
     # Stash
     "stash_title": {"en": "Stashes · {rel}", "de": "Stashes · {rel}"},
     "stash_keys": {"en": "↑↓ select · →/← expand/collapse · A apply · P pop · D delete · * all/one · Q back", "de": "↑↓ wählen · →/← auf/zu · A Apply · P Pop · D löschen · * alle/einzeln · Q zurück"},

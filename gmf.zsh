@@ -16,7 +16,7 @@ GMF_SCRIPT="${0:A:h}/gitmaster_flash.py"
 
 gmf() {
   local cdfile target
-  cdfile="$(mktemp -t gmf_cd)" || return 1
+  cdfile="$(mktemp "${TMPDIR:-/tmp}/gmf_cd.XXXXXXXX")" || return 1
   python3 "$GMF_SCRIPT" --cd-file "$cdfile" "$@"
   local rc=$?
   target=""

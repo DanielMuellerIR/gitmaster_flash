@@ -38,7 +38,7 @@ opens the UI on it. The folder lives in your temp directory; delete it when done
 ```sh
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 cd gitmaster_flash
-./install.sh          # self-test, then registers the `gmf` shell wrapper
+./install.sh          # macOS; on Linux use ./install-linux.sh
 ```
 
 Open a new shell or terminal tab so it reads the new wrapper line, then:
@@ -308,7 +308,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.31.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.32.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -530,6 +530,48 @@ git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 python3 gitmaster_flash/gitmaster_flash.py
 ```
 
+### Linux: CachyOS, Linux Mint and other distributions
+
+From the checkout, run **without sudo**:
+
+```sh
+./install-linux.sh
+```
+
+The same installer supports **Bash, Fish and Zsh**. It chooses `$SHELL`; override
+that with `--shell bash`, `--shell fish` or `--shell zsh` if your terminal uses a
+different shell. It checks Python/curses, Git and the selected shell, then runs
+the self-tests before writing anything. Missing prerequisites are reported with
+package commands; the installer itself never installs packages or changes system files.
+
+If needed, install prerequisites first:
+
+```sh
+# CachyOS / Arch
+sudo pacman -S --needed python git
+# Linux Mint / Ubuntu
+sudo apt install python3 git
+```
+
+Fish gets an autoloaded `gmf.fish` under `${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions`;
+`config.fish` stays unchanged. Bash/Zsh gets a generated wrapper under
+`${XDG_CONFIG_HOME:-$HOME/.config}/gitmaster_flash/shell` and a marked source block
+in `.bashrc` / `${ZDOTDIR:-$HOME}/.zshrc`. Changed startup files receive a dated
+`.gmf-backup-*` copy. Repeated installation adds no duplicate block and leaves
+identical files untouched. Existing foreign wrappers, conflicting definitions,
+linked startup files and incomplete shell syntax stop registration. Startup files
+with non-comment `<<` syntax require manual configuration rather than guessing
+where a here-document ends.
+
+Open a new terminal, or use the exact `source` command printed by the installer.
+Then `gmf ~/projects` includes the usual Enter-to-cd behavior and preserves CLI
+exit codes. The wrapper points to this checkout: keep it in place, update it
+normally, and rerun the installer after moving it. `./install-linux.sh --check`
+checks dependencies and self-tests without installing files. macOS app shortcuts
+remain unavailable on Linux; Git operations and the terminal UI work normally.
+
+### macOS / existing Zsh installation
+
 For the `⏎ = cd into the repository` feature, source the shell wrapper — a child
 process cannot change the working directory of the shell that started it, so a
 small function has to do it. `install.sh` does that for you: it runs the
@@ -543,9 +585,10 @@ with it:
 gitmaster_flash/install.sh
 ```
 
-The repository provides three entry points:
+The repository provides four entry points:
 `build.sh` runs the self-test and regenerates the README pictures in `docs/`
-(`--check` only verifies them), `install.sh` registers the wrapper, and
+(`--check` only verifies them), `install.sh` registers the Zsh wrapper,
+`install-linux.sh` registers Linux shell wrappers, and
 `release.sh` writes a versioned source archive to `dist/` — see
 [Tests](#tests) and [Release](#release).
 
@@ -961,8 +1004,9 @@ no difference, 1 for a difference, 2 for failure.
 ## Runtime checks and scan measurements
 
 The supported runtime floor is Python 3.9 and Git 2.36 on macOS or Linux, with
-curses and a UTF-8 terminal for the TUI. App opening uses macOS `open`; the
-installer, wrapper and release/build scripts require zsh. Windows is not covered.
+curses and a UTF-8 terminal for the TUI. App opening uses macOS `open`. The Linux
+installer supports Bash, Fish and Zsh; the original macOS installer and
+release/build scripts require Zsh. Windows is not covered.
 See [runtime support and repeatable checks](docs/runtime-support.md).
 
 `python3 tools/check-compatibility.py` runs the full suite with the current

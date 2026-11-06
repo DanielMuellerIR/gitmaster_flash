@@ -13,9 +13,11 @@ eine erratene Rückfallebene mit zeilengetrennten Pfaden gibt es nicht.
 Die TUI benötigt curses aus der Standardbibliothek, ein POSIX-Terminal und eine
 UTF-8-Locale. Zusätzliche Python-Module sind nicht nötig. App-Tasten nutzen auf
 macOS `open -a`; Linux erklärt diese Plattformgrenze und kann über den Wrapper
-weiter ins Repo wechseln. Zsh-Wrapper, Installer und Build-/Release-Skripte
-benötigen zsh. Ohne zsh laufen auf Linux die Python-TUI und CLI; zsh-spezifische
-Tests werden übersprungen. Windows und andere als die erfassten OS-Versionen
+weiter ins Repo wechseln. Der Linux-Installer (`install-linux.sh`) unterstützt Bash,
+Fish und Zsh einschließlich Enter-Verzeichniswechsel. Der bisherige macOS-Installer
+und Build-/Release-Skripte benötigen Zsh. Ohne Zsh werden auf Linux die
+Zsh-spezifischen Tests übersprungen. Die optionale Archiv-Prüfsummenprüfung
+benötigt zusätzlich `shasum` und wird ohne dieses Werkzeug übersprungen. Windows und andere als die erfassten OS-Versionen
 sind nicht validiert.
 
 ## Prüfung wiederholen
@@ -35,7 +37,24 @@ aktualisiert. Temporäre PATH-Wrapper wählen das verlangte Git ohne globale
 Einstellungen. Fehlende oder zu alte Laufzeiten sind ein Fehler, kein übersprungener
 Erfolg.
 
-## Prüfstand, 2026-10-16
+## Prüfstand, aktualisiert 2026-11-06
+
+### 0.32.0 — Linux-Installation
+
+| System | Python | Git | Ergebnis |
+|---|---|---|---|
+| macOS, arm64 | 3.15.0 | 2.56.0 | 868 ausgeführt, eine Fish-Prüfung übersprungen; sechs identische Bilder |
+| CachyOS, x86_64 | 3.14.9 | 2.56.0 | 868 ausgeführt, eine optionale shasum-Prüfung übersprungen |
+| Linux Mint 22.2, x86_64 | 3.12.3 | 2.43.0 | 813 ausgeführt, 56 Zsh-/Fish-Prüfungen übersprungen |
+
+Der vollständige Installer lief auf beiden Linux-Systemen in temporären
+Benutzerverzeichnissen: automatische Wahl von Fish beziehungsweise Bash,
+anschließend echter `gmf --version`- und JSON-Aufruf. Wiederholte Registrierung
+ließ vorhandene Dateien unverändert. Shell-Prüfungen erhalten auch Dateipfade
+mit abschließenden Zeilenumbrüchen und den ursprünglichen Exit-Code; Startdateien
+mit Konflikten bleiben geschützt. Echte Benutzerkonfigurationen wurden dabei
+nicht installiert oder geändert.
+
 
 ### 0.30.3
 

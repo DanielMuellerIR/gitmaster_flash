@@ -40,7 +40,7 @@ einfach gelöscht werden.
 ```sh
 git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 cd gitmaster_flash
-./install.sh          # Selbsttest, dann `gmf`-Shell-Wrapper registrieren
+./install.sh          # macOS; unter Linux ./install-linux.sh verwenden
 ```
 
 Eine neue Shell oder einen neuen Terminal-Tab öffnen, damit die Wrapper-Zeile
@@ -334,7 +334,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.31.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.32.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -567,6 +567,51 @@ git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
 python3 gitmaster_flash/gitmaster_flash.py
 ```
 
+### Linux: CachyOS, Linux Mint und andere Distributionen
+
+Im ausgecheckten Repo **ohne sudo** ausführen:
+
+```sh
+./install-linux.sh
+```
+
+Derselbe Installer unterstützt **Bash, Fish und Zsh**. Er wählt `$SHELL`; mit
+`--shell bash`, `--shell fish` oder `--shell zsh` lässt sich die Shell ausdrücklich
+angeben, falls das Terminal eine andere verwendet. Er prüft Python/curses, Git
+und die gewählte Shell und führt vor dem Schreiben die Selbsttests aus. Fehlende
+Voraussetzungen nennt er mit Paketbefehlen; der Installer selbst installiert
+keine Pakete und ändert keine Systemdateien.
+
+Fehlende Voraussetzungen vorher installieren:
+
+```sh
+# CachyOS / Arch
+sudo pacman -S --needed python git
+# Linux Mint / Ubuntu
+sudo apt install python3 git
+```
+
+Fish erhält eine automatisch geladene `gmf.fish` unter
+`${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions`; `config.fish` bleibt unverändert.
+Bash/Zsh erhält einen generierten Wrapper unter
+`${XDG_CONFIG_HOME:-$HOME/.config}/gitmaster_flash/shell` und einen markierten
+Source-Block in `.bashrc` / `${ZDOTDIR:-$HOME}/.zshrc`. Vor Änderungen an Startdateien
+entsteht eine datierte `.gmf-backup-*`-Kopie. Wiederholte Installation fügt keinen
+zweiten Block ein und lässt identische Dateien unverändert. Fremde Wrapper,
+widersprüchliche Definitionen, verlinkte Startdateien und unvollständige Shell-Syntax
+stoppen die Registrierung. Bei `<<`-Syntax außerhalb von Kommentarzeilen ist eine
+manuelle Einrichtung nötig, statt das Ende eines Here-Documents zu erraten.
+
+Neues Terminal öffnen oder den vom Installer ausgegebenen `source`-Befehl nutzen.
+Danach bietet `gmf ~/projekte` auch den gewohnten Verzeichniswechsel mit Enter und
+erhält die CLI-Exit-Codes. Der Wrapper verweist auf dieses Checkout: am Ort lassen,
+normal aktualisieren und nach einem Verschieben den Installer erneut ausführen.
+`./install-linux.sh --check` prüft Abhängigkeiten und Selbsttests, ohne Dateien zu
+installieren. Die macOS-App-Tasten bleiben unter Linux nicht verfügbar;
+Git-Aktionen und Terminaloberfläche funktionieren wie gewohnt.
+
+### macOS / bestehende Zsh-Installation
+
 Damit ⏎ tatsächlich in den Repo-Ordner wechselt, den Shell-Wrapper einbinden.
 Der Grund: Ein Kindprozess kann das Arbeitsverzeichnis der aufrufenden Shell
 nicht ändern — das muss eine kleine Shell-Funktion übernehmen. `install.sh`
@@ -580,9 +625,10 @@ ab, damit der `source`-Befehl nicht mit ihr verschmilzt:
 gitmaster_flash/install.sh
 ```
 
-Das Repo bietet drei Einstiegsskripte:
+Das Repo bietet vier Einstiegsskripte:
 `build.sh` führt den Selbsttest aus und erzeugt die README-Bilder in `docs/`
-neu (`--check` prüft sie nur), `install.sh` registriert den Wrapper, und
+neu (`--check` prüft sie nur), `install.sh` registriert den Zsh-Wrapper,
+`install-linux.sh` richtet die Linux-Shell-Wrapper ein, und
 `release.sh` legt ein versioniertes Quellarchiv unter `dist/` ab — siehe
 [Tests](#tests) und [Release](#release).
 
@@ -1020,8 +1066,9 @@ Unterschied, 1 mit Unterschied, 2 bei Fehler.
 ## Laufzeitprüfungen und Scan-Messung
 
 Die unterstützte Untergrenze ist Python 3.9 und Git 2.36 auf macOS oder Linux,
-für die TUI mit curses und UTF-8-Terminal. App-Öffnen nutzt macOS `open`; Installer,
-Wrapper und Release-/Build-Skripte benötigen zsh. Windows ist nicht abgedeckt.
+für die TUI mit curses und UTF-8-Terminal. App-Öffnen nutzt macOS `open`.
+Der Linux-Installer unterstützt Bash, Fish und Zsh; der bisherige macOS-Installer
+und Release-/Build-Skripte benötigen Zsh. Windows ist nicht abgedeckt.
 Siehe [Laufzeitgrenzen und wiederholbare Prüfungen](docs/runtime-support.de.md).
 
 `python3 tools/check-compatibility.py` prüft die Gesamtsuite mit aktuellem
