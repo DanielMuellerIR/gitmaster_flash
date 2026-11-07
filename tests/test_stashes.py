@@ -170,6 +170,16 @@ class StashTests(unittest.TestCase):
         run.assert_not_called();self.assertEqual(g.read_stashes(self.repo,10),entries)
         self.assertTrue(g.COMMAND_LOG[-1].startswith('⊘'))
 
+    def test_cancel_returns_to_stash_list_without_pager(self):
+        entries=self.stash('approved');ui,st=self.ui()
+        ui.scr=Mock();ui.scr.getmaxyx.return_value=(24,80)
+        ui.scr.getch.side_effect=[ord('d'),ord('q')]
+        ui.change_stashes=Mock(return_value=g.t('cmdlog_cancelled'));ui.show_pager=Mock()
+        with patch.object(g.curses,'color_pair',return_value=0),patch.object(g,'safe_addstr'):
+            ui.browse_stashes(st,entries)
+        ui.show_pager.assert_not_called()
+        self.assertEqual(g.read_stashes(self.repo,10),entries)
+
     def test_dirty_ui_target_is_rejected_before_confirmation(self):
         entries=self.stash('approved');(self.repo/'README.md').write_text('local\n');ui,st=self.ui()
         result=ui.change_stashes(st,entries,entries,'apply')
@@ -179,7 +189,7 @@ class StashTests(unittest.TestCase):
     def test_read_only_cli_groups_files_and_rejects_mutation_options(self):
         entries=self.stash('approved');out=io.StringIO()
         with redirect_stdout(out):self.assertEqual(g.main([str(self.repo),'--stashes','--json']),0)
-        payload=json.loads(out.getvalue());self.assertEqual(payload['kind'],'stashes')
+        payload=json.loads(out.getvalue());self.assertEqual(payload['kind'],'stashes');self.assertEqual(payload['schema_version'],g.JSON_SCHEMA_VERSION)
         self.assertEqual(payload['stashes'][0]['files'][0]['path'],'README.md')
         self.assertIn('+approved','\n'.join(payload['stashes'][0]['files'][0]['diff']))
         self.assertEqual(g.read_stashes(self.repo,10),entries);self.assertEqual(g.COMMAND_LOG,[])

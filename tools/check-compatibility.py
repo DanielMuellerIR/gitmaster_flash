@@ -65,13 +65,13 @@ def main(argv=None) -> int:
                 results.append(record)
                 try:
                     versions = json.loads(probe.stdout)
-                    git_version = re.search(r'\b(\d+)\.(\d+)\.(\d+)',git_probe.stdout)
+                    git_version = re.search(r'\b(\d+)\.(\d+)(?:\.(\d+))?',git_probe.stdout)
                     if probe.returncode or git_probe.returncode or git_version is None:
                         raise ValueError('runtime probe failed')
                     record.update(versions,git_version=git_probe.stdout.strip())
                     if tuple(map(int,versions['python'].split('.')[:2])) < (3,9):
                         raise ValueError('Python 3.9 or later required')
-                    if tuple(map(int,git_version.groups())) < (2,36,0):
+                    if tuple(int(part or 0) for part in git_version.groups()) < (2,36,0):
                         raise ValueError('Git 2.36 or later required for worktree list --porcelain -z')
                     if versions['system'] not in ('darwin','linux'):
                         raise ValueError('only macOS and Linux are covered by this check')

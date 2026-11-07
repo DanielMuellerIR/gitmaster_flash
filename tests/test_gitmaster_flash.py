@@ -41,13 +41,33 @@ from gitmaster_flash import (  # noqa: E402
     canonical_remote_target, cell_width, commit_selected, diff_status, _remote_root,
     detect_sync_remote, display_remote_url, fetch_remote_status, file_diff,
     inspect_transfer, is_github_url, pad_cells, parse_porcelain, read_branches,
-    remote_check_message, repo_info_lines, stash_preview, status_dict,
+    remote_check_message, repo_info_lines, status_dict,
     safe_push_args, terminal_text, truncate_cells, upstream_delta,
 )
 
 # Die Defaults erkennen nur "origin" als Sync-Remote. Tests, die einen anders
 # benannten Sync-Remote brauchen, nehmen diese Kopie.
 SYNC_CONFIG = {**DEFAULT_CONFIG, "sync_remote_names": ["backup"]}
+
+
+def latest_stash(repo, timeout):
+    entries = gmf_module.read_stashes(repo, timeout)
+    return (entries[0].oid, entries[0].label) if entries else None
+
+
+def stash_preview(repo, timeout, oid=None):
+    """Bestehende Sicherheitsproben über die aktuellen Dateileser ausführen."""
+    if oid is None:
+        entry = latest_stash(repo, timeout)
+        if entry is None:
+            return False, "no stash"
+        oid = entry[0]
+    try:
+        files = gmf_module.stash_files(repo, oid, timeout)
+        return True, "\n".join(line for item in files
+            for line in gmf_module.stash_file_diff(repo, oid, item, timeout))
+    except (gmf_module.GitReadError, OSError) as error:
+        return False, str(error)
 
 
 class TestParsePorcelain(unittest.TestCase):
@@ -1229,7 +1249,7 @@ class TestAgainstRealRepo(unittest.TestCase):
         git(self.repo, "stash", "store", "-m", "gitlink update", stash_commit)
         git(self.repo, "config", "diff.ignoreSubmodules", "all")
         git(self.repo, "config", "submodule.vendor/sub.ignore", "all")
-        oid, _ = gmf_module.latest_stash(self.repo, 10)
+        oid, _ = latest_stash(self.repo, 10)
 
         ok, preview = stash_preview(self.repo, 10, oid)
 
@@ -4652,7 +4672,7 @@ class StashAndReadFailureTests(unittest.TestCase):
             ok, preview = stash_preview(repo, 10)
             self.assertTrue(ok)
             self.assertIn("untracked.bin", preview)
-            self.assertIn("GIT binary patch", preview)
+            self.assertIn("Binary files /dev/null and b/untracked.bin differ", preview)
 
     def test_stash_preview_never_runs_an_external_diff_driver(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -4725,10 +4745,10 @@ class StashAndReadFailureTests(unittest.TestCase):
             git(repo, "commit", "-qm", "base")
             path.write_text("original\n")
             git(repo, "stash", "push", "-qm", "original")
-            original = gmf_module.latest_stash(repo, 10)[0]
+            original = latest_stash(repo, 10)[0]
             path.write_text("replacement\n")
             git(repo, "stash", "push", "-qm", "replacement")
-            replacement = gmf_module.latest_stash(repo, 10)[0]
+            replacement = latest_stash(repo, 10)[0]
             git(repo, "stash", "drop", "-q", "stash@{0}")
             git(repo, "replace", original, replacement)
 
@@ -4751,7 +4771,7 @@ class StashAndReadFailureTests(unittest.TestCase):
             git(repo, "commit", "-qm", "base")
             path.write_text("original\n")
             git(repo, "stash", "push", "-qm", "original")
-            original = gmf_module.latest_stash(repo, 10)[0]
+            original = latest_stash(repo, 10)[0]
             path.write_text("other\n")
             git(repo, "add", "a")
             git(repo, "commit", "-qm", "other base")
@@ -5060,7 +5080,7 @@ class NonInteractiveGitTests(unittest.TestCase):
             # GIT_OPTIONAL_LOCKS=0 für `git status`, `git stash show` und
             # `git ls-files`.
             status = collect_status(repo, root, DEFAULT_CONFIG)
-            oid, _ = gmf_module.latest_stash(repo, 10)
+            oid, _ = latest_stash(repo, 10)
             ok_stash, _ = stash_preview(repo, 10, oid)
             repo_info_lines(status, DEFAULT_CONFIG)
 

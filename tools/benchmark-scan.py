@@ -47,9 +47,9 @@ def main(argv=None) -> int:
                         original = g.run_git
                         counter = [0]
 
-                        def measured(*args, **kwargs):
+                        def measured(*call_args, **kwargs):
                             counter[0] += 1
-                            return original(*args, **kwargs)
+                            return original(*call_args, **kwargs)
 
                         g.run_git = measured
                         try:

@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.32.0"
+__version__ = "0.32.1"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -3008,40 +3008,6 @@ def commit_parents(repo: Path, oid: str, timeout: int) -> list[str]:
     return fields[1:]
 
 
-def stash_preview(repo: Path, timeout: int, oid: str | None = None) -> tuple[bool, str]:
-    """Return one OID-bound stash patch, including untracked and binary contents."""
-    if oid is None:
-        try:
-            current = latest_stash(repo, timeout)
-        except (GitReadError, OSError) as exc:
-            return False, str(exc)[:240]
-        if current is None:
-            return False, "no stash"
-        oid = current[0]
-    r = run_git(
-        repo, "stash", "show", "-p", "--binary", "--include-untracked",
-        "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
-        oid, timeout=timeout,
-        env=RAW_OBJECT_ENV)
-    if r.returncode != 0:
-        detail = (r.stderr or "Git exit %d" % r.returncode).strip()[:240]
-        return False, detail
-    return True, r.stdout
-
-
-def latest_stash(repo: Path, timeout: int) -> tuple[str, str] | None:
-    """OID und sichtbare Bezeichnung des aktuellen ``stash@{0}`` lesen."""
-    result = _required_git(
-        repo, "stash", "list", "-1", "--format=%H%x00%gd %gs", timeout=timeout)
-    line = result.stdout.rstrip("\n")
-    if not line:
-        return None
-    oid, separator, label = line.partition("\0")
-    if not separator or not oid or not label:
-        raise GitReadError("git stash list returned malformed output")
-    return oid, label
-
-
 @dataclass(frozen=True)
 class StashEntry:
     oid: str
@@ -3253,7 +3219,7 @@ def print_stashes(repo: Path, *, as_json: bool) -> int:
                               "diff": [json_text(line) for line in stash_file_diff(repo, entry.oid, item, 10)]})
             stashes.append({"oid": entry.oid, "selector": entry.selector,
                             "subject": json_text(entry.subject), "files": files})
-        payload = {"kind": "stashes", "version": __version__, "root": json_text(repo), "stashes": stashes}
+        payload = {"kind": "stashes", "schema_version": JSON_SCHEMA_VERSION, "version": __version__, "root": json_text(repo), "stashes": stashes}
         if as_json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
@@ -5679,6 +5645,7 @@ def submodule_lines(st: RepoStatus) -> list[str]:
             checkout = t("submodule_uninitialized")
         index = module.index_oid or t("submodule_not_recorded")
         if module.index_mode and module.index_mode != "160000":
+            # codereview-ok: index_mode wird nur aus einem vorhandenen Stage-0-Eintrag gesetzt (2026-11-07).
             value = next(oid for mode, oid, stage in module.index_entries if stage == 0)
             index = f"{t('submodule_replaced')} ({module.index_mode} {value})"
         elif module.conflicted:
@@ -8671,7 +8638,8 @@ class TUI:
                 chosen = list(reversed(entries)) if all_stashes else [entry]
                 previous_index = entries.index(entry)
                 message = self.change_stashes(st, entries, chosen, action)
-                self.show_pager(t("stash_title", rel=display_git_path(st.rel)), message.splitlines())
+                if message != t("cmdlog_cancelled"):
+                    self.show_pager(t("stash_title", rel=display_git_path(st.rel)), message.splitlines())
                 entries = read_stashes(st.path, timeout)
                 all_stashes = False
                 selected = next((i for i, current in enumerate(entries)
