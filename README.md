@@ -308,7 +308,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.32.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.33.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -567,8 +567,9 @@ Open a new terminal, or use the exact `source` command printed by the installer.
 Then `gmf ~/projects` includes the usual Enter-to-cd behavior and preserves CLI
 exit codes. The wrapper points to this checkout: keep it in place, update it
 normally, and rerun the installer after moving it. `./install-linux.sh --check`
-checks dependencies and self-tests without installing files. macOS app shortcuts
-remain unavailable on Linux; Git operations and the terminal UI work normally.
+checks dependencies and self-tests without installing files. App shortcuts also
+work in a local Linux desktop terminal: configure the absolute path to an
+executable launcher. The selected repository is passed as one folder argument.
 
 ### macOS / existing Zsh installation
 
@@ -769,12 +770,11 @@ Values loaded from this file use the same ranges and choices as the settings
 interface. Invalid entries fall back individually with a warning; the file is
 preserved for correction. Folder and remote lists must contain strings only.
 
-- `apps` — key → application used to open a repository (macOS `open -a`). The key
+- `apps` — key → application used to open a repository (macOS `open -a`, Linux executable launcher). The key
   shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
   taken by the table above. Inside an SSH session gmf refuses this action with a
-  clear explanation: an app can only open on the Mac where you are working
-  directly.
+  clear explanation: an app can only open in your local desktop session.
 - `sync_remote_names` / `sync_remote_hosts` — how the private sync remote is
   recognized: by remote name, or by an exact normalized host in the remote URL
   (substring matches are never accepted). Defaults to `origin`
@@ -1004,7 +1004,7 @@ no difference, 1 for a difference, 2 for failure.
 ## Runtime checks and scan measurements
 
 The supported runtime floor is Python 3.9 and Git 2.36 on macOS or Linux, with
-curses and a UTF-8 terminal for the TUI. App opening uses macOS `open`. The Linux
+curses and a UTF-8 terminal for the TUI. App opening uses macOS `open` or an executable Linux launcher. The Linux
 installer supports Bash, Fish and Zsh; the original macOS installer and
 release/build scripts require Zsh. Windows is not covered.
 See [runtime support and repeatable checks](docs/runtime-support.md).

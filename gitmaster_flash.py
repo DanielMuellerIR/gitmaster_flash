@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.32.1"
+__version__ = "0.33.0"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -576,11 +576,13 @@ TR = {
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
     "app_open_failed": {"en": "Failed to open {name}: {e}",
                         "de": "{name} öffnen fehlgeschlagen: {e}"},
-    "app_mac_only": {"en": "Configured app shortcuts require macOS. Use Enter to change to the repository.",
-                     "de": "Konfigurierte App-Tasten benötigen macOS. Mit Enter ins Repo wechseln."},
+    "app_mac_only": {"en": "Configured app shortcuts require macOS or a Linux desktop session.",
+                     "de": "Konfigurierte App-Tasten benötigen macOS oder eine Linux-Desktopsitzung."},
+    "app_no_desktop": {"en": "No Linux desktop session found. Open gmf in a desktop terminal.",
+                       "de": "Keine Linux-Desktopsitzung gefunden. gmf in einem Desktop-Terminal öffnen."},
     "app_over_ssh": {
-        "en": "This is an SSH session — {name} can only open on the Mac you sit at.",
-        "de": "Das ist eine SSH-Sitzung — {name} öffnet nur auf dem Mac vor dir."},
+        "en": "This is an SSH session — {name} can only open in your local desktop session.",
+        "de": "Das ist eine SSH-Sitzung — {name} öffnet nur in deiner lokalen Desktopsitzung."},
     "cd_hint": {"en": "(Tip: install the `gmf` shell wrapper from gmf.zsh, "
                       "then you land there automatically.)",
                 "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
@@ -8514,9 +8516,32 @@ class TUI:
             self.message = t("app_not_found", p=path or "?")
             return
         if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
-            # Über SSH gibt es keine Fenstersitzung: `open` würde nichts Sichtbares
-            # tun. Das ehrlich sagen, statt einen kryptischen macOS-Fehler zu zeigen.
+            # Die App soll in der lokalen Desktopsitzung öffnen, nicht auf
+            # einem zufällig noch angemeldeten Desktop des SSH-Zielrechners.
             self.message = t("app_over_ssh", name=name)
+            return
+        if sys.platform == "linux":
+            if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                self.message = t("app_no_desktop")
+                return
+            if not Path(path).is_file() or not os.access(path, os.X_OK):
+                self.message = t("app_not_found", p=path)
+                return
+            try:
+                # Ein eigener Prozess ohne Shell hält den Editor vom TUI-Lebenszyklus
+                # getrennt. Der Ordner bleibt auch mit Leerzeichen ein Argument.
+                child = subprocess.Popen([path, str(st.path)], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+                try:
+                    code = child.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    threading.Thread(target=child.wait, daemon=True).start()
+                    code = 0
+                self.message = (t("app_opened", name=name, rel=display_git_path(st.rel)) if code == 0
+                                else t("app_open_failed", name=name, e=f"Exit {code}"))
+            except OSError as exc:
+                self.message = t("app_open_failed", name=name, e=terminal_text(str(exc))[:120])
             return
         if sys.platform != "darwin":
             self.message = t("app_mac_only")

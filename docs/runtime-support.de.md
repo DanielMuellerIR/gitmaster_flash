@@ -12,8 +12,9 @@ eine erratene Rückfallebene mit zeilengetrennten Pfaden gibt es nicht.
 
 Die TUI benötigt curses aus der Standardbibliothek, ein POSIX-Terminal und eine
 UTF-8-Locale. Zusätzliche Python-Module sind nicht nötig. App-Tasten nutzen auf
-macOS `open -a`; Linux erklärt diese Plattformgrenze und kann über den Wrapper
-weiter ins Repo wechseln. Der Linux-Installer (`install-linux.sh`) unterstützt Bash,
+macOS `open -a`; Linux startet einen konfigurierten ausführbaren Starter in der
+lokalen Desktopsitzung und übergibt das Repository als ein Ordnerargument.
+SSH-Sitzungen bleiben gesperrt. Der Linux-Installer (`install-linux.sh`) unterstützt Bash,
 Fish und Zsh einschließlich Enter-Verzeichniswechsel. Der bisherige macOS-Installer
 und Build-/Release-Skripte benötigen Zsh. Ohne Zsh werden auf Linux die
 Zsh-spezifischen Tests übersprungen. Die optionale Archiv-Prüfsummenprüfung

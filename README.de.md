@@ -334,7 +334,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.32.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.33.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -607,8 +607,9 @@ Danach bietet `gmf ~/projekte` auch den gewohnten Verzeichniswechsel mit Enter u
 erhält die CLI-Exit-Codes. Der Wrapper verweist auf dieses Checkout: am Ort lassen,
 normal aktualisieren und nach einem Verschieben den Installer erneut ausführen.
 `./install-linux.sh --check` prüft Abhängigkeiten und Selbsttests, ohne Dateien zu
-installieren. Die macOS-App-Tasten bleiben unter Linux nicht verfügbar;
-Git-Aktionen und Terminaloberfläche funktionieren wie gewohnt.
+installieren. App-Tasten funktionieren auch im lokalen Linux-Desktopterminal:
+Dafür den absoluten Pfad eines ausführbaren Starters konfigurieren. Das gewählte
+Repository wird als ein Ordnerargument übergeben.
 
 ### macOS / bestehende Zsh-Installation
 
@@ -818,12 +819,11 @@ die Einstellungsansicht. Ungültige Einträge fallen einzeln mit einer Warnung a
 Defaults zurück; die Datei bleibt zur Korrektur erhalten. Ordner- und Remote-Listen
 dürfen ausschließlich Zeichenketten enthalten.
 
-- `apps` — Taste → App zum Öffnen des Repos (macOS `open -a`). Die Taste taucht
+- `apps` — Taste → App zum Öffnen des Repos (macOS `open -a`, Linux ausführbarer Starter). Die Taste taucht
   automatisch im Footer auf: `{"Z": {"name": "Zed", "path":
   "/Applications/Zed.app"}}` ergibt `Z Zed`. Eine Taste wählen, die oben in der
   Tabelle nicht schon belegt ist. Innerhalb einer SSH-Sitzung verweigert gmf die
-  Aktion mit einer klaren Erklärung: Eine App lässt sich nur auf dem Mac öffnen,
-  an dem man direkt arbeitet.
+  Aktion mit einer klaren Erklärung: Eine App lässt sich nur in der lokalen Desktopsitzung öffnen.
 - `sync_remote_names` / `sync_remote_hosts` — woran der private Sync-Remote
   erkannt wird: am Remote-Namen oder an einem exakt normalisierten Host in der
   Remote-URL (Teiltreffer werden nie akzeptiert). Für eine
@@ -1066,7 +1066,7 @@ Unterschied, 1 mit Unterschied, 2 bei Fehler.
 ## Laufzeitprüfungen und Scan-Messung
 
 Die unterstützte Untergrenze ist Python 3.9 und Git 2.36 auf macOS oder Linux,
-für die TUI mit curses und UTF-8-Terminal. App-Öffnen nutzt macOS `open`.
+für die TUI mit curses und UTF-8-Terminal. App-Öffnen nutzt macOS `open` oder einen ausführbaren Linux-Starter.
 Der Linux-Installer unterstützt Bash, Fish und Zsh; der bisherige macOS-Installer
 und Release-/Build-Skripte benötigen Zsh. Windows ist nicht abgedeckt.
 Siehe [Laufzeitgrenzen und wiederholbare Prüfungen](docs/runtime-support.de.md).

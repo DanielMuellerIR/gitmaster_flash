@@ -12,8 +12,8 @@ there is no guessed fallback to newline-delimited paths.
 
 The TUI needs standard-library curses, a POSIX terminal and a UTF-8 locale.
 No third-party Python modules are required. macOS app shortcuts use `open -a`;
-Linux reports that platform limit and can still change to the repo through the
-wrapper. The Linux installer (`install-linux.sh`) supports Bash, Fish and Zsh, including
+Linux starts a configured executable launcher in a local desktop session,
+passing the selected repository as one folder argument. SSH sessions remain blocked. The Linux installer (`install-linux.sh`) supports Bash, Fish and Zsh, including
 Enter-to-cd. The original macOS installer and build/release scripts need Zsh.
 On a Linux host without Zsh its Zsh-specific tests are skipped. The optional
 release-checksum verification also needs `shasum` and is skipped when it is absent.

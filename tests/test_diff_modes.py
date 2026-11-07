@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -206,17 +207,63 @@ class DiffModeTests(DiffModeFixture):
         result=subprocess.run([sys.executable,str(Path(g.__file__).resolve()),str(self.repo),'--file-diff','README.md','--diff-mode','unstaged','--json'],capture_output=True,text=True,env=env,timeout=20)
         self.assertEqual(result.returncode,1,result.stderr);self.assertIn('-staged version',json.loads(result.stdout)['diff']);self.assertFalse((self.root/'.config/gitmaster_flash').exists())
 
-    def test_linux_app_shortcut_explains_the_platform_limit(self):
+    def test_linux_app_shortcut_requires_desktop(self):
         screen = Mock()
         cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': str(self.root)}})
         ui = g.TUI(screen, self.root, cfg, None)
         ui.statuses = [g.RepoStatus(self.repo, 'project')]
-        with patch.object(g.sys, 'platform', 'linux'), patch.object(g.subprocess, 'run') as run:
-            os.environ.pop('SSH_CONNECTION', None)
-            os.environ.pop('SSH_TTY', None)
+        with patch.object(g.sys, 'platform', 'linux'), patch.object(g.subprocess, 'run') as run, patch.dict(os.environ, {}, clear=True):
             ui.action_open_app('E')
         run.assert_not_called()
-        self.assertEqual(ui.message, g.t('app_mac_only'))
+        self.assertEqual(ui.message, g.t('app_no_desktop'))
+
+    def test_linux_app_shortcut_passes_folder_without_shell(self):
+        app = self.root / 'editor with spaces'
+        app.write_text('#!/bin/sh\nexit 0\n'); app.chmod(0o755)
+        cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': str(app)}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        child = Mock(); child.wait.side_effect = subprocess.TimeoutExpired('editor', 0.2)
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'WAYLAND_DISPLAY':'wayland-1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child) as spawn, patch.object(g.threading, 'Thread'):
+            ui.action_open_app('E')
+        self.assertEqual(spawn.call_args.args[0], [str(app), str(self.repo)])
+        self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+        self.assertEqual(ui.message, g.t('app_opened', name='Editor', rel='project'))
+        child.wait.side_effect = None; child.wait.return_value = 2
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child):
+            ui.action_open_app('E')
+        self.assertIn('2', ui.message)
+
+    def test_linux_app_shortcut_rejects_directories_and_spawn_errors(self):
+        cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': str(self.root)}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen') as spawn:
+            ui.action_open_app('E')
+        spawn.assert_not_called()
+        self.assertEqual(ui.message, g.t('app_not_found', p=str(self.root)))
+        app = self.root / 'editor'; app.write_text('invalid'); app.chmod(0o755)
+        ui.cfg['apps']['E']['path'] = str(app)
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', side_effect=OSError('launch failed')):
+            ui.action_open_app('E')
+        self.assertIn('launch failed', ui.message)
+
+    def test_linux_real_launcher_receives_exact_repository_argument(self):
+        target = self.root / 'project ; literal $name'
+        target.mkdir()
+        app = self.root / 'editor launcher'
+        received = self.root / 'received'
+        app.write_text('#!/bin/sh\nprintf "%s" "$1" > "' + str(received) + '"\n')
+        app.chmod(0o755)
+        cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': str(app)}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(target, 'project')]
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True):
+            ui.action_open_app('E')
+        deadline = time.monotonic() + 5
+        while not received.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(received.read_text(), str(target))
 
 
 class CoverageCountTests(DiffModeFixture):
