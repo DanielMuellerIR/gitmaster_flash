@@ -228,8 +228,8 @@ class DiffModeTests(DiffModeFixture):
             ui.action_open_app('E')
         self.assertEqual(spawn.call_args.args[0], [str(app), str(self.repo)])
         self.assertTrue(spawn.call_args.kwargs['start_new_session'])
-        self.assertEqual(ui.message, g.t('app_opened', name='Editor', rel='project'))
-        child.wait.side_effect = None; child.wait.return_value = 2
+        self.assertEqual(ui.message, g.t('app_starting', name='Editor', rel='project'))
+        child.wait.side_effect = None; child.wait.return_value = 2; child.stderr.read.return_value = b"failure"
         with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child):
             ui.action_open_app('E')
         self.assertIn('2', ui.message)
@@ -247,6 +247,32 @@ class DiffModeTests(DiffModeFixture):
         with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', side_effect=OSError('launch failed')):
             ui.action_open_app('E')
         self.assertIn('launch failed', ui.message)
+
+    def test_relative_launcher_uses_checked_file_and_reports_delayed_failure(self):
+        app = self.root / 'editor'
+        wrong = self.root / 'searched'
+        wrong.mkdir()
+        (wrong / 'editor').write_text('#!/bin/sh\nexit 0\n')
+        (wrong / 'editor').chmod(0o755)
+        app.write_text('#!/bin/sh\nsleep 0.4\necho fixture_failure >&2\nexit 7\n')
+        app.chmod(0o755)
+        cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': 'editor'}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        before = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY': ':1', 'PATH': str(wrong) + os.pathsep + os.environ['PATH']}, clear=True):
+                ui.action_open_app('E')
+            self.assertEqual(ui.message, g.t('app_starting', name='Editor', rel='project'))
+            deadline = time.monotonic() + 5
+            while ui.app_results.empty() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            ui.drain_app_results()
+            self.assertIn('Exit 7', ui.message)
+            self.assertIn('fixture_failure', ui.message)
+        finally:
+            os.chdir(before)
 
     def test_linux_real_launcher_receives_exact_repository_argument(self):
         target = self.root / 'project ; literal $name'

@@ -73,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.33.0"
+__version__ = "0.33.1"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -573,6 +573,7 @@ TR = {
     # Apps
     "app_not_found": {"en": "App not found: {p} (edit config.json)",
                       "de": "App nicht gefunden: {p} (config.json anpassen)"},
+    "app_starting": {"en": "Started {name}: {rel}", "de": "{name} gestartet: {rel}"},
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
     "app_open_failed": {"en": "Failed to open {name}: {e}",
                         "de": "{name} öffnen fehlgeschlagen: {e}"},
@@ -7648,6 +7649,7 @@ class TUI:
         self.scr = stdscr
         self.root = root
         self.cfg = cfg
+        self.app_results = queue.Queue()
         self.cd_file = cd_file
         # Ohne Pfad wird nichts gespeichert. Der Demo-Modus läuft absichtlich
         # ohne: Seine Config ist eine Wegwerfkopie der Defaults, und ein
@@ -8527,19 +8529,22 @@ class TUI:
             if not Path(path).is_file() or not os.access(path, os.X_OK):
                 self.message = t("app_not_found", p=path)
                 return
+            path = str(Path(path).resolve())
             try:
                 # Ein eigener Prozess ohne Shell hält den Editor vom TUI-Lebenszyklus
                 # getrennt. Der Ordner bleibt auch mit Leerzeichen ein Argument.
                 child = subprocess.Popen([path, str(st.path)], stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                          start_new_session=True)
                 try:
                     code = child.wait(timeout=0.2)
                 except subprocess.TimeoutExpired:
-                    threading.Thread(target=child.wait, daemon=True).start()
-                    code = 0
+                    threading.Thread(target=self._watch_app_launch,
+                                     args=(child, name, st.rel), daemon=True).start()
+                    self.message = t("app_starting", name=name, rel=display_git_path(st.rel))
+                    return
                 self.message = (t("app_opened", name=name, rel=display_git_path(st.rel)) if code == 0
-                                else t("app_open_failed", name=name, e=f"Exit {code}"))
+                                else t("app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(child.stderr.read(4096).decode(errors="replace"))[:120]))
             except OSError as exc:
                 self.message = t("app_open_failed", name=name, e=terminal_text(str(exc))[:120])
             return
@@ -8554,6 +8559,26 @@ class TUI:
             self.message = t("app_opened", name=name, rel=display_git_path(st.rel))
         else:
             self.message = t("app_open_failed", name=name, e=r.stderr.strip()[:120])
+
+    def _watch_app_launch(self, child, name, rel):
+        tail = b""
+        try:
+            while chunk := child.stderr.read(4096):
+                tail = (tail + chunk)[-4096:]
+            code = child.wait()
+            self.app_results.put((name, rel, code, tail.decode(errors="replace")))
+        finally:
+            child.stderr.close()
+
+    def drain_app_results(self):
+        while True:
+            try:
+                name, rel, code, error = self.app_results.get_nowait()
+            except queue.Empty:
+                return
+            self.message = (t("app_opened", name=name, rel=display_git_path(rel)) if code == 0
+                            else t("app_open_failed", name=name,
+                                   e=f"Exit {code}: " + terminal_text(error)[-120:]))
 
     def action_cd_and_quit(self) -> bool:
         st = self.current()
@@ -9925,6 +9950,7 @@ class TUI:
     def _loop(self):
         while True:
             self.drain_background_scan()
+            self.drain_app_results()
             self.draw()
             ch = self._wait_for_key()
             if ch == -1:
