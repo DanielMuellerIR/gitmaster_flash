@@ -334,7 +334,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.33.1 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.33.2 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -610,6 +610,10 @@ normal aktualisieren und nach einem Verschieben den Installer erneut ausführen.
 installieren. App-Tasten funktionieren auch im lokalen Linux-Desktopterminal:
 Dafür den absoluten Pfad eines ausführbaren Starters konfigurieren. Das gewählte
 Repository wird als ein Ordnerargument übergeben.
+Das Startergebnis bezieht sich auf den Starterprozess, nicht die Laufzeit des
+von ihm geöffneten Editors. Exit-Code und begrenzte Diagnose werden auch gemeldet,
+wenn ein Kindprozess stderr offen hält; ein erfolgreicher Exit belegt kein
+sichtbares Fenster.
 
 ### macOS / bestehende Zsh-Installation
 

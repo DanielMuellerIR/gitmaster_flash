@@ -308,7 +308,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.33.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.33.2 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -570,6 +570,9 @@ normally, and rerun the installer after moving it. `./install-linux.sh --check`
 checks dependencies and self-tests without installing files. App shortcuts also
 work in a local Linux desktop terminal: configure the absolute path to an
 executable launcher. The selected repository is passed as one folder argument.
+Launch results refer to the launcher process, not the lifetime of the editor it
+starts. Its exit status and a bounded diagnostic are reported even when a child
+keeps stderr open; successful exit does not prove that a window appeared.
 
 ### macOS / existing Zsh installation
 

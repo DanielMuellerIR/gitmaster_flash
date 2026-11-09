@@ -9,6 +9,7 @@ import subprocess
 import time
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
@@ -230,7 +231,7 @@ class DiffModeTests(DiffModeFixture):
         self.assertTrue(spawn.call_args.kwargs['start_new_session'])
         self.assertEqual(ui.message, g.t('app_starting', name='Editor', rel='project'))
         child.wait.side_effect = None; child.wait.return_value = 2; child.stderr.read.return_value = b"failure"
-        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child):
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child), patch.object(ui, '_app_launch_result', return_value=(2, 'failure')):
             ui.action_open_app('E')
         self.assertIn('2', ui.message)
 
@@ -274,6 +275,74 @@ class DiffModeTests(DiffModeFixture):
         finally:
             os.chdir(before)
 
+    def test_launcher_exit_does_not_wait_for_descendants_stderr(self):
+        self.check_launcher_descendant(fast=False)
+
+    def test_fast_launcher_exit_does_not_block_tui_on_inherited_stderr(self):
+        self.check_launcher_descendant(fast=True)
+
+    def check_launcher_descendant(self, *, fast):
+        # The real shell child writes only after the starter result is reported.
+        app = self.root / 'editor'
+        release, completed = self.root / 'release-writer', self.root / 'completed'
+        app.write_text('#!/bin/sh\nsleep 0.4\n(\n'
+                       'while [ ! -f ' + shlex.quote(str(release)) + ' ]; do sleep 0.01; done\n'
+                       'printf late_write >&2 && printf complete > ' + shlex.quote(str(completed)) +
+                       '\n) &\necho fixture_failure >&2\nexit 7\n')
+        app.chmod(0o755)
+        cfg = dict(self.cfg, apps={'E': {'name': 'Editor', 'path': str(app)}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        children, threads = [], []
+        real_spawn, real_thread = subprocess.Popen, threading.Thread
+
+        def spawn(*args, **kwargs):
+            child = real_spawn(*args, **kwargs)
+            children.append(child)
+            if fast:
+                child.wait(timeout=5)  # Deterministically exercise the synchronous path.
+            return child
+
+        def make_thread(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            threads.append(thread)
+            return thread
+
+        worker = real_thread(target=ui.action_open_app, args=('E',), daemon=True)
+        try:
+            with patch.object(g.sys, 'platform', 'linux'), \
+                 patch.dict(os.environ, {'DISPLAY': ':1'}), \
+                 patch.object(g.subprocess, 'Popen', side_effect=spawn), \
+                 patch.object(g.threading, 'Thread', side_effect=make_thread):
+                worker.start()
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive(), 'TUI waits for inherited stderr after launcher exit')
+                deadline = time.monotonic() + 2
+                while children[0].poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(children[0].poll(), 7)
+                while 'Exit 7' not in ui.message and time.monotonic() < deadline:
+                    ui.drain_app_results()
+                    time.sleep(0.01)
+                self.assertIn('Exit 7', ui.message)
+                self.assertIn('fixture_failure', ui.message)
+                self.assertFalse(children[0].stderr.closed)
+                release.touch()
+                deadline = time.monotonic() + 2
+                while not completed.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(completed.read_text(), 'complete')
+        finally:
+            for child in children:
+                g._kill_process_group(child)
+                child.wait(timeout=5)
+            worker.join(timeout=5)
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertTrue(children[0].stderr.closed)
+
     def test_linux_real_launcher_receives_exact_repository_argument(self):
         target = self.root / 'project ; literal $name'
         target.mkdir()
@@ -290,6 +359,128 @@ class DiffModeTests(DiffModeFixture):
         while not received.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(received.read_text(), str(target))
+
+
+class AppPipeLifetimeTests(unittest.TestCase):
+    def test_exited_starter_keeps_pipe_for_late_writer(self):
+        self.check_late_writer(mode='reader')
+
+    def test_fast_app_status_keeps_pipe_for_late_writer(self):
+        self.check_late_writer(mode='synchronous')
+
+    def test_async_app_status_keeps_pipe_for_late_writer(self):
+        self.check_late_writer(mode='asynchronous')
+
+    def check_late_writer(self, *, mode):
+        with tempfile.TemporaryDirectory(prefix='gmf-app-pipe-') as directory:
+            root = Path(directory)
+            marker = root / 'completed'
+            writer = subprocess.Popen([
+                sys.executable, '-c',
+                'import pathlib, sys\n'
+                'sys.stdin.buffer.read(1)\n'
+                'sys.stderr.buffer.write(b"x" * (256 * 1024))\n'
+                'sys.stderr.buffer.flush()\n'
+                'pathlib.Path(sys.argv[1]).write_text("complete")\n', str(marker),
+            ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            class ExitedStarter:
+                # The real writer owns its process; only the starter has exited.
+                stderr = writer.stderr
+
+                def poll(self):
+                    return 7
+
+                def wait(self, timeout=None):
+                    if timeout is not None and mode == 'asynchronous':
+                        raise subprocess.TimeoutExpired('fixture-starter', timeout)
+                    return 7
+
+            ui = g.TUI(Mock(), root, dict(g.DEFAULT_CONFIG, apps={
+                'E': {'name': 'Editor', 'path': sys.executable}}), None)
+            ui.statuses = [g.RepoStatus(root, 'project')]
+            results, errors, threads = [], [], []
+            real_thread = threading.Thread
+
+            def make_thread(*args, **kwargs):
+                thread = real_thread(*args, **kwargs)
+                threads.append(thread)
+                return thread
+
+            def launch():
+                try:
+                    if mode == 'reader':
+                        results.append(ui._app_launch_result(ExitedStarter()))
+                    else:
+                        ui.action_open_app('E')
+                except Exception as exc:
+                    errors.append(exc)
+
+            worker = real_thread(target=launch, daemon=True)
+            try:
+                with patch.object(g.sys, 'platform', 'linux'), \
+                     patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True), \
+                     patch.object(g.subprocess, 'Popen', return_value=ExitedStarter()), \
+                     patch.object(g.threading, 'Thread', side_effect=make_thread):
+                    worker.start()
+                    worker.join(timeout=2)
+                    self.assertFalse(worker.is_alive(), 'starter result waits for writer EOF')
+                    self.assertEqual(errors, [])
+                    if mode == 'reader':
+                        self.assertEqual(results, [(7, '')])
+                    else:
+                        if mode == 'asynchronous':
+                            result = ui.app_results.get(timeout=2)
+                            self.assertEqual(result, ('Editor', 'project', 7, ''))
+                            ui.app_results.put(result)
+                            ui.drain_app_results()
+                        self.assertIn('Exit 7', ui.message)
+                    self.assertIsNone(writer.poll())
+                    self.assertFalse(marker.exists())
+                    writer.stdin.write(b'!')
+                    writer.stdin.close()
+                    self.assertEqual(writer.wait(timeout=5), 0,
+                                     'late stderr writer died instead of completing')
+                    self.assertEqual(marker.read_text(), 'complete')
+                    for thread in threads:
+                        thread.join(timeout=5)
+                    self.assertTrue(all(not thread.is_alive() for thread in threads))
+                    self.assertTrue(writer.stderr.closed, 'drain did not close the pipe at EOF')
+            finally:
+                if writer.poll() is None:
+                    writer.kill()
+                writer.wait(timeout=5)
+                writer.stdin.close()
+                worker.join(timeout=5)
+                for thread in threads:
+                    thread.join(timeout=5)
+                writer.stderr.close()
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+    def test_reader_bounds_diagnostic_and_closes_at_eof(self):
+        child = subprocess.Popen([
+            sys.executable, '-c',
+            'import sys\n'
+            'sys.stderr.buffer.write(b"x" * (256 * 1024) + b"fixture_failure")\n'
+            'sys.stderr.buffer.flush()\n'
+            'sys.exit(7)\n',
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        results = []
+        worker = threading.Thread(target=lambda: results.append(g.TUI._app_launch_result(child)),
+                                  daemon=True)
+        try:
+            worker.start()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), 'diagnostic fills the pipe and blocks starter')
+            self.assertEqual(results, [(7, 'x' * (4096 - len('fixture_failure')) + 'fixture_failure')])
+            self.assertTrue(child.stderr.closed)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+            worker.join(timeout=5)
+            child.stderr.close()
 
 
 class CoverageCountTests(DiffModeFixture):

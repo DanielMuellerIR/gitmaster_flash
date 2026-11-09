@@ -57,6 +57,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -73,7 +74,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.33.1"
+__version__ = "0.33.2"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -8543,8 +8544,9 @@ class TUI:
                                      args=(child, name, st.rel), daemon=True).start()
                     self.message = t("app_starting", name=name, rel=display_git_path(st.rel))
                     return
+                _, error = self._app_launch_result(child)
                 self.message = (t("app_opened", name=name, rel=display_git_path(st.rel)) if code == 0
-                                else t("app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(child.stderr.read(4096).decode(errors="replace"))[:120]))
+                                else t("app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(error)[-120:]))
             except OSError as exc:
                 self.message = t("app_open_failed", name=name, e=terminal_text(str(exc))[:120])
             return
@@ -8560,15 +8562,55 @@ class TUI:
         else:
             self.message = t("app_open_failed", name=name, e=r.stderr.strip()[:120])
 
-    def _watch_app_launch(self, child, name, rel):
-        tail = b""
+    @staticmethod
+    def _drain_app_stderr(stream):
         try:
-            while chunk := child.stderr.read(4096):
-                tail = (tail + chunk)[-4096:]
-            code = child.wait()
-            self.app_results.put((name, rel, code, tail.decode(errors="replace")))
+            while os.read(stream.fileno(), 4096):
+                pass
         finally:
-            child.stderr.close()
+            stream.close()
+
+    @staticmethod
+    def _app_launch_result(child):
+        tail = b""
+        eof = draining = False
+        try:
+            # Ein gestarteter Editor kann stderr erben. Auf den Starter warten,
+            # nicht auf EOF aller Nachfahren; auch niemals die TUI daran binden.
+            while child.poll() is None:
+                ready, _, _ = select.select([child.stderr], [], [], 0.05)
+                if ready:
+                    chunk = os.read(child.stderr.fileno(), 4096)
+                    if not chunk:
+                        eof = True
+                        break
+                    tail = (tail + chunk)[-4096:]
+            code = child.wait()
+            # Nur bereits verfügbare Diagnose lesen, begrenzt auch bei einem
+            # weiterhin schreibenden Nachfahren. Kein blockierendes read().
+            for _ in range(16):
+                if not select.select([child.stderr], [], [], 0)[0]:
+                    break
+                chunk = os.read(child.stderr.fileno(), 4096)
+                if not chunk:
+                    eof = True
+                    break
+                tail = (tail + chunk)[-4096:]
+            if not eof:
+                # Nachfahren dürfen bei offener TUI weiter schreiben: Schließen
+                # vor EOF könnte sie durch EPIPE/SIGPIPE beenden. Rest verwerfen,
+                # ohne die Statusmeldung aufzuhalten oder Diagnose anzusammeln.
+                threading.Thread(target=TUI._drain_app_stderr,
+                                 args=(child.stderr,), daemon=True).start()
+                draining = True
+            return code, tail.decode(errors="replace")
+        finally:
+            if not draining:
+                child.stderr.close()
+
+    def _watch_app_launch(self, child, name, rel):
+        code, error = self._app_launch_result(child)
+        self.app_results.put((name, rel, code, error))
 
     def drain_app_results(self):
         while True:
