@@ -6366,6 +6366,7 @@ class RemoteAndCommandLogTests(unittest.TestCase):
     def test_oserror_after_real_push_is_reported_as_unknown(self):
         (self.repo / "a.md").write_text("pushed\n")
         git(self.repo, "commit", "-qam", "outgoing")
+        branch_ref = git_output(self.repo, "symbolic-ref", "HEAD")
         st = collect_status(self.repo, self.root, DEFAULT_CONFIG)
         original = gmf_module.run_git
 
@@ -6391,7 +6392,7 @@ class RemoteAndCommandLogTests(unittest.TestCase):
 
         self.assertEqual(ui.message, gmf_module.t("push_io_unknown"))
         self.assertEqual(
-            git_output(self.origin, "rev-parse", "refs/heads/master"),
+            git_output(self.origin, "rev-parse", branch_ref),
             git_output(self.repo, "rev-parse", "HEAD"))
         self.assertTrue(any(
             line.startswith("…") and " push " in line
