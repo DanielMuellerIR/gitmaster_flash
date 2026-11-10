@@ -354,7 +354,7 @@ class DiffModeTests(DiffModeFixture):
         worker = real_thread(target=ui.action_open_app, args=('E',), daemon=True)
         try:
             with patch.object(g.sys, 'platform', 'linux'), \
-                 patch.dict(os.environ, {'DISPLAY': ':1'}), \
+                 patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True), \
                  patch.object(g.subprocess, 'Popen', side_effect=spawn), \
                  patch.object(g.threading, 'Thread', side_effect=make_thread):
                 worker.start()
