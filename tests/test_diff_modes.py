@@ -229,6 +229,7 @@ class DiffModeTests(DiffModeFixture):
             ui.action_open_app('E')
         self.assertEqual(spawn.call_args.args[0], [str(app), str(self.repo)])
         self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+        spawn.call_args.kwargs['stderr'].close()
         self.assertEqual(ui.message, g.t('app_starting', name='Editor', rel='project'))
         child.wait.side_effect = None; child.wait.return_value = 2; child.stderr.read.return_value = b"failure"
         with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY':':1'}, clear=True), patch.object(g.subprocess, 'Popen', return_value=child), patch.object(ui, '_app_launch_result', return_value=(2, 'failure')):
@@ -274,6 +275,48 @@ class DiffModeTests(DiffModeFixture):
             self.assertIn('fixture_failure', ui.message)
         finally:
             os.chdir(before)
+
+    def test_symlink_launcher_keeps_its_configured_name(self):
+        app, link = self.root / 'launcher', self.root / 'gui-editor'
+        marker = self.root / 'received'
+        app.write_text('#!/bin/sh\ncase "$0" in */gui-editor) printf gui > ' +
+                       shlex.quote(str(marker)) + ';; *) exit 9;; esac\n')
+        app.chmod(0o755); link.symlink_to(app)
+        ui = g.TUI(Mock(), self.root, dict(self.cfg, apps={
+            'E': {'name': 'Editor', 'path': str(link)}}), None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True):
+            ui.action_open_app('E')
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(marker.read_text(), 'gui')
+
+    def test_loop_displays_delayed_app_failure_without_user_input(self):
+        app = self.root / 'editor'
+        app.write_text('#!/bin/sh\nsleep .4\necho delayed_failure >&2\nexit 7\n')
+        app.chmod(0o755)
+        screen = Mock()
+        ui = g.TUI(screen, self.root, dict(self.cfg, apps={
+            'E': {'name': 'Editor', 'path': str(app)}}), None)
+        ui.statuses = [g.RepoStatus(self.repo, 'project')]
+        timeouts, messages = [], []
+        screen.timeout.side_effect = lambda value: timeouts.append(value)
+        def getch():
+            if 'Exit 7' in ui.message:
+                return ord('q')
+            self.assertLess(time.monotonic(), deadline)
+            self.assertEqual(timeouts[-1], g.BACKGROUND_POLL_MS)
+            time.sleep(timeouts[-1] / 1000)
+            return -1
+        screen.getch.side_effect = getch
+        ui.draw = lambda: messages.append(ui.message)
+        deadline = time.monotonic() + 3
+        with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True):
+            ui.action_open_app('E')
+            ui._loop()
+        self.assertTrue(any('delayed_failure' in message for message in messages))
+        self.assertEqual(ui.pending_app_launches, 0)
 
     def test_launcher_exit_does_not_wait_for_descendants_stderr(self):
         self.check_launcher_descendant(fast=False)
@@ -326,7 +369,6 @@ class DiffModeTests(DiffModeFixture):
                     time.sleep(0.01)
                 self.assertIn('Exit 7', ui.message)
                 self.assertIn('fixture_failure', ui.message)
-                self.assertFalse(children[0].stderr.closed)
                 release.touch()
                 deadline = time.monotonic() + 2
                 while not completed.exists() and time.monotonic() < deadline:
@@ -341,7 +383,6 @@ class DiffModeTests(DiffModeFixture):
                 thread.join(timeout=5)
         self.assertFalse(worker.is_alive())
         self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertTrue(children[0].stderr.closed)
 
     def test_linux_real_launcher_receives_exact_repository_argument(self):
         target = self.root / 'project ; literal $name'
@@ -361,126 +402,45 @@ class DiffModeTests(DiffModeFixture):
         self.assertEqual(received.read_text(), str(target))
 
 
-class AppPipeLifetimeTests(unittest.TestCase):
-    def test_exited_starter_keeps_pipe_for_late_writer(self):
-        self.check_late_writer(mode='reader')
-
-    def test_fast_app_status_keeps_pipe_for_late_writer(self):
-        self.check_late_writer(mode='synchronous')
-
-    def test_async_app_status_keeps_pipe_for_late_writer(self):
-        self.check_late_writer(mode='asynchronous')
-
-    def check_late_writer(self, *, mode):
-        with tempfile.TemporaryDirectory(prefix='gmf-app-pipe-') as directory:
+class AppDiagnosticLifetimeTests(unittest.TestCase):
+    def test_child_writes_after_actual_launcher_parent_exit(self):
+        with tempfile.TemporaryDirectory(prefix='gmf-app-lifetime-') as directory:
             root = Path(directory)
-            marker = root / 'completed'
-            writer = subprocess.Popen([
-                sys.executable, '-c',
-                'import pathlib, sys\n'
-                'sys.stdin.buffer.read(1)\n'
-                'sys.stderr.buffer.write(b"x" * (256 * 1024))\n'
-                'sys.stderr.buffer.flush()\n'
-                'pathlib.Path(sys.argv[1]).write_text("complete")\n', str(marker),
-            ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            release, marker = root / 'release', root / 'completed'
+            writer = root / 'editor'
+            writer.write_text('#!' + sys.executable + '\n' +
+                'import pathlib, sys, time\n' +
+                'while not pathlib.Path(' + repr(str(release)) + ').exists(): time.sleep(.01)\n' +
+                'sys.stderr.buffer.write(b"x" * (256 * 1024))\n' +
+                'sys.stderr.buffer.flush()\n' +
+                'pathlib.Path(' + repr(str(marker)) + ').write_text("complete")\n')
+            writer.chmod(0o755)
+            script = ('import gitmaster_flash as g, sys\n'
+                      'from pathlib import Path\nfrom unittest.mock import Mock\n'
+                      'g.sys.platform = "linux"\n'
+                      'ui = g.TUI(Mock(), Path(sys.argv[1]), dict(g.DEFAULT_CONFIG, apps={"E": '
+                      '{"name": "Editor", "path": sys.argv[2]}}), None)\n'
+                      'ui.statuses = [g.RepoStatus(Path(sys.argv[1]), "project")]\n'
+                      'ui.action_open_app("E")\n')
+            env = dict(os.environ, DISPLAY=':1')
+            env.pop('SSH_CONNECTION', None); env.pop('SSH_TTY', None)
+            parent = subprocess.run([sys.executable, '-c', script, str(root), str(writer)],
+                                    env=env, capture_output=True, timeout=5)
+            self.assertEqual(parent.returncode, 0, parent.stderr)
+            release.touch()
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(marker.read_text(), 'complete')
 
-            class ExitedStarter:
-                # The real writer owns its process; only the starter has exited.
-                stderr = writer.stderr
-
-                def poll(self):
-                    return 7
-
-                def wait(self, timeout=None):
-                    if timeout is not None and mode == 'asynchronous':
-                        raise subprocess.TimeoutExpired('fixture-starter', timeout)
-                    return 7
-
-            ui = g.TUI(Mock(), root, dict(g.DEFAULT_CONFIG, apps={
-                'E': {'name': 'Editor', 'path': sys.executable}}), None)
-            ui.statuses = [g.RepoStatus(root, 'project')]
-            results, errors, threads = [], [], []
-            real_thread = threading.Thread
-
-            def make_thread(*args, **kwargs):
-                thread = real_thread(*args, **kwargs)
-                threads.append(thread)
-                return thread
-
-            def launch():
-                try:
-                    if mode == 'reader':
-                        results.append(ui._app_launch_result(ExitedStarter()))
-                    else:
-                        ui.action_open_app('E')
-                except Exception as exc:
-                    errors.append(exc)
-
-            worker = real_thread(target=launch, daemon=True)
-            try:
-                with patch.object(g.sys, 'platform', 'linux'), \
-                     patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True), \
-                     patch.object(g.subprocess, 'Popen', return_value=ExitedStarter()), \
-                     patch.object(g.threading, 'Thread', side_effect=make_thread):
-                    worker.start()
-                    worker.join(timeout=2)
-                    self.assertFalse(worker.is_alive(), 'starter result waits for writer EOF')
-                    self.assertEqual(errors, [])
-                    if mode == 'reader':
-                        self.assertEqual(results, [(7, '')])
-                    else:
-                        if mode == 'asynchronous':
-                            result = ui.app_results.get(timeout=2)
-                            self.assertEqual(result, ('Editor', 'project', 7, ''))
-                            ui.app_results.put(result)
-                            ui.drain_app_results()
-                        self.assertIn('Exit 7', ui.message)
-                    self.assertIsNone(writer.poll())
-                    self.assertFalse(marker.exists())
-                    writer.stdin.write(b'!')
-                    writer.stdin.close()
-                    self.assertEqual(writer.wait(timeout=5), 0,
-                                     'late stderr writer died instead of completing')
-                    self.assertEqual(marker.read_text(), 'complete')
-                    for thread in threads:
-                        thread.join(timeout=5)
-                    self.assertTrue(all(not thread.is_alive() for thread in threads))
-                    self.assertTrue(writer.stderr.closed, 'drain did not close the pipe at EOF')
-            finally:
-                if writer.poll() is None:
-                    writer.kill()
-                writer.wait(timeout=5)
-                writer.stdin.close()
-                worker.join(timeout=5)
-                for thread in threads:
-                    thread.join(timeout=5)
-                writer.stderr.close()
-            self.assertFalse(worker.is_alive())
-            self.assertTrue(all(not thread.is_alive() for thread in threads))
-
-    def test_reader_bounds_diagnostic_and_closes_at_eof(self):
-        child = subprocess.Popen([
-            sys.executable, '-c',
-            'import sys\n'
-            'sys.stderr.buffer.write(b"x" * (256 * 1024) + b"fixture_failure")\n'
-            'sys.stderr.buffer.flush()\n'
-            'sys.exit(7)\n',
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        results = []
-        worker = threading.Thread(target=lambda: results.append(g.TUI._app_launch_result(child)),
-                                  daemon=True)
-        try:
-            worker.start()
-            worker.join(timeout=5)
-            self.assertFalse(worker.is_alive(), 'diagnostic fills the pipe and blocks starter')
-            self.assertEqual(results, [(7, 'x' * (4096 - len('fixture_failure')) + 'fixture_failure')])
-            self.assertTrue(child.stderr.closed)
-        finally:
-            if child.poll() is None:
-                child.kill()
-            child.wait(timeout=5)
-            worker.join(timeout=5)
-            child.stderr.close()
+    def test_reader_bounds_diagnostic(self):
+        diagnostics = tempfile.TemporaryFile()
+        child = subprocess.Popen([sys.executable, '-c',
+            'import sys; sys.stderr.buffer.write(b"x" * (256 * 1024) + b"failure"); sys.exit(7)'],
+            stderr=diagnostics, stdout=subprocess.DEVNULL)
+        self.assertEqual(g.TUI._app_launch_result(child, diagnostics),
+                         (7, 'x' * (4096 - 7) + 'failure'))
+        self.assertTrue(diagnostics.closed)
 
 
 class CoverageCountTests(DiffModeFixture):

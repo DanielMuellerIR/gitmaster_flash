@@ -74,7 +74,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.33.2"
+__version__ = "0.33.3"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -7651,6 +7651,7 @@ class TUI:
         self.root = root
         self.cfg = cfg
         self.app_results = queue.Queue()
+        self.pending_app_launches = 0
         self.cd_file = cd_file
         # Ohne Pfad wird nichts gespeichert. Der Demo-Modus läuft absichtlich
         # ohne: Seine Config ist eine Wegwerfkopie der Defaults, und ein
@@ -8530,25 +8531,34 @@ class TUI:
             if not Path(path).is_file() or not os.access(path, os.X_OK):
                 self.message = t("app_not_found", p=path)
                 return
-            path = str(Path(path).resolve())
+            path = os.path.abspath(path)
+            diagnostics = None
             try:
                 # Ein eigener Prozess ohne Shell hält den Editor vom TUI-Lebenszyklus
                 # getrennt. Der Ordner bleibt auch mit Leerzeichen ein Argument.
+                # Eine unbenannte Datei bleibt für geerbte Deskriptoren auch
+                # nach dem Ende von gmf gültig; eine Pipe hätte keinen Leser mehr.
+                diagnostics = tempfile.TemporaryFile()
                 child = subprocess.Popen([path, str(st.path)], stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL, stderr=diagnostics,
                                          start_new_session=True)
                 try:
                     code = child.wait(timeout=0.2)
                 except subprocess.TimeoutExpired:
+                    self.pending_app_launches += 1
                     threading.Thread(target=self._watch_app_launch,
-                                     args=(child, name, st.rel), daemon=True).start()
+                                     args=(child, diagnostics, name, st.rel), daemon=True).start()
+                    diagnostics = None
                     self.message = t("app_starting", name=name, rel=display_git_path(st.rel))
                     return
-                _, error = self._app_launch_result(child)
+                _, error = self._app_launch_result(child, diagnostics)
                 self.message = (t("app_opened", name=name, rel=display_git_path(st.rel)) if code == 0
                                 else t("app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(error)[-120:]))
             except OSError as exc:
                 self.message = t("app_open_failed", name=name, e=terminal_text(str(exc))[:120])
+            finally:
+                if diagnostics is not None:
+                    diagnostics.close()
             return
         if sys.platform != "darwin":
             self.message = t("app_mac_only")
@@ -8563,53 +8573,19 @@ class TUI:
             self.message = t("app_open_failed", name=name, e=r.stderr.strip()[:120])
 
     @staticmethod
-    def _drain_app_stderr(stream):
+    def _app_launch_result(child, diagnostics):
         try:
-            while os.read(stream.fileno(), 4096):
-                pass
-        finally:
-            stream.close()
-
-    @staticmethod
-    def _app_launch_result(child):
-        tail = b""
-        eof = draining = False
-        try:
-            # Ein gestarteter Editor kann stderr erben. Auf den Starter warten,
-            # nicht auf EOF aller Nachfahren; auch niemals die TUI daran binden.
-            while child.poll() is None:
-                ready, _, _ = select.select([child.stderr], [], [], 0.05)
-                if ready:
-                    chunk = os.read(child.stderr.fileno(), 4096)
-                    if not chunk:
-                        eof = True
-                        break
-                    tail = (tail + chunk)[-4096:]
             code = child.wait()
-            # Nur bereits verfügbare Diagnose lesen, begrenzt auch bei einem
-            # weiterhin schreibenden Nachfahren. Kein blockierendes read().
-            for _ in range(16):
-                if not select.select([child.stderr], [], [], 0)[0]:
-                    break
-                chunk = os.read(child.stderr.fileno(), 4096)
-                if not chunk:
-                    eof = True
-                    break
-                tail = (tail + chunk)[-4096:]
-            if not eof:
-                # Nachfahren dürfen bei offener TUI weiter schreiben: Schließen
-                # vor EOF könnte sie durch EPIPE/SIGPIPE beenden. Rest verwerfen,
-                # ohne die Statusmeldung aufzuhalten oder Diagnose anzusammeln.
-                threading.Thread(target=TUI._drain_app_stderr,
-                                 args=(child.stderr,), daemon=True).start()
-                draining = True
+            # pread verändert den mit Nachfahren geteilten Dateizeiger nicht.
+            # Nur den begrenzten Diagnoseschwanz zum Ende des Starters lesen.
+            end = os.fstat(diagnostics.fileno()).st_size
+            tail = os.pread(diagnostics.fileno(), 4096, max(0, end - 4096))
             return code, tail.decode(errors="replace")
         finally:
-            if not draining:
-                child.stderr.close()
+            diagnostics.close()
 
-    def _watch_app_launch(self, child, name, rel):
-        code, error = self._app_launch_result(child)
+    def _watch_app_launch(self, child, diagnostics, name, rel):
+        code, error = self._app_launch_result(child, diagnostics)
         self.app_results.put((name, rel, code, error))
 
     def drain_app_results(self):
@@ -8618,6 +8594,7 @@ class TUI:
                 name, rel, code, error = self.app_results.get_nowait()
             except queue.Empty:
                 return
+            self.pending_app_launches -= 1
             self.message = (t("app_opened", name=name, rel=display_git_path(rel)) if code == 0
                             else t("app_open_failed", name=name,
                                    e=f"Exit {code}: " + terminal_text(error)[-120:]))
@@ -9983,7 +9960,7 @@ class TUI:
         `curses.error`, statt einfach zu warten. Das begrenzte Warten bleibt
         deshalb strikt auf diese eine Stelle beschraenkt.
         """
-        self.scr.timeout(BACKGROUND_POLL_MS if self.scan else MEASUREMENT_POLL_MS)
+        self.scr.timeout(BACKGROUND_POLL_MS if self.scan or self.pending_app_launches else MEASUREMENT_POLL_MS)
         try:
             return self.scr.getch()
         finally:
