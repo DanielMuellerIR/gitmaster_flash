@@ -334,7 +334,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.33.3 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.33.4 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter

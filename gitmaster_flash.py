@@ -57,10 +57,10 @@ import json
 import math
 import os
 import re
-import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import queue
@@ -74,7 +74,88 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-__version__ = "0.33.3"
+
+class AppDiagnostics:
+    """Ein unabhängiger Leser verwirft alte Diagnosebytes auch nach dem TUI-Ende."""
+
+    READER = """
+import os, select, socket, struct
+control = socket.socket(fileno=1)
+tail = b''
+while True:
+    ready, _, _ = select.select([0] + ([control] if control else []), [], [])
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if not data:
+            break
+        tail = (tail + data)[-4096:]
+    if control and control in ready:
+        if not control.recv(1):
+            control.close()
+            control = None
+            continue
+        # Nach dem Starterende bereits gepufferte Ausgabe vor dem Snapshot lesen.
+        for _ in range(128):
+            if not select.select([0], [], [], 0)[0]:
+                break
+            data = os.read(0, 65536)
+            if not data:
+                break
+            tail = (tail + data)[-4096:]
+        try:
+            control.sendall(struct.pack('!I', len(tail)) + tail)
+        except OSError:
+            control.close()
+            control = None
+"""
+
+    def __init__(self):
+        reader, self.writer = os.pipe()
+        self.control, peer = socket.socketpair()
+        self.closed = False
+        try:
+            pid = os.posix_spawn(sys.executable, [sys.executable, "-I", "-S", "-c", self.READER],
+                os.environ, setsid=True, file_actions=[
+                    (os.POSIX_SPAWN_DUP2, reader, 0),
+                    (os.POSIX_SPAWN_DUP2, peer.fileno(), 1),
+                    (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)])
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            os.close(reader)
+            peer.close()
+        threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
+
+    def fileno(self):
+        return self.writer
+
+    def read_tail(self):
+        import struct
+        self.control.settimeout(2)
+        self.control.sendall(b"r")
+
+        def receive(size):
+            data = b""
+            while len(data) < size:
+                part = self.control.recv(size - len(data))
+                if not part:
+                    raise OSError("diagnostic reader closed")
+                data += part
+            return data
+
+        length = struct.unpack("!I", receive(4))[0]
+        if length > 4096:
+            raise OSError("invalid diagnostic length")
+        return receive(length).decode(errors="replace")
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            os.close(self.writer)
+            self.control.close()
+
+__version__ = "0.33.4"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -8531,14 +8612,12 @@ class TUI:
             if not Path(path).is_file() or not os.access(path, os.X_OK):
                 self.message = t("app_not_found", p=path)
                 return
-            path = os.path.abspath(path)
+            path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
             diagnostics = None
             try:
                 # Ein eigener Prozess ohne Shell hält den Editor vom TUI-Lebenszyklus
                 # getrennt. Der Ordner bleibt auch mit Leerzeichen ein Argument.
-                # Eine unbenannte Datei bleibt für geerbte Deskriptoren auch
-                # nach dem Ende von gmf gültig; eine Pipe hätte keinen Leser mehr.
-                diagnostics = tempfile.TemporaryFile()
+                diagnostics = AppDiagnostics()
                 child = subprocess.Popen([path, str(st.path)], stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=diagnostics,
                                          start_new_session=True)
@@ -8576,11 +8655,7 @@ class TUI:
     def _app_launch_result(child, diagnostics):
         try:
             code = child.wait()
-            # pread verändert den mit Nachfahren geteilten Dateizeiger nicht.
-            # Nur den begrenzten Diagnoseschwanz zum Ende des Starters lesen.
-            end = os.fstat(diagnostics.fileno()).st_size
-            tail = os.pread(diagnostics.fileno(), 4096, max(0, end - 4096))
-            return code, tail.decode(errors="replace")
+            return code, diagnostics.read_tail()
         finally:
             diagnostics.close()
 

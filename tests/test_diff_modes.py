@@ -292,6 +292,31 @@ class DiffModeTests(DiffModeFixture):
             time.sleep(.01)
         self.assertEqual(marker.read_text(), 'gui')
 
+    def test_directory_symlink_parent_keeps_checked_launcher_identity(self):
+        local = self.root / 'local'; local.mkdir()
+        version = self.root / 'versions' / 'v1'; version.mkdir(parents=True)
+        (local / 'link').symlink_to(version, target_is_directory=True)
+        marker = self.root / 'received'
+        correct = version.parent / 'editor'
+        correct.write_text('#!/bin/sh\nprintf correct > ' + shlex.quote(str(marker)) + '\n')
+        correct.chmod(0o755)
+        (local / 'editor').write_text('#!/bin/sh\nexit 9\n')
+        (local / 'editor').chmod(0o755)
+        before = os.getcwd()
+        try:
+            os.chdir(self.root)
+            ui = g.TUI(Mock(), self.root, dict(self.cfg, apps={
+                'E': {'name': 'Editor', 'path': 'local/link/../editor'}}), None)
+            ui.statuses = [g.RepoStatus(self.repo, 'project')]
+            with patch.object(g.sys, 'platform', 'linux'), patch.dict(os.environ, {'DISPLAY': ':1'}, clear=True):
+                ui.action_open_app('E')
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(marker.read_text(), 'correct')
+        finally:
+            os.chdir(before)
+
     def test_loop_displays_delayed_app_failure_without_user_input(self):
         app = self.root / 'editor'
         app.write_text('#!/bin/sh\nsleep .4\necho delayed_failure >&2\nexit 7\n')
@@ -434,9 +459,10 @@ class AppDiagnosticLifetimeTests(unittest.TestCase):
             self.assertEqual(marker.read_text(), 'complete')
 
     def test_reader_bounds_diagnostic(self):
-        diagnostics = tempfile.TemporaryFile()
+        diagnostics = g.AppDiagnostics()
         child = subprocess.Popen([sys.executable, '-c',
-            'import sys; sys.stderr.buffer.write(b"x" * (256 * 1024) + b"failure"); sys.exit(7)'],
+            'import sys; [sys.stderr.buffer.write(b"x" * 65536) for _ in range(512)]; '
+            'sys.stderr.buffer.write(b"failure"); sys.exit(7)'],
             stderr=diagnostics, stdout=subprocess.DEVNULL)
         self.assertEqual(g.TUI._app_launch_result(child, diagnostics),
                          (7, 'x' * (4096 - 7) + 'failure'))
