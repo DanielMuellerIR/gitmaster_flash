@@ -84,6 +84,53 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual({row["side"] for row in failed}, {"here", "there"})
         self.assertTrue(all(row["values"]["count"] == 1 for row in failed))
 
+    def test_equal_public_content_does_not_create_shared_sync_work(self):
+        remote = g.RemoteStatus("github", public=True, is_sync=True,
+                                branch_exists=True, ahead=9, behind=2, content_equal=True)
+        payload = self.snapshot([self.status(remote="github", ahead=9, behind=2, remotes=[remote])])
+        self.assertEqual(g.diff_findings(payload, payload, "here", "there"), [])
+        code, output, error = self.compare(payload, payload, "--json")
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)["findings"], [])
+        output = io.StringIO()
+        st = self.status(remote="github", ahead=9, behind=2, remotes=[remote])
+        with patch.object(g, "collect_all", return_value=[st]), patch.object(
+                g, "fetch_remote_status", return_value=payload), redirect_stdout(output):
+            self.assertEqual(g.run_diff("example", self.root, g.DEFAULT_CONFIG,
+                                        fetch=False, as_json=True), 0)
+        self.assertEqual(json.loads(output.getvalue())["findings"], [])
+        for legacy in (False, True):
+            other = copy.deepcopy(payload)
+            if legacy:
+                other["repos"][0]["remotes"][0].pop("content_equal")
+            else:
+                other["repos"][0]["remotes"][0]["public"] = False
+            self.assertIn("sync_even", [r["type"] for r in g.diff_findings(other, other, "here", "there")])
+
+    def test_content_inspection_failure_is_local_on_each_affected_side(self):
+        remote = g.RemoteStatus("github", public=True, branch_exists=True, content_equal=True)
+        healthy = self.snapshot([self.status(remotes=[remote])])
+        for side in ("here", "there"):
+            broken = copy.deepcopy(healthy)
+            broken["repos"][0]["remotes"][0].update(content_equal=None, content_error="cannot read tree")
+            left, right = (broken, healthy) if side == "here" else (healthy, broken)
+            code, output, error = self.compare(left, right, "--json", "--view", "access")
+            self.assertEqual(code, 1, error)
+            findings = json.loads(output)["findings"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["type"], "publication_inspection_failed")
+            self.assertEqual(findings[0]["category"], "local")
+            self.assertEqual(findings[0]["side"], side)
+            self.assertEqual(findings[0]["remote"], "github")
+            self.assertEqual(findings[0]["values"]["error"], "cannot read tree")
+        both = g.diff_findings(broken, broken, "same", "same")
+        self.assertEqual({r["side"] for r in both}, {"here", "there"})
+        broken["repos"][0]["fetch_error"] = True
+        broken["repos"][0]["remotes"][0]["fetch_failed"] = True
+        findings = g.diff_findings(broken, healthy, "here", "there")
+        self.assertEqual({r["type"] for r in findings},
+                         {"publication_inspection_failed", "fetch_failed_side"})
+
     def test_different_checked_out_branches_do_not_create_remote_delta_drift(self):
         here = self.snapshot([self.status(remotes=[g.RemoteStatus("origin", branch_exists=True,
                                                                 ahead=1, is_sync=True)])])

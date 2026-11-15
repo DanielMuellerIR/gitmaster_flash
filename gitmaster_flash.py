@@ -155,7 +155,7 @@ while True:
             os.close(self.writer)
             self.control.close()
 
-__version__ = "0.34.0"
+__version__ = "0.34.1"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -290,6 +290,9 @@ TR = {
     "diff_remote_state": {
         "en": "DRIFT  {rel}: {r} is {aa} ahead/{ab} behind {a}, {ba}/{bb} {b}",
         "de": "DRIFT  {rel}: {r} {a} {aa} voraus/{ab} zurueck, {b} {ba}/{bb}"},
+    "diff_publication_inspection_failed": {
+        "en": "local  {rel}: GitHub content for {r} not inspected {m}: {e}",
+        "de": "lokal  {rel}: GitHub-Inhalt für {r} nicht geprüft {m}: {e}"},
     "diff_sync_even": {
         "en": "SYNC   {rel}: {r} {aa} ahead/{ab} behind on both machines",
         "de": "SYNC   {rel}: {r} auf beiden Rechnern {aa} voraus/{ab} zurueck"},
@@ -6734,6 +6737,7 @@ FINDING_CATEGORIES = {
     "repo_field": "drift", "branch_inventory_failed": "local",
     "branch_coverage_unknown": "local", "operation": "local", "dirty": "local",
     "fetch_failed_side": "local",
+    "publication_inspection_failed": "local",
     "worktree_inventory_failed": "local", "submodule_inventory_failed": "local",
     "submodule_inspection_failed": "local", "submodule_state": "local",
 }
@@ -6898,6 +6902,7 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
                              a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
                              b=there_at, ba=pb.get("ahead"), bb=pb.get("behind"))
             elif (not head_differs and (pa.get("sync") or pb.get("sync"))
+                  and not (publication_content_current(pa) and publication_content_current(pb))
                   and (pa.get("ahead") or pa.get("behind"))):
                 # Beide Rechner gleichauf, aber gemeinsam neben dem Sync-Remote:
                 # im reinen Zwei-Rechner-Vergleich unsichtbar, trotzdem Handlungsbedarf.
@@ -6979,6 +6984,10 @@ def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> l
             if r.get("fetch_error"):
                 fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
         for side_id, name, r in (("here", here_at, x), ("there", there_at, y)):
+            for remote in r.get("remotes", []):
+                if remote.get("content_error"):
+                    emit("diff_publication_inspection_failed", rel=rel, r=remote["name"],
+                         m=name, e=remote["content_error"], side=side_id)
             for field in ("worktrees_error", "submodules_error"):
                 if r.get(field):
                     kind = "diff_worktree_inventory_failed" if field == "worktrees_error" else "diff_submodule_inventory_failed"
