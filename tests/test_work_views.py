@@ -53,7 +53,7 @@ class WorkViewTests(unittest.TestCase):
                 self.assertEqual(g.filter_statuses([st,clean],'absent',view),[])
 
     def test_publication_is_separate_from_sync_and_changes_overall_attention(self):
-        st=self.status(remotes=[self.remote(is_sync=True),self.remote('github',public=True,ahead=3)])
+        st=self.status(remotes=[self.remote(is_sync=True),self.remote('github',public=True,ahead=3,content_equal=False)])
         self.assertTrue(st.sync_clean)
         self.assertTrue(st.publication_pending)
         self.assertFalse(st.clean_and_synced)
@@ -63,7 +63,7 @@ class WorkViewTests(unittest.TestCase):
         self.assertIn('G pending',g.selected_repo_context(st,110))
         output=io.StringIO()
         with redirect_stdout(output):g.print_list([st])
-        self.assertIn('GitHub publication pending',output.getvalue())
+        self.assertIn('GitHub ≠',output.getvalue())
 
     def test_public_fetch_failure_does_not_falsify_private_sync_state(self):
         st = self.status(error='github: auth', fetch_error=True, remote_state='error',

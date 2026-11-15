@@ -632,10 +632,11 @@ def to_svg(grid: list, title: str) -> str:
 # account for terminal cell widths, but deliberately remains a small replay tool
 # rather than a complete terminal emulator.
 
-# One confirmed list action before every capture, so the command log shows real
+# One confirmed list action before overview captures, so the command log shows real
 # work instead of "(none yet)": commit the default suggestions in the first demo
 # repo. The final Enter returns from the commit helper to the reproducible list
 # screen before capture.
+# Die kurze Veröffentlichungsansicht hat kein Befehlsprotokoll und braucht keine Aktion.
 DEMO_COMMIT_MESSAGE = b"docs: demo"
 ACTIONS = b"C\r" + DEMO_COMMIT_MESSAGE + b"\r"
 
@@ -658,12 +659,16 @@ SCREENS = [
      "gitmaster_flash — the command log with the focus on it", COLS, 20),
     ("overview.svg", "en", [], ACTIONS + b"m",
      "gitmaster_flash detail view — problem repos sorted to the top", COLS, 35),
+    ("publication.svg", "en", ["--filter", "auth"], b"",
+     "gitmaster_flash — matching GitHub content and different history", COLS, 12),
     ("compact.de.svg", "de", [], ACTIONS,
      "gitmaster_flash Kompaktansicht — alle Repos auf einen Blick", COLS, 20),
     ("command-log.de.svg", "de", [], ACTIONS + TAB,
      "gitmaster_flash — das Befehlsprotokoll mit Fokus", COLS, 20),
     ("overview.de.svg", "de", [], ACTIONS + b"m",
      "gitmaster_flash Detailansicht — problematische Repos zuerst", COLS, 35),
+    ("publication.de.svg", "de", ["--filter", "auth"], b"",
+     "gitmaster_flash — gleicher GitHub-Inhalt und abweichende Historie", COLS, 12),
 ]
 
 

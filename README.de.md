@@ -97,7 +97,7 @@ Die Marke ist der ganze Status, auf ein Feld eingedampft:
 Treffen mehrere Zustände zu, zeigt die Marke den dringendsten: zuerst `✘`, dann
 `⚠`, `↻`, `●`, `⚑`, den Abstand zum Sync-Remote, weitere Branches und schließlich `?`. Ein offener
 Git-Vorgang braucht auch bei sauberem Arbeitsbaum Aufmerksamkeit. Rot steht für
-Fehler, Konflikt, lokale Änderung, fehlende eingehende Commits oder Divergenz;
+Fehler, Konflikt, lokale Änderung, fehlende eingehende Commits oder divergente private Synchronisation;
 Gelb für Stash, ausgehende Commits oder eine fehlende Sync-Beziehung; das grüne
 `✔` bedeutet sauber und synchron. `M` oder `I` zeigt die Details hinter der
 verdichteten Marke.
@@ -115,7 +115,7 @@ vorbehalten.
 - **Remote-Namen sind immer sichtbar** — jede Zeile endet mit allen konfigurierten
   Remotes, auch wenn alles synchron ist. Reihenfolge: privater Sync-Remote zuerst,
   sonstige Remotes danach, GitHub ganz rechts.
-- **↑n / ↓n neben einem Remote** — Commits vor/zurück gegenüber genau diesem
+- **↑n / ↓n neben einem privaten Remote** — Commits vor/zurück gegenüber genau diesem
   Remote für den aktuellen Branch, auf Basis des letzten Fetch. `R` aktualisiert
   bei allen Remotes aller Repos den aktuellen Branch einzeln, ohne einen Working
   Tree zu ändern. Der Netz-Fetch schreibt keinen lokalen Ziel-Ref; anschließend
@@ -244,7 +244,7 @@ Darstellung zwischen Detail und Kompakt.
 | `incoming` | bekannte eingehende Commits auf einem Remote |
 | `outgoing` | bekannte ausgehende Commits, fehlende Remote-Branches oder nicht abgedeckte lokale Branches |
 | `access` | Fetch-/Lesefehler oder belegte unsichere Remote-Konfiguration |
-| `publish` | aktueller Branch auf GitHub zurück oder noch nicht vorhanden |
+| `publish` | gespeicherter GitHub-Inhalt abweichend oder aktueller Branch dort nicht vorhanden |
 
 Die Ansichten verwenden lokal bekannte Daten und starten keinen Fetch. `R`
 und `U` erneuern die Remote-Messung. Die Kopfzeile nennt aktive Ansicht,
@@ -259,6 +259,28 @@ Das erhält die Marke `G` und zählt als Handlungsbedarf. `I` erklärt beide
 Zustände ausführlich. Aktionskürzel ersetzen keine Prüfung oder Freigabe.
 Bei weniger als 100 Spalten werden die Tastenhinweise kürzer, unter 65 Spalten
 zeigen sie die häufigsten Aktionen und `H` für die vollständige Hilfe.
+
+GitHub-Inhalt und Historie haben getrennte Anzeigen:
+
+![Gleicher GitHub-Inhalt bei neutral dargestellter abweichender Historie](docs/publication.de.svg)
+
+`GitHub ✓` ist grün: Die committeten Dateien entsprechen dem zuletzt bekannten
+GitHub-Branch. `Historie ≠` ist grau: Die Commits unterscheiden sich, etwa nach
+einer zusammengefassten Veröffentlichung. Bei gleichem Inhalt löst dieser
+Historienunterschied weder die Veröffentlichungsmarke noch einen höheren
+Problemzähler aus und erscheint nicht unter eingehend/ausgehend. Private
+Sync-Remotes prüfen weiterhin die Commit-Abstammung. Ihre Synchronisation bleibt
+von der Veröffentlichung unabhängig.
+
+`GitHub ≠` bedeutet abweichenden gespeicherten Inhalt mit Prüfbedarf. Aus getrennten
+Historien wird dabei keine Richtung „neuer/älter“ abgeleitet. Die Info-Ansicht
+behält die Commit-Zahlen und nennt ausdrücklich ausgenommene Pfade. Nach einem
+gescheiterten Fetch oder Vergleich erscheint kein grünes GitHub-Häkchen. `R`
+oder `U` aktualisiert den Remote-Stand; uncommittete Dateien behalten ihre eigenen
+Änderungsanzeigen. Dies vergleicht Quellstände und prüft kein veröffentlichtes
+GitHub-Release.
+Bei abweichendem Inhalt und divergenten Historien zeigt `publish` das Repo;
+die gerichteten Ansichten eingehend/ausgehend raten keine Richtung.
 
 Nicht interaktiv: `gmf --list --view outgoing` oder
 `gmf --json --view publish --filter api`. JSON ergänzt `sync_clean` und
@@ -334,7 +356,7 @@ Weil gmf für die Übersicht da ist, sagt die Kopfzeile durchgehend, was
 ausgeblendet ist:
 
 ```text
- gitmaster_flash 0.33.4 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
+ gitmaster_flash 0.34.0 · ~/git · 3/61 Repos · Filter „api“ · 2 zu prüfen (+7 ausgeblendet)
 ```
 
 `3/61` ist der sichtbare Anteil, und `+7 ausgeblendet` zählt die vom Filter
@@ -835,6 +857,15 @@ dürfen ausschließlich Zeichenketten enthalten.
   unabhängig davon angezeigt; GitHub wird an seiner URL erkannt und zuletzt
   einsortiert.
 - `skip_dirs` — Ordner, die der Scan gar nicht erst betritt.
+- `publication_excludes` — ausdrücklich vom GitHub-Inhaltsvergleich ausgenommene
+  wörtliche Pfade je `owner/repo`, zum Beispiel
+  `{"example/project": ["internal/reviews", "docs/private-notes.md"]}`.
+  Verzeichnispfade schließen ihren Inhalt ein; Platzhalter haben keine besondere
+  Bedeutung. Standardmäßig ist nichts ausgenommen. Diese Regeln betreffen nur
+  den Vergleich; sie entfernen keine Dateien aus einem Push und lockern keine
+  Freigabeprüfung. JSON enthält je Remote `content_equal` (`true`, `false` oder
+  `null` bei unbekanntem Ergebnis), `content_excludes`, `content_error` und
+  `history_differs` zusätzlich zu den unveränderten Commit-Zahlen.
 - `lang` — `"en"`, `"de"` oder `null` für automatisch nach `$LANG`.
 - `compact_from` — wird diese Repo-Anzahl überschritten, startet gmf in der
   Kompaktansicht (Standard 20: bis einschließlich 20 bleibt die Detailansicht;

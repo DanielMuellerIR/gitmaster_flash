@@ -1313,7 +1313,7 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             "https://github.com/example/demo.git")
         st = collect_status(self.repo, self.root, SYNC_CONFIG)
         self.assertEqual([r.name for r in st.remotes], ["backup", "github"])
-        self.assertEqual([r.badge() for r in st.remotes], ["backup", "↑2 github"])
+        self.assertEqual([r.badge() for r in st.remotes], ["backup", "GitHub ≠ History ≠"])
         self.assertFalse(st.remotes[0].public)
         self.assertTrue(st.remotes[-1].public)
 
@@ -10353,9 +10353,11 @@ class DisplayAndIntegrationSafetyTests(unittest.TestCase):
                 ("compact.svg", "en"),
                 ("command-log.svg", "en"),
                 ("overview.svg", "en"),
+                ("publication.svg", "en"),
                 ("compact.de.svg", "de"),
                 ("command-log.de.svg", "de"),
                 ("overview.de.svg", "de"),
+                ("publication.de.svg", "de"),
             },
         )
 

@@ -92,7 +92,7 @@ The mark is the whole status, condensed into one field:
 When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
 `↻`, `●`, `⚑`, the sync distance, other branches, and finally `?`. A pending Git operation needs
 attention even when its working tree is clean. Red means an error, conflict,
-local change, missing incoming commits or divergence; yellow marks a stash,
+local change, missing incoming commits or divergent private synchronization; yellow marks a stash,
 outgoing commits or missing sync relationship; green `✔` means clean and
 synchronized. `M` or `I` reveals the details behind the condensed mark.
 
@@ -108,7 +108,7 @@ keystrokes. Expanding files and stashes stays in the detail view.
 - **remote names are always visible** — every line ends with all configured
   remotes, even when everything is synchronized. Their order is the private sync
   remote first, other remotes next, and GitHub at the far right.
-- **↑n / ↓n next to a remote** — commits ahead of / behind that exact remote for
+- **↑n / ↓n next to a private remote** — commits ahead of / behind that exact remote for
   the current branch, based on the last fetch. `R` refreshes every remote in every
   repository by fetching the current branch from each remote separately, without
   changing a working tree. The network fetch writes no local target ref; gmf then
@@ -226,7 +226,7 @@ codes remain unchanged.
 | `incoming` | known incoming commits on any remote |
 | `outgoing` | known outgoing commits, missing remote branches or uncovered local branches |
 | `access` | fetch/read failures or proven unsafe remote configuration |
-| `publish` | GitHub is missing commits from the current branch, or has no such branch |
+| `publish` | committed GitHub content differs, or the current branch is missing there |
 
 Views use locally known data and do not start a fetch. `R` and `U` renew remote
 measurements. The header names the active view, match count and hidden repos
@@ -239,6 +239,26 @@ synced, with publication to GitHub still outstanding. That receives the `G` mark
 and counts as needing attention. `I` explains both states in full. Action keys
 never replace a safety check or confirmation. Key hints become shorter below
 100 columns; below 65 columns they show common actions and `H` for full help.
+
+GitHub content and history have separate indicators:
+
+![Matching GitHub content with neutral different history](docs/publication.svg)
+
+`GitHub ✓` is green: the committed files match the last known GitHub branch.
+`History ≠` is gray: the commits differ, for example after publishing a squashed
+snapshot. With matching content, that history difference does not trigger the
+publication mark, raise the review count or enter the incoming/outgoing views.
+Private sync remotes still use commit ancestry. Their synchronization
+requirements remain independent of publication.
+
+`GitHub ≠` means the committed content differs and needs review. It does not
+infer which side is newer from unrelated histories. The info view retains the
+commit counts and lists explicitly excluded paths. A failed fetch or comparison
+never displays a green GitHub check. `R` or `U` refreshes the remote state;
+uncommitted files keep their own change indicators. This is a source comparison,
+not a check for a published GitHub Release.
+With differing content and divergent histories, `publish` shows the repository;
+the directional incoming/outgoing views do not guess a direction.
 
 Non-interactively: `gmf --list --view outgoing` or
 `gmf --json --view publish --filter api`. JSON adds `sync_clean` and
@@ -308,7 +328,7 @@ Because gmf exists to give you the overview, the header keeps saying what is
 hidden:
 
 ```text
- gitmaster_flash 0.33.4 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
+ gitmaster_flash 0.34.0 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
 ```
 
 `3/61` is how much you see, and `+7 hidden` counts the repositories the filter
@@ -784,6 +804,14 @@ preserved for correction. Folder and remote lists must contain strings only.
   for a generic installation. All remotes are displayed regardless; GitHub is
   recognized from its URL and sorted last.
 - `skip_dirs` — directories the scan does not descend into.
+- `publication_excludes` — explicit literal paths omitted from the GitHub content
+  comparison, per `owner/repo`, for example
+  `{"example/project": ["internal/reviews", "docs/private-notes.md"]}`.
+  Directory paths include their contents; wildcards have no special meaning.
+  No paths are excluded by default. These rules only affect the comparison;
+  they never remove files from a push or relax its approval checks. JSON records
+  `content_equal` (`true`, `false`, or `null` when unknown), `content_excludes`,
+  `content_error` and `history_differs` per remote, alongside the raw commit counts.
 - `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
 - `compact_from` — when the repository count exceeds this number, gmf starts in
   the compact view (default 20: up to 20 use the detail view; `M` switches at any

@@ -155,7 +155,7 @@ while True:
             os.close(self.writer)
             self.control.close()
 
-__version__ = "0.33.4"
+__version__ = "0.34.0"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -185,6 +185,9 @@ DEFAULT_CONFIG = {
     # Woran der Sync-Remote erkannt wird: Remote-Name ODER Host in der URL.
     "sync_remote_names": ["origin"],
     "sync_remote_hosts": [],
+    # Bewusst private Dateien, je GitHub-Repository ("owner/repo"). Nur der
+    # Inhaltsvergleich ignoriert diese Pfade; Push-Freigaben bleiben unverändert.
+    "publication_excludes": {},
     # Ordner, in die der Repo-Scan gar nicht erst hineinschaut (Tempo).
     "skip_dirs": ["node_modules", "Library", ".Trash", "venv", ".venv", "__pycache__"],
     # UI-Sprache: "en", "de" oder null = automatisch aus $LANG (Fallback en).
@@ -415,6 +418,14 @@ TR = {
     "sync_clean": {"en": "sync clean", "de": "Sync sauber"},
     "sync_open": {"en": "sync needs attention", "de": "Sync prüfen"},
     "publication_pending": {"en": "GitHub publication pending", "de": "GitHub-Veröffentlichung offen"},
+    "github_current": {"en": "GitHub ✓", "de": "GitHub ✓"},
+    "github_different": {"en": "GitHub ≠", "de": "GitHub ≠"},
+    "history_different": {"en": "History ≠", "de": "Historie ≠"},
+    "selected_context_short": {"en": "{rel} [{branch}] · {remotes} · {actions}", "de": "{rel} [{branch}] · {remotes} · {actions}"},
+    "info_publication_excludes": {"en": "Excluded from content comparison", "de": "Vom Inhaltsvergleich ausgenommen"},
+    "info_content_error": {"en": "Content comparison failed", "de": "Inhaltsvergleich fehlgeschlagen"},
+    "publication_excludes_invalid": {"en": "expected owner/repo keys and relative literal paths", "de": "owner/repo-Schlüssel und relative wörtliche Pfade erwartet"},
+    "publication_target_ambiguous": {"en": "GitHub fetch target is not unique", "de": "GitHub-Fetch-Ziel ist nicht eindeutig"},
     "context_sync_clean": {"en": "Sync ✔", "de": "Sync ✔"},
     "context_sync_open": {"en": "Sync !", "de": "Sync !"},
     "context_publish": {"en": "G pending", "de": "G offen"},
@@ -1244,6 +1255,9 @@ def load_config() -> dict:
                 if any(not isinstance(item, str) for item in value):
                     warn(f'entry "{key}": {t("config_string_list")}')
                     continue
+            elif key == "publication_excludes" and not valid_publication_excludes(value):
+                warn(f'entry "publication_excludes": {t("publication_excludes_invalid")}')
+                continue
         cfg[key] = value
     # App-Tasten intern immer groß (Tastendruck wird ebenfalls großgezogen).
     cfg["apps"] = {str(k).upper(): v for k, v in cfg["apps"].items()}
@@ -1287,7 +1301,7 @@ EDITABLE_SETTINGS = (
     Setting("skip_dirs", "names"),
 )
 
-READ_ONLY_SETTINGS = ("apps", "sync_remote_names", "sync_remote_hosts")
+READ_ONLY_SETTINGS = ("apps", "sync_remote_names", "sync_remote_hosts", "publication_excludes")
 
 _NUMBER_RE = re.compile(r"[0-9]+\Z")
 
@@ -1462,7 +1476,8 @@ class RepoStatus:
         sync = next((remote for remote in self.remotes if remote.is_sync), None)
         if sync is not None:
             return (local_ok and sync.branch_exists and not sync.fetch_failed
-                    and sync.ahead == 0 and sync.behind == 0)
+                    and (publication_content_current(sync)
+                         or (sync.ahead == 0 and sync.behind == 0)))
         return (local_ok and not self.error and self.ahead == 0
                 and self.behind == 0 and self.remote_state == "ok")
 
@@ -1482,7 +1497,8 @@ class RepoStatus:
             return 0
         if self.operation or self.dirty or self.stashes or self.submodule_review_count:
             return 1
-        if self.ahead or self.behind or self.branch_review_count or self.publication_pending:
+        if (sync_action_delta(self, "ahead") or sync_action_delta(self, "behind")
+                or self.branch_review_count or self.publication_pending):
             return 2
         if self.remote_state != "ok":
             return 3
@@ -1562,23 +1578,20 @@ class RemoteStatus:
     fetch_error_long: str = ""
     fetch_error_detail: str = ""
     fetched_at: str = ""
+    content_equal: bool | None = None
+    content_excludes: list[str] = field(default_factory=list)
+    content_error: str = ""
+
+    @property
+    def history_differs(self) -> bool:
+        return self.public and self.branch_exists and bool(self.ahead or self.behind)
 
     @property
     def transfer_safe(self) -> bool:
         return not (self.mixed_public or self.target_mismatch or self.multiple_pushurls)
 
     def badge(self) -> str:
-        arrows = ""
-        if self.ahead:
-            arrows += f"↑{self.ahead}"
-        if self.behind:
-            arrows += f"↓{self.behind}"
-        if not self.branch_exists:
-            arrows = "?"
-        if self.fetch_failed:
-            # ✘ heißt: der Stand daneben ist der letzte bekannte, nicht der aktuelle.
-            arrows = f"✘{arrows}" if arrows else "✘"
-        return f"{arrows} {self.name}" if arrows else self.name
+        return " ".join(text for text, _ in remote_badge_parts(self))
 
 
 @dataclass
@@ -4442,10 +4455,48 @@ def remote_status_from_config(remote: RemoteConfig, sync_remote: str | None,
     return state
 
 
+def valid_publication_excludes(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    normalized = set()
+    for target, paths in value.items():
+        if (not isinstance(target, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target)
+                or target.casefold() in normalized
+                or not isinstance(paths, list)
+                or any(not valid_relative_git_path(path) for path in paths)):
+            return False
+        normalized.add(target.casefold())
+    return True
+
+
+def compare_publication_content(repo: Path, head_oid: str, ref: str,
+                                remote: RemoteConfig, cfg: dict) -> tuple[bool, list[str]]:
+    rules = cfg.get("publication_excludes", {})
+    if not valid_publication_excludes(rules):
+        raise GitReadError("publication_excludes: " + t("publication_excludes_invalid"))
+    if len(remote.fetch_targets) != 1 or not remote.fetch_targets[0].is_github:
+        raise GitReadError(t("publication_target_ambiguous"))
+    target = remote.fetch_targets[0].repo_id.lstrip("/").casefold()
+    paths = next((list(paths) for key, paths in rules.items()
+                  if key.casefold() == target), [])
+    # Literale Ausschlüsse statt vom Repo steuerbarer Ignore-/Attributregeln.
+    # Auch Dateimodi und Submodul-OIDs zählen als Inhalt; Textconv läuft nie.
+    result = run_git(
+        repo, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+        "--ignore-submodules=none", head_oid, ref, "--", ".",
+        *(f":(top,exclude,literal){path}" for path in paths),
+        timeout=cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+    if result.returncode not in (0, 1):
+        raise GitReadError("git diff failed (exit %d)" % result.returncode)
+    return result.returncode == 0, paths
+
+
 def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
                             cfg: dict,
                             configs: dict[str, RemoteConfig] | None = None,
-                            fetch_failures: dict[str, tuple[str, str, str]] | None = None
+                            fetch_failures: dict[str, tuple[str, str, str]] | None = None,
+                            head_oid: str | None = ""
                             ) -> list[RemoteStatus]:
     """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt.
 
@@ -4471,6 +4522,15 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
             if state.branch_exists:
                 state.ahead, state.behind = branch_delta(
                     repo, ref, cfg["git_timeout"])
+                if state.public:
+                    if head_oid == "":
+                        head_oid = current_head(repo, cfg["git_timeout"])
+                    if head_oid:
+                        try:
+                            state.content_equal, state.content_excludes = compare_publication_content(
+                                repo, head_oid, ref, remote, cfg)
+                        except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+                            state.content_error = str(exc)
         states.append(state)
     # Sync-Remote zuerst; GitHub unabhängig vom tatsächlichen Namen ganz rechts.
     states.sort(key=lambda r: (r.public, not r.is_sync, r.name.lower()))
@@ -4985,8 +5045,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
                   u=st.untracked, c=st.conflicts))
     head_rows.append((t("info_worktree"), worktree))
     head_rows.append((t("info_sync_state"), t("sync_clean") if st.sync_clean else t("sync_open")))
-    head_rows.append((t("info_publication"), t("publication_pending") if st.publication_pending
-                      else t("none_label")))
+    publications = [r.badge() for r in st.remotes if r.public]
+    head_rows.append((t("info_publication"), " / ".join(publications) or t("none_label")))
     if st.operation:
         head_rows.append((t("info_operation"), operation_label(st.operation)))
     head_rows.append((t("info_stashes"), str(len(st.stashes))))
@@ -5067,6 +5127,11 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             value = (t("info_delta", a=state.ahead, b=state.behind)
                      if state.branch_exists else t("info_branch_missing_value"))
             rows.append((t("info_branch_label", b=branch), value))
+        if state and state.content_excludes:
+            rows.append((t("info_publication_excludes"), ", ".join(
+                display_git_path(path) for path in state.content_excludes)))
+        if state and state.content_error:
+            rows.append((t("info_content_error"), terminal_text(state.content_error)))
         if state and state.fetch_failed:
             rows.append((t("info_last_error"), terminal_text(
                 state.fetch_error_long
@@ -5928,7 +5993,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
         scan_refs = read_ref_snapshot(repo, t_)
         st.remotes = collect_remote_statuses(
             repo, st.branch, st.remote, cfg, configs,
-            fetch_failures=fetch_failures)
+            fetch_failures=fetch_failures, head_oid=st.head_oid)
         for remote in st.remotes:
             remote.fetched_at = fetch_times.get(remote.name, "")
         try:
@@ -5988,6 +6053,10 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
                 st.branches_scanned = False
                 st.branches_error = st.error = st.error_long = str(exc)
                 st.remote_state = "error"
+                for remote in st.remotes:
+                    remote.content_equal = None
+                    if remote.public:
+                        remote.content_error = str(exc)
                 # Dies ist ein lokaler Messfehler, auch wenn zusätzlich ein
                 # Remote-Fetch scheiterte. Der Vergleich darf ihn nicht ausblenden.
                 st.fetch_error = False
@@ -6239,6 +6308,10 @@ def status_dict(st: RepoStatus) -> dict:
              "mixed_public": r.mixed_public,
              "sync": r.is_sync,
              "branch_exists": r.branch_exists, "ahead": r.ahead, "behind": r.behind,
+             "content_equal": r.content_equal,
+             "content_excludes": [json_text(path) for path in r.content_excludes],
+             "content_error": json_text(r.content_error),
+             "history_differs": r.history_differs,
              "fetch_fingerprint": r.fetch_fingerprint,
              "fetch_fingerprints": r.fetch_fingerprints,
              "push_fingerprints": r.push_fingerprints,
@@ -6554,6 +6627,17 @@ def _valid_remote_payload(payload) -> bool:
                 return False
             remote_names.add(remote["name"])
             if not valid_timestamp(remote.get("fetched_at", "")):
+                return False
+            if ("content_equal" in remote and remote["content_equal"] is not None
+                    and type(remote["content_equal"]) is not bool):
+                return False
+            if "history_differs" in remote and type(remote["history_differs"]) is not bool:
+                return False
+            if "content_error" in remote and not isinstance(remote["content_error"], str):
+                return False
+            if "content_excludes" in remote and (
+                    not isinstance(remote["content_excludes"], list)
+                    or any(not isinstance(path, str) for path in remote["content_excludes"])):
                 return False
             for field_name in ("ahead", "behind"):
                 if field_name in remote and (type(remote[field_name]) is not int or remote[field_name] < 0):
@@ -6987,13 +7071,38 @@ def status_value(status, name: str, default=None):
 
 
 def remote_access_problem(remote, named_branch: bool) -> bool:
-    return bool(status_value(remote, "fetch_failed") or status_value(remote, "mixed_public")
+    return bool(status_value(remote, "content_error") or status_value(remote, "fetch_failed") or status_value(remote, "mixed_public")
                 or status_value(remote, "target_mismatch") or status_value(remote, "multiple_pushurls")
                 or (status_value(remote, "fetch_refspec_fingerprint") and (
                     not status_value(remote, "fetch_refspecs_safe", True)
                     or not status_value(remote, "fetch_url_safe", True)
                     or not status_value(remote, "push_url_safe", True)
                     or (named_branch and not status_value(remote, "branch_mapping_safe", True)))))
+
+
+def publication_content_current(remote) -> bool:
+    return (bool(status_value(remote, "public"))
+            and bool(status_value(remote, "branch_exists"))
+            and status_value(remote, "content_equal") is True
+            and not remote_access_problem(remote, True))
+
+
+def remote_action_delta(remote, direction: str) -> int:
+    if status_value(remote, "public"):
+        divergent_content = (status_value(remote, "content_equal") is not None
+                             and status_value(remote, "ahead", 0)
+                             and status_value(remote, "behind", 0))
+        if publication_content_current(remote) or divergent_content:
+            return 0
+    return status_value(remote, direction, 0)
+
+
+def sync_action_delta(status, direction: str) -> int:
+    sync = next((remote for remote in status_value(status, "remotes", [])
+                 if status_value(remote, "sync", status_value(remote, "is_sync", False))), None)
+    if sync is not None:
+        return remote_action_delta(sync, direction)
+    return status_value(status, direction, 0)
 
 
 def submodule_needs_attention(module) -> bool:
@@ -7015,11 +7124,11 @@ def repo_matches_view(status, view: str) -> bool:
             "modified", "deleted", "untracked", "conflicts", "stashes", "operation"))
             or any(submodule_needs_attention(module) for module in status_value(status, "submodules", [])))
     if view == "incoming":
-        return bool(status_value(status, "behind", 0) or any(
-            status_value(remote, "behind", 0) for remote in remotes))
+        return bool(sync_action_delta(status, "behind") or any(
+            remote_action_delta(remote, "behind") for remote in remotes))
     if view == "outgoing":
-        return bool(status_value(status, "ahead", 0) or any(
-            status_value(remote, "ahead", 0)
+        return bool(sync_action_delta(status, "ahead") or any(
+            remote_action_delta(remote, "ahead")
             or (has_head and not status_value(remote, "branch_exists", False))
             for remote in remotes) or any(
                 status_value(branch, "coverage") == "uncovered"
@@ -7031,8 +7140,10 @@ def repo_matches_view(status, view: str) -> bool:
             remote_access_problem(remote, named_branch)
             for remote in remotes))
     if view == "publish":
-        return named_branch and any(status_value(remote, "public", False) and (
-            status_value(remote, "ahead", 0) > 0
+        return named_branch and any(status_value(remote, "public", False)
+            and not publication_content_current(remote) and (
+            status_value(remote, "content_equal") is False
+            or status_value(remote, "ahead", 0) > 0
             or (has_head and not status_value(remote, "branch_exists", False)))
             for remote in remotes)
     raise ValueError("unknown status view: " + view)
@@ -7316,13 +7427,14 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
         return "⚑", C_YELLOW
     if st.submodule_review_count:
         return f"O{st.submodule_review_count}", C_YELLOW
-    if st.ahead and st.behind:
+    ahead, behind = sync_action_delta(st, "ahead"), sync_action_delta(st, "behind")
+    if ahead and behind:
         # Divergenz bekommt EIN Zeichen: die genauen Zahlen stehen im Detail und
         # würden die Markenspalte für alle anderen unnötig verbreitern.
         return "⇅", C_RED
-    if st.ahead or st.behind:
-        return (f"↑{st.ahead}" if st.ahead else f"↓{st.behind}"), (
-            C_RED if st.behind else C_YELLOW)
+    if ahead or behind:
+        return (f"↑{ahead}" if ahead else f"↓{behind}"), (
+            C_RED if behind else C_YELLOW)
     if st.branch_review_count:
         return f"B{st.branch_review_count}", C_YELLOW
     if st.publication_pending:
@@ -7418,10 +7530,12 @@ def color_enabled(policy: str = "auto") -> bool:
 def print_list(statuses: list[RepoStatus], root: Path | None = None,
                query: str = "", hidden: int = 0, view: str = "all",
                color: str = "auto") -> None:
-    green, red, yellow, cyan, reset = (
-        "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
+    green, red, yellow, cyan, gray, reset = (
+        "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[90m", "\033[0m")
     if not color_enabled(color):
-        green = red = yellow = cyan = reset = ""
+        green = red = yellow = cyan = gray = reset = ""
+    colors = {C_GREEN: green, C_RED: red, C_YELLOW: yellow,
+              C_CYAN: cyan, C_HISTORY: gray, C_DIM: ""}
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
     # umgeleiteten Datei, die man spaeter gegen die eines anderen Macs diffed —
     # ohne Version haelt man einen Versionsunterschied fuer einen Repo-Unterschied.
@@ -7440,10 +7554,9 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
-            color = red if remote.fetch_failed else (
-                cyan if remote.public else (
-                    red if remote.behind else yellow if remote.ahead else green))
-            remote_bits.append(f"{color}{terminal_text(remote.badge())}{reset}")
+            remote_bits.append(" ".join(
+                f"{colors[pair]}{terminal_text(text)}{reset}"
+                for text, pair in remote_badge_parts(remote)))
         badge_txt = ("  " + "  ".join(remote_bits)) if remote_bits else ""
         if st.clean_and_synced:
             print(f"{green}✔ {display_git_path(st.rel)}{reset}{badge_txt}")
@@ -7459,8 +7572,6 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             bits.append(f"{yellow}{t('operation_active', op=operation_label(st.operation))}{reset}")
         if st.branches_error or st.branch_review_count:
             bits.append(f"{yellow}{branch_inventory_summary(st)}{reset}")
-        if st.publication_pending:
-            bits.append(f"{cyan}{t('publication_pending')}{reset}")
         if st.submodule_review_count:
             bits.append(f"{yellow}{t('modules_review', n=st.submodule_review_count)}{reset}")
         if st.modified:
@@ -7494,6 +7605,30 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
 # Farb-Paar-Nummern. C_SEL ist kein eigener Farbton, sondern die Notlösung für
 # Rot in der markierten Zeile — siehe selected_pair().
 C_GREEN, C_RED, C_YELLOW, C_DIM, C_SEL, C_CYAN, C_ASK, C_ASK_KEY = 1, 2, 3, 4, 5, 6, 7, 8
+C_HISTORY = 9
+
+
+def remote_badge_parts(remote: RemoteStatus) -> list[tuple[str, int]]:
+    if (remote.public and remote.content_equal is not None
+            and not remote_access_problem(remote, True)):
+        label = t("github_current" if remote.content_equal else "github_different")
+        if remote.name != "github":
+            label = f"{remote.name}: {label}"
+        parts = [(label, C_GREEN if remote.content_equal else C_CYAN)]
+        if remote.history_differs:
+            parts.append((t("history_different"), C_HISTORY))
+        return parts
+    arrows = (f"↑{remote.ahead}" if remote.ahead else "")
+    arrows += f"↓{remote.behind}" if remote.behind else ""
+    if not remote.branch_exists:
+        arrows = "?"
+    if remote.fetch_failed or remote.content_error:
+        arrows = "✘" + arrows
+    text = f"{arrows} {remote.name}" if arrows else remote.name
+    pair = (C_RED if remote.fetch_failed or remote.content_error else C_CYAN if remote.public
+            else C_RED if remote.behind else C_YELLOW if remote.ahead
+            else C_GREEN if remote.is_sync else C_DIM)
+    return [(text, pair)]
 
 # Farbe je Anzeigecode aus parse_porcelain(). Untracked ist gelb: eine Datei,
 # die Git noch gar nicht kennt, ist eine Entscheidung und kein Schaden.
@@ -7704,24 +7839,45 @@ def safe_addstr(win, y, x, text, attr=0):
         pass
 
 
-def selected_repo_context(st: RepoStatus, width: int) -> str:
+def selected_repo_context_parts(st: RepoStatus, width: int) -> list[tuple[str, int]]:
     state = t("context_sync_clean") if st.sync_clean else t("context_sync_open")
     if st.publication_pending:
         state += " · " + t("context_publish")
     actions = ["I"]
     if st.dirty and not (st.operation or st.conflicts):
         actions.append("C")
-    if st.ahead and not st.behind and not st.dirty and not st.operation and st.remote_state == "ok":
+    if (st.ahead and not st.behind and not st.dirty and not st.operation
+            and st.remote_state == "ok" and not any(r.public and r.is_sync for r in st.remotes)):
         actions.append("P")
     if not st.dirty and not st.operation and any(
             r.public and r.ahead and not r.behind and r.branch_exists
-            and not r.fetch_failed and r.transfer_safe for r in st.remotes):
+            and not r.fetch_failed and r.transfer_safe and not publication_content_current(r)
+            for r in st.remotes):
         actions.append("G")
-    name = ellipsize(display_git_path(st.rel), max(8, min(20, width // 5)))
-    branch = ellipsize(terminal_text(st.branch), max(8, min(20, width // 5)))
-    return t("selected_context", rel=name, branch=branch, state=state,
-             remotes=" / ".join(r.badge() for r in st.remotes) or t("none_label"),
-             actions="/".join(actions))
+    short = width < 80
+    limit = 8 if short else max(8, min(20, width // 5))
+    name = ellipsize(display_git_path(st.rel), limit)
+    branch = ellipsize(terminal_text(st.branch), limit)
+    # Git-Namen sind bereits sichtbar escaped und können kein NUL enthalten.
+    before, _, after = t("selected_context_short" if short else "selected_context",
+                         rel=name, branch=branch, state=state,
+                         remotes="\0", actions="/".join(actions)).partition("\0")
+    parts = [(before, C_CYAN)]
+    for index, remote in enumerate(st.remotes):
+        if index:
+            parts.append((" / ", C_CYAN))
+        for part_index, (text, pair) in enumerate(remote_badge_parts(remote)):
+            if part_index:
+                parts.append((" ", C_CYAN))
+            parts.append((text, pair))
+    if not st.remotes:
+        parts.append((t("none_label"), C_CYAN))
+    parts.append((after, C_CYAN))
+    return parts
+
+
+def selected_repo_context(st: RepoStatus, width: int) -> str:
+    return "".join(text for text, _ in selected_repo_context_parts(st, width))
 
 
 class TUI:
@@ -7971,7 +8127,8 @@ class TUI:
             # das ✘ trägt (README verspricht das ausdrücklich).
             part(t("error_prefix", e=st.error), C_RED)
         elif st.clean_and_synced:
-            part(t("clean_synced"), C_GREEN)
+            if not any(publication_content_current(remote) for remote in st.remotes):
+                part(t("clean_synced"), C_GREEN)
         else:
             if repo_matches_view(st, "access") and not st.branches_error:
                 part(inspection_summary(st), C_RED)
@@ -7981,8 +8138,6 @@ class TUI:
                 part(t("operation_active", op=operation_label(st.operation)), C_YELLOW)
             if st.branches_error or st.branch_review_count:
                 part(branch_inventory_summary(st), C_RED if st.branches_error else C_YELLOW)
-            if st.publication_pending:
-                part(t("publication_pending"), C_CYAN)
             if st.submodule_review_count:
                 part(t("modules_review", n=st.submodule_review_count), C_YELLOW)
             if st.modified:
@@ -8003,20 +8158,8 @@ class TUI:
         # rechts bleibt. Auch synchrone Remotes werden immer angezeigt.
         part(f"[{st.branch}]", C_DIM)
         for remote in st.remotes:
-            if remote.fetch_failed:
-                # Fetch scheiterte: rot vor allem anderen, damit man es nicht übersieht.
-                pair = C_RED
-            elif remote.public:
-                pair = C_CYAN
-            elif remote.behind:
-                pair = C_RED
-            elif remote.ahead:
-                pair = C_YELLOW
-            elif remote.is_sync:
-                pair = C_GREEN
-            else:
-                pair = C_DIM
-            part(remote.badge(), pair)
+            for text, pair in remote_badge_parts(remote):
+                part(text, pair)
 
     def draw(self):
         self.scr.erase()
@@ -8097,8 +8240,10 @@ class TUI:
         if log_h:
             self.draw_log(1 + body_h, min(log_h, available - body_h), w)
         if has_context and self.current():
-            safe_addstr(self.scr, h - 5, 1, selected_repo_context(self.current(), w - 2),
-                        curses.color_pair(C_CYAN))
+            context_x = 1
+            for text, pair in selected_repo_context_parts(self.current(), w - 2):
+                safe_addstr(self.scr, h - 5, context_x, text, color_attr(pair, False))
+                context_x += cell_width(terminal_text(text))
 
         note = self.message or (measurement_summary(self.current()) if self.current() else "")
         safe_addstr(self.scr, h - 4, 1, note, curses.color_pair(C_YELLOW))
@@ -10159,6 +10304,7 @@ def init_colors():
     curses.init_pair(C_RED, curses.COLOR_RED, -1)
     curses.init_pair(C_YELLOW, curses.COLOR_YELLOW, -1)
     curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_HISTORY, 8 if getattr(curses, "COLORS", 8) >= 16 else curses.COLOR_WHITE, -1)
     curses.init_pair(C_CYAN, curses.COLOR_CYAN, -1)
     # Rot in der markierten Zeile: heller Text AUF Rot statt Rot als Hintergrund
     # mit schwarzem Text (siehe selected_pair).
@@ -10204,10 +10350,10 @@ def _demo_env() -> dict[str, str]:
     return env
 
 
-def _dgit(repo: Path, *args: str) -> None:
+def _dgit(repo: Path, *args: str) -> str:
     """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen)."""
-    subprocess.run(["git", "-C", str(repo), *args], check=True,
-                   capture_output=True, text=True, env=_demo_env())
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True, env=_demo_env()).stdout.strip()
 
 
 def _dgit_conflict(repo: Path, *args: str) -> None:
@@ -10435,14 +10581,16 @@ def build_demo_sandbox(base: Path) -> Path:
     _demo_extra_remote(root, repo, "backup")
     _demo_behind(repo, 2)
 
-    # 17) fremder Upstream (github) UND lokale Änderung
+    # 17) gleiche öffentliche Dateien bei getrennter Veröffentlichungshistorie
     repo, _ = _demo_repo(root, "auth-service")
     _demo_extra_remote(root, repo, "github",
                        url="https://github.com/example/auth-service.git")
     _demo_ahead(repo, 2)
     _dgit(repo, "push", "-q", "origin", "main")
+    tree = _dgit(repo, "rev-parse", "HEAD^{tree}")
+    published = _dgit(repo, "commit-tree", tree, "-m", "Publish current snapshot")
+    _dgit(repo, "update-ref", "refs/remotes/github/main", published)
     _dgit(repo, "branch", "--set-upstream-to=github/main", "main")
-    (repo / "token.py").write_text("SECRET = None\n")
 
     # 18) zwei Stashes, Baum sonst sauber
     repo, _ = _demo_repo(root, "recipe-app")
