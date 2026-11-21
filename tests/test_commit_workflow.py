@@ -249,16 +249,26 @@ class CommitSafetyTests(unittest.TestCase):
 
         with (
             mock.patch.object(Path, "unlink", new=unlink),
-            mock.patch.object(gmf_module, "_release_owned_git_lock", wraps=gmf_module._release_owned_git_lock) as release,
+            mock.patch.object(
+                gmf_module, "_release_owned_git_lock", wraps=gmf_module._release_owned_git_lock
+            ) as release,
             self.assertRaisesRegex(OSError, "fixture branch lock cleanup failure"),
             gmf_module._commit_index_guard(self.repo, 10) as held,
         ):
             gmf_module.adopt_commit_in_real_index(
-                self.repo, ["include.txt"], committed, "refs/heads/main", signature, 10,
+                self.repo,
+                ["include.txt"],
+                committed,
+                "refs/heads/main",
+                signature,
+                10,
                 _held_guards=held,
             )
 
-        self.assertEqual([call.args[0].name for call in release.call_args_list], ["main.lock", "HEAD.lock", "index.lock"])
+        self.assertEqual(
+            [call.args[0].name for call in release.call_args_list],
+            ["main.lock", "HEAD.lock", "index.lock"],
+        )
         self.assertEqual(held, [])
         self.assertFalse((self.repo / ".git" / "HEAD.lock").exists())
 

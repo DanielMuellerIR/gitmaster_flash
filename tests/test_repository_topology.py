@@ -129,7 +129,7 @@ class WorktreeTests(TopologyFixture):
         with redirect_stdout(output):
             result = g.main([str(self.repo), "--json", "--lang", "en"])
         self.assertIn(result, (0, 1))
-        status, = json.loads(output.getvalue())["repos"]
+        (status,) = json.loads(output.getvalue())["repos"]
         self.assertEqual(status["error"], "")
         self.assertIn("cannot resolve topology path", status["worktrees_error"])
 

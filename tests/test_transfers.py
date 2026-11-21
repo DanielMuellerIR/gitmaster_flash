@@ -299,7 +299,11 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             mock.patch.object(gmf_module, "fetch_remote_block_reason", return_value=None),
             mock.patch.object(gmf_module, "read_remote_config_or_none", return_value=remote),
             mock.patch.object(gmf_module, "run_git", side_effect=read),
-            mock.patch.object(gmf_module, "run_git_logged", return_value=subprocess.CompletedProcess([], 0, "", "")) as logged,
+            mock.patch.object(
+                gmf_module,
+                "run_git_logged",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as logged,
         ):
             result = gmf_module.fetch_remote_safely(self.repo, remote, "main", 10)
 

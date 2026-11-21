@@ -100,7 +100,10 @@ class WorkViewTests(unittest.TestCase):
 
     def test_compact_context_hides_action_for_multiple_public_remotes(self):
         st = self.status(remotes=[self.remote("github", public=True, ahead=2)])
-        context = lambda: "".join(text for text, _ in g.selected_repo_context_parts(st, 110))
+
+        def context() -> str:
+            return "".join(text for text, _ in g.selected_repo_context_parts(st, 110))
+
         self.assertIn("I/G", context())
         st.remotes.append(self.remote("mirror", public=True))
         self.assertNotIn("I/G", context())

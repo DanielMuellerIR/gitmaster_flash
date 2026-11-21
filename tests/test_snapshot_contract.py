@@ -94,7 +94,9 @@ class SnapshotContractTests(unittest.TestCase):
         status = self.status(
             branches_scanned=True,
             branches=[
-                g.BranchInfo("main", is_head=True, oid="a" * 40, coverage="covered", uncovered_commits=0),
+                g.BranchInfo(
+                    "main", is_head=True, oid="a" * 40, coverage="covered", uncovered_commits=0
+                ),
                 g.BranchInfo("topic", oid="b" * 40, coverage="unknown"),
             ],
         )

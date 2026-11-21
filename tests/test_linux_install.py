@@ -90,7 +90,9 @@ raise SystemExit(int(os.environ.get('GMF_TEST_RC', '0')))
         rc.write_bytes(original)
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-c", 'source "$1"; gmf', "test", str(rc)],
-            capture_output=True, timeout=10, check=True,
+            capture_output=True,
+            timeout=10,
+            check=True,
         )
         self.assertEqual(result.stdout, b"custom")
         with self.assertRaises(ValueError):
@@ -108,7 +110,10 @@ raise SystemExit(int(os.environ.get('GMF_TEST_RC', '0')))
                 command = installer.activation_command(shell, wrapper)
                 self.assertNotIn("\n", command)
                 result = subprocess.run(
-                    [shell, "-c", command], capture_output=True, timeout=10, check=True,
+                    [shell, "-c", command],
+                    capture_output=True,
+                    timeout=10,
+                    check=True,
                 )
                 self.assertEqual(result.stdout, b"activated")
 
@@ -119,7 +124,8 @@ raise SystemExit(int(os.environ.get('GMF_TEST_RC', '0')))
         result = subprocess.run(
             ["zsh", "-efc", 'source "$1"; gmf', "test", str(self.repo / "gmf.zsh")],
             env=dict(os.environ, TMPDIR=str(temporary), GMF_TEST_RC="27"),
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         self.assertEqual(result.returncode, 27, result.stderr)
         self.assertEqual(list(temporary.iterdir()), [])
