@@ -455,23 +455,26 @@ class DiffModeTests(DiffModeFixture):
         ui.statuses = [g.RepoStatus(self.repo, "project")]
         child = Mock()
         child.wait.side_effect = subprocess.TimeoutExpired("editor", 0.2)
+        diagnostics = Mock(spec=g.AppDiagnostics)
+        diagnostics.fileno.return_value = 37
         with (
             patch.object(g.sys, "platform", "linux"),
             patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-1"}, clear=True),
+            patch.object(g, "AppDiagnostics", return_value=diagnostics),
             patch.object(g.subprocess, "Popen", return_value=child) as spawn,
             patch.object(g.threading, "Thread"),
         ):
             ui.action_open_app("E")
         self.assertEqual(spawn.call_args.args[0], [str(app), str(self.repo)])
         self.assertTrue(spawn.call_args.kwargs["start_new_session"])
-        spawn.call_args.kwargs["stderr"].close()
+        self.assertEqual(spawn.call_args.kwargs["stderr"], 37)
         self.assertEqual(ui.message, g.t("app_starting", name="Editor", rel="project"))
         child.wait.side_effect = None
         child.wait.return_value = 2
-        child.stderr.read.return_value = b"failure"
         with (
             patch.object(g.sys, "platform", "linux"),
             patch.dict(os.environ, {"DISPLAY": ":1"}, clear=True),
+            patch.object(g, "AppDiagnostics", return_value=diagnostics),
             patch.object(g.subprocess, "Popen", return_value=child),
             patch.object(ui, "_app_launch_result", return_value=(2, "failure")),
         ):

@@ -9917,7 +9917,7 @@ while True:
             peer.close()
         threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
 
-    def fileno(self):
+    def fileno(self) -> int:
         return self.writer
 
     def read_tail(self):
@@ -10970,7 +10970,7 @@ class TUI:
                     [path, str(st.path)],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
-                    stderr=diagnostics,
+                    stderr=diagnostics.fileno(),
                     start_new_session=True,
                 )
                 try:
