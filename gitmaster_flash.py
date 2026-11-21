@@ -5216,6 +5216,11 @@ def render_info_blocks(view: InfoView, specs: list, width: int) -> None:
         view.blocks.append((kind, name, first, len(view.lines) - 1))
 
 
+WORKTREE_STATUS_ARGS = (
+    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+)
+
+
 def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
                      timeout: int = 10, *,
                      expected_public: bool | None = None) -> TransferCheck:
@@ -5266,10 +5271,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
             env=raw_env).stdout.strip()
         index_oid = _required_git(
             repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
-        dirty = _required_git(
-            repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-            timeout=timeout,
-            env=raw_env)
+        dirty = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout, env=raw_env)
     except (GitReadError, ValueError, RuntimeError, OSError):
         return TransferCheck("inspect-failed")
     worktree_fingerprint = hashlib.sha256(
@@ -5332,9 +5334,7 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
             env=raw_env).stdout.strip()
         final_index = _required_git(
             repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
-        final_dirty = _required_git(
-            repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-            timeout=timeout, env=raw_env)
+        final_dirty = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout, env=raw_env)
     except GitReadError:
         return TransferCheck("inspect-failed", ahead, behind, ref)
     if (final_ref != approved_ref or final_head != head
@@ -5899,8 +5899,7 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
 
         # Arbeitsverzeichnis-Zustand
         try:
-            r = _required_git(repo, "status", "--porcelain=v1", "-z",
-                              "--untracked-files=all", "--ignore-submodules=none", timeout=t_)
+            r = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=t_)
         except GitReadError:
             # Git lehnt einen Symlink am Modulpfad schon beim Eltern-Status ab.
             # Die Gitlinks erklären den Fehler, ohne dem fremden Pfad zu folgen.
@@ -10730,7 +10729,7 @@ def main(argv: list[str] | None = None) -> int:
         return print_stashes(Path(args.root), as_json=args.json)
     if args.file_diff is not None:
         if (args.compare or args.diff or args.demo or args.fetch or args.fetch_remote is not None
-                or args.list or args.filter or args.view != "all" or args.cd_file or args.color != "auto"):
+                or args.list or args.filter or args.view != "all" or args.color != "auto"):
             ap.error(t("cli_file_diff_options"))
         return print_file_diff(args.root, args.file_diff, args.diff_mode or "combined", as_json=args.json)
     if args.diff_mode is not None:

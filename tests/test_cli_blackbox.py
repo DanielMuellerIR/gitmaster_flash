@@ -409,6 +409,76 @@ class InstallScriptTests(unittest.TestCase):
             ["-m unittest discover -s tests -q"],
         )
 
+    def test_read_only_modes_use_the_installed_wrapper(self):
+        installed = self._install()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        repo = self.home / "project"
+        repo.mkdir()
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(HOME=str(self.home), ZDOTDIR=str(self.home),
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+        def git_run(*args):
+            subprocess.run(["git", "-C", str(repo), *args], env=env,
+                           check=True, capture_output=True, timeout=15)
+
+        def gmf(*args):
+            return subprocess.run(
+                ["zsh", "-fc", 'source "$ZDOTDIR/.zshrc" && gmf --lang en "$@"',
+                 "test", *map(str, args)], env=env, cwd=self.home,
+                capture_output=True, text=True, timeout=30,
+            )
+
+        git_run("init", "-q", "-b", "main")
+        tracked = repo / "README.md"
+        tracked.write_text("base\n")
+        git_run("add", tracked.name)
+        git_run("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-qm", "base")
+
+        for expected, target, content in (
+            (0, tracked.name, "base\n"),
+            (1, tracked.name, "working tree\n"),
+            (2, "../outside", "working tree\n"),
+        ):
+            tracked.write_text(content)
+            with self.subTest(exit_code=expected):
+                plain = gmf(repo, "--file-diff", target)
+                result = gmf(repo, "--file-diff", target, "--json")
+                self.assertEqual(plain.returncode, expected, plain.stderr)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["kind"], "file_diff")
+                self.assertEqual(payload["ok"], expected != 2)
+                self.assertEqual(payload["path"], target)
+                self.assertEqual(plain.stdout, payload["diff"])
+                if expected == 1:
+                    self.assertIn("+working tree\n", plain.stdout)
+                else:
+                    self.assertEqual(plain.stdout, "")
+                self.assertEqual(bool(plain.stderr), expected == 2)
+                self.assertEqual(bool(payload["error"]), expected == 2)
+
+        git_run("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "stash", "push", "-qm", "wrapper stash")
+        stash_text = gmf(repo, "--stashes")
+        stash_json = gmf(repo, "--stashes", "--json")
+        self.assertEqual(stash_text.returncode, 0, stash_text.stderr)
+        self.assertEqual(stash_json.returncode, 0, stash_json.stderr)
+        self.assertIn("wrapper stash", stash_text.stdout)
+        self.assertEqual(json.loads(stash_json.stdout)["stashes"][0]["files"][0]["path"],
+                         tracked.name)
+        self.assertFalse((self.home / ".config" / "gitmaster_flash").exists())
+
+        snapshot = self.home / "snapshot.json"
+        scan = gmf(repo, "--json")
+        self.assertEqual(scan.returncode, 1, scan.stderr)  # Stash vorhanden
+        snapshot.write_text(scan.stdout)
+        for options in ((), ("--json",)):
+            compared = gmf("--compare", snapshot, snapshot, *options)
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            self.assertTrue(compared.stdout)
+
     def test_tilde_form_counts_as_already_installed(self):
         # Genau der gemeldete Fall: die Zeile meint dasselbe, steht nur anders da.
         zshrc = self.home / ".zshrc"

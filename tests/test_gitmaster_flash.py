@@ -1749,6 +1749,50 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             inspect_transfer(self.repo, "github", "main", "push").reason,
             "dirty")
 
+    def test_scan_and_transfer_cannot_hide_a_dirty_submodule_via_config(self):
+        source = self.root / "module-source"
+        source.mkdir()
+        git(source, "init", "-qb", "main")
+        (source / "module.txt").write_text("base\n")
+        git(source, "add", "module.txt")
+        git(source, "-c", "user.name=Test", "-c", "user.email=t@example.invalid",
+            "commit", "-qm", "module base")
+        git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add",
+            str(source), "module")
+        git(self.repo, "commit", "-qm", "add module")
+        git(self.repo, "push", "-q", "backup", "main:main")
+        git(self.repo, "branch", "incoming")
+        git(self.repo, "switch", "-q", "incoming")
+        git(self.repo, "commit", "--allow-empty", "-qm", "incoming change")
+        git(self.repo, "push", "-q", "backup", "incoming:main")
+        git(self.repo, "switch", "-q", "main")
+        git(self.repo, "config", "diff.ignoreSubmodules", "all")
+        module_file = self.repo / "module" / "module.txt"
+
+        def transfer(remote, action):
+            return inspect_transfer(self.repo, remote, "main", action)
+
+        for remote, action in (("github", "push"), ("backup", "pull")):
+            with self.subTest(action=action):
+                self.assertTrue(transfer(remote, action).ready)
+                module_file.write_text("dirty\n")
+                status = collect_status(self.repo, self.root, SYNC_CONFIG)
+                self.assertTrue(status.dirty)
+                self.assertEqual(status.modified, 1)
+                self.assertEqual(transfer(remote, action).reason, "dirty")
+                module_file.write_text("base\n")
+
+                original = gmf_module.run_git
+
+                def modify_before_final_status(repo, *args, **kwargs):
+                    if args[:2] == ("log", "--oneline"):
+                        module_file.write_text("dirty during preflight\n")
+                    return original(repo, *args, **kwargs)
+
+                with mock.patch.object(gmf_module, "run_git", side_effect=modify_before_final_status):
+                    self.assertEqual(transfer(remote, action).reason, "inspect-failed")
+                module_file.write_text("base\n")
+
     def test_transfer_preflight_binds_the_expected_public_class(self):
         git(self.repo, "remote", "set-url", "github",
             "https://github.com/example/demo.git")
