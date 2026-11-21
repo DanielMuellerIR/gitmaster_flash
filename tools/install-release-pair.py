@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import signal
 import sys
+from pathlib import Path
 
 
-def install_pair(archive_source: Path, checksum_source: Path,
-                 archive_target: Path, checksum_target: Path) -> None:
+def install_pair(
+    archive_source: Path, checksum_source: Path, archive_target: Path, checksum_target: Path
+) -> None:
     """Verlinkt beide Dateien exklusiv und sperrt parallele Release-Laeufe.
 
     ``os.link`` scheitert atomar, wenn das Ziel schon existiert. Die Sperre
@@ -20,7 +21,9 @@ def install_pair(archive_source: Path, checksum_source: Path,
     # Ein Signal zwischen den beiden Hardlinks darf kein halbes Paar
     # hinterlassen. Die kurze Transaktion endet vor der Verarbeitung von SIGINT/SIGTERM/SIGHUP;
     # danach gilt wieder exakt die Signalmaske des Aufrufers.
-    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+    previous_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    )
     try:
         lock = archive_target.with_name(f".{archive_target.name}.release-lock")
         os.mkdir(lock)
@@ -41,18 +44,18 @@ def install_pair(archive_source: Path, checksum_source: Path,
 
 def main(argv: list[str]) -> int:
     if len(argv) != 5:
-        print("Aufruf: install-release-pair.py ARCHIV QUELLE-SHA ZIEL ZIEL-SHA",
-              file=sys.stderr)
+        print("Aufruf: install-release-pair.py ARCHIV QUELLE-SHA ZIEL ZIEL-SHA", file=sys.stderr)
         return 2
     try:
         install_pair(*(Path(value) for value in argv[1:]))
     except FileExistsError as exc:
-        print(f"FEHLER: Ziel oder Release-Sperre existiert schon: {exc.filename}",
-              file=sys.stderr)
+        print(f"FEHLER: Ziel oder Release-Sperre existiert schon: {exc.filename}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"FEHLER: Release-Artefakte konnten nicht exklusiv abgelegt werden: {exc}",
-              file=sys.stderr)
+        print(
+            f"FEHLER: Release-Artefakte konnten nicht exklusiv abgelegt werden: {exc}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

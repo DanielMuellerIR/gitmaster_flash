@@ -2,11 +2,11 @@
 
 import copy
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import gitmaster_flash as g
@@ -20,8 +20,6 @@ class PathByteTests(unittest.TestCase):
         environment = patch.dict(os.environ, g._demo_env(), clear=True)
         environment.start()
         self.addCleanup(environment.stop)
-        g.resume_git_calls()
-        self.addCleanup(g.resume_git_calls)
         self.repo, _ = g._demo_repo(self.root, "project")
 
     def test_cr_lf_and_crlf_are_not_translated(self):
@@ -37,7 +35,9 @@ class PathByteTests(unittest.TestCase):
     def test_process_output_preserves_non_utf8_bytes(self):
         result = g._run_process_group(
             [sys.executable, "-c", "import os; os.write(1, b'path\\xff\\0')"],
-            stdin=subprocess.DEVNULL, timeout=5)
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+        )
         self.assertEqual(result.stdout, os.fsdecode(b"path\xff\0"))
 
     def test_commit_of_cr_name_never_commits_the_distinct_lf_name(self):
@@ -46,9 +46,13 @@ class PathByteTests(unittest.TestCase):
         (self.repo / lf).write_text("other work\n")
         result = g.commit_selected(self.repo, [cr], "approved CR path", 10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        committed = g.run_git(self.repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD")
+        committed = g.run_git(
+            self.repo, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"
+        )
         self.assertEqual(committed.stdout.split("\0"), [cr, ""])
-        entries = g.parse_porcelain(g.run_git(self.repo, "status", "--porcelain=v1", "-z").stdout)[4]
+        entries = g.parse_porcelain(g.run_git(self.repo, "status", "--porcelain=v1", "-z").stdout)[
+            4
+        ]
         self.assertEqual([entry.path for entry in entries], [lf])
 
     def test_reported_repository_path_keeps_trailing_whitespace(self):
@@ -60,11 +64,17 @@ class PathByteTests(unittest.TestCase):
 
     def test_timeout_output_uses_the_same_byte_preserving_decoder(self):
         code = "import os,time; os.write(1,b'path\\r\\n\\xff\\0'); os.write(2,b'error\\r\\n'); time.sleep(30)"
+        scope = g.GitCallScope()
         with self.assertRaises(subprocess.TimeoutExpired) as stopped:
-            g._run_process_group([sys.executable, "-c", code], stdin=subprocess.DEVNULL, timeout=.2)
+            scope.call(
+                g._run_process_group,
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                timeout=0.2,
+            )
         self.assertEqual(stopped.exception.output, os.fsdecode(b"path\r\n\xff\0"))
         self.assertEqual(stopped.exception.stderr, "error\r\n")
-        self.assertFalse(g._LIVE_PROCESSES)
+        self.assertFalse(scope.processes)
 
 
 if __name__ == "__main__":

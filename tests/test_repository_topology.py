@@ -1,16 +1,12 @@
 """Worktree-Zuordnung und Submodule bleiben lesend, pfadgebunden und unterscheidbar."""
 
 import copy
-import curses
-import io
-import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gitmaster_flash as g
@@ -18,7 +14,7 @@ import gitmaster_flash as g
 
 class TopologyFixture(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="gmf-topology-", dir="/tmp")
+        self.tmp = tempfile.TemporaryDirectory(prefix="gmf-topology-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         environment = patch.dict(os.environ, g._demo_env(), clear=True)
@@ -28,8 +24,6 @@ class TopologyFixture(unittest.TestCase):
         language.start()
         self.addCleanup(language.stop)
         self.cfg = copy.deepcopy(g.DEFAULT_CONFIG)
-        g.resume_git_calls()
-        self.addCleanup(g.resume_git_calls)
         self.repo, self.bare = g._demo_repo(self.root, "project")
 
     def status(self, root=None):
@@ -46,8 +40,16 @@ class TopologyFixture(unittest.TestCase):
 
     def add_module(self):
         self.source, _ = g._demo_repo(self.root, "source")
-        g._dgit(self.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
-                str(self.source), "deps/lib")
+        g._dgit(
+            self.repo,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(self.source),
+            "deps/lib",
+        )
         self.module = self.repo / "deps/lib"
         g._demo_harden(self.module)
         g._dgit(self.repo, "commit", "-qam", "add module")
@@ -81,9 +83,11 @@ class WorktreeTests(TopologyFixture):
         (linked / "unmeasured.txt").write_text("unmeasured\n")
         calls = []
         original = g.run_git
+
         def record(repo, *args, **kwargs):
             calls.append(g.path_identity(repo))
             return original(repo, *args, **kwargs)
+
         with patch.object(g, "run_git", side_effect=record):
             status = self.status(root=self.repo)
         self.assertNotIn(g.path_identity(linked), calls)
@@ -139,11 +143,14 @@ class WorktreeTests(TopologyFixture):
         oid = "a" * 40
         valid = f"worktree /tmp/path\r\nname\0HEAD {oid}\0branch refs/heads/main\0\0"
         self.assertEqual(str(g.parse_worktrees(valid)[0].path), "/tmp/path\r\nname")
-        invalid = [valid[:-1], valid.replace("/tmp/path", "relative"),
-                   valid.replace(f"HEAD {oid}", "HEAD invalid"),
-                   valid.replace("branch refs/heads/main", "branch main"),
-                   valid.replace("branch refs/heads/main", "detached\0branch refs/heads/main"),
-                   valid + valid]
+        invalid = [
+            valid[:-1],
+            valid.replace("/tmp/path", "relative"),
+            valid.replace(f"HEAD {oid}", "HEAD invalid"),
+            valid.replace("branch refs/heads/main", "branch main"),
+            valid.replace("branch refs/heads/main", "detached\0branch refs/heads/main"),
+            valid + valid,
+        ]
         for output in invalid:
             with self.subTest(output=repr(output)):
                 with self.assertRaises(g.GitReadError):
@@ -151,12 +158,18 @@ class WorktreeTests(TopologyFixture):
 
     def test_missing_optional_measurements_and_failures_are_not_empty_inventories(self):
         status = self.status()
-        with patch.object(g, "collect_worktrees", side_effect=g.GitReadError("cannot list worktrees")):
+        with patch.object(
+            g, "collect_worktrees", side_effect=g.GitReadError("cannot list worktrees")
+        ):
             failed = self.status()
         self.assertFalse(failed.clean_and_synced)
         self.assertIn("W", g.inspection_summary(failed))
-        findings = g.diff_findings(g.make_snapshot(self.root, [status]),
-                                   g.make_snapshot(self.root, [failed]), "here", "there")
+        findings = g.diff_findings(
+            g.make_snapshot(self.root, [status]),
+            g.make_snapshot(self.root, [failed]),
+            "here",
+            "there",
+        )
         self.assertTrue(any(row["type"] == "worktree_inventory_failed" for row in findings))
         self.assertFalse(any(row["category"] == "drift" for row in findings))
         with patch.object(g, "valid_timestamp", wraps=g.valid_timestamp):
@@ -227,7 +240,9 @@ class SubmoduleTests(TopologyFixture):
         recorded = g.read_head_gitlinks(self.repo, g.current_head(self.repo, 10), {module.path}, 10)
         self.assertEqual(recorded[module.path], module.checked_out_oid)
         self.assertTrue((self.module / "draft.txt").exists())
-        self.assertEqual(g.run_git(self.repo, "ls-files", "--stage", "--", "README.md").stdout, staged_before)
+        self.assertEqual(
+            g.run_git(self.repo, "ls-files", "--stage", "--", "README.md").stdout, staged_before
+        )
         self.assertTrue(self.status().dirty)
 
     def test_uninitialized_module_is_not_inspected_as_its_parent(self):
@@ -235,9 +250,11 @@ class SubmoduleTests(TopologyFixture):
         g._dgit(self.repo, "submodule", "deinit", "-f", "--", "deps/lib")
         calls = []
         original = g.run_git
+
         def record(repo, *args, **kwargs):
             calls.append(Path(repo))
             return original(repo, *args, **kwargs)
+
         with patch.object(g, "run_git", side_effect=record):
             status = self.status()
         module = status.submodules[0]
@@ -266,9 +283,11 @@ class SubmoduleTests(TopologyFixture):
         self.module.symlink_to(self.source, target_is_directory=True)
         calls = []
         original = g.run_git
+
         def record(repo, *args, **kwargs):
             calls.append(g.path_identity(repo))
             return original(repo, *args, **kwargs)
+
         with patch.object(g, "run_git", side_effect=record):
             status = self.status()
         self.assertNotIn(g.path_identity(self.source), calls)
@@ -281,6 +300,7 @@ class SubmoduleTests(TopologyFixture):
         good = self.status()
         original = g.read_index_entries
         calls = 0
+
         def changed(repo, timeout):
             nonlocal calls
             entries = original(repo, timeout)
@@ -288,12 +308,17 @@ class SubmoduleTests(TopologyFixture):
             if calls == 2:
                 entries["deps/lib"] = [("160000", "b" * 40, 0)]
             return entries
+
         with patch.object(g, "read_index_entries", side_effect=changed):
             failed = self.status()
         self.assertIn("changed during inventory", failed.submodules_error)
         self.assertFalse(failed.submodules_scanned)
-        findings = g.diff_findings(g.make_snapshot(self.root, [good]),
-                                   g.make_snapshot(self.root, [failed]), "here", "there")
+        findings = g.diff_findings(
+            g.make_snapshot(self.root, [good]),
+            g.make_snapshot(self.root, [failed]),
+            "here",
+            "there",
+        )
         self.assertTrue(any(row["type"] == "submodule_inventory_failed" for row in findings))
         self.assertFalse(any(row["type"] == "submodule_state" for row in findings))
 
@@ -301,6 +326,7 @@ class SubmoduleTests(TopologyFixture):
         self.add_module()
         original = g.current_head
         calls = 0
+
         def changed(repo, timeout, **kwargs):
             nonlocal calls
             if Path(repo) == self.module:
@@ -308,6 +334,7 @@ class SubmoduleTests(TopologyFixture):
                 if calls == 2:
                     return "b" * 40
             return original(repo, timeout, **kwargs)
+
         with patch.object(g, "current_head", side_effect=changed):
             status = self.status()
         self.assertIn("HEAD changed", status.submodules[0].error)
@@ -353,14 +380,24 @@ class SubmoduleTests(TopologyFixture):
         legacy = copy.deepcopy(before)
         for key in ("submodules", "submodules_error", "submodule_review_count"):
             legacy["repos"][0].pop(key, None)
-        self.assertTrue(any(limit["code"] == "submodule_inventory_unknown" for limit in
-                            g.snapshot_limitations(legacy, "here", after)))
+        self.assertTrue(
+            any(
+                limit["code"] == "submodule_inventory_unknown"
+                for limit in g.snapshot_limitations(legacy, "here", after)
+            )
+        )
 
     def test_module_schema_rejects_malformed_counts_paths_and_modes(self):
         self.add_module()
         payload = g.make_snapshot(self.root, [self.status()])
-        for key, value in (("path", "../outside"), ("modified", -1), ("index_mode", "blob"),
-                           ("worktree_kind", "unknown"), ("initialized", False), ("index_oid", "b" * 40)):
+        for key, value in (
+            ("path", "../outside"),
+            ("modified", -1),
+            ("index_mode", "blob"),
+            ("worktree_kind", "unknown"),
+            ("initialized", False),
+            ("index_oid", "b" * 40),
+        ):
             broken = copy.deepcopy(payload)
             broken["repos"][0]["submodules"][0][key] = value
             self.assertFalse(g._valid_remote_payload(broken), key)
@@ -386,11 +423,18 @@ class SubmoduleTests(TopologyFixture):
         g._demo_commit(self.module, "two.txt", "two\n", "module two")
         theirs = g.current_head(self.module, 10)
         g._dgit(self.repo, "update-index", "--force-remove", "deps/lib")
-        stages = "".join(f"160000 {oid} {stage}\tdeps/lib\n"
-                         for stage, oid in enumerate((base, ours, theirs), start=1))
-        subprocess.run(["git", "-C", str(self.repo), "update-index", "--index-info"],
-                       input=stages, text=True, capture_output=True, check=True,
-                       env=g._demo_env())
+        stages = "".join(
+            f"160000 {oid} {stage}\tdeps/lib\n"
+            for stage, oid in enumerate((base, ours, theirs), start=1)
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "update-index", "--index-info"],
+            input=stages,
+            text=True,
+            capture_output=True,
+            check=True,
+            env=g._demo_env(),
+        )
         status = self.status()
         module = status.submodules[0]
         self.assertTrue(module.conflicted)
@@ -418,8 +462,18 @@ class SubmoduleTests(TopologyFixture):
     def test_module_path_with_crlf_keeps_its_exact_name(self):
         source, _ = g._demo_repo(self.root, "raw-source")
         path = "deps/lib\r\n"
-        g._dgit(self.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
-                "--name", "raw-module", str(source), path)
+        g._dgit(
+            self.repo,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "--name",
+            "raw-module",
+            str(source),
+            path,
+        )
         g._dgit(self.repo, "commit", "-qam", "add raw module")
         status = self.status()
         self.assertEqual(status.submodules_error, "")
@@ -457,12 +511,16 @@ class SubmoduleTests(TopologyFixture):
     def test_local_measurement_precedes_fetch_completion(self):
         clock = ["2020-01-01T00:00:00+00:00"]
         original = g.fetch_remote_safely
+
         def fetched(*args):
             result = original(*args)
             clock[0] = "2020-01-01T00:05:00+00:00"
             return result
-        with patch.object(g, "utc_now", side_effect=lambda: clock[0]), \
-                patch.object(g, "fetch_remote_safely", side_effect=fetched):
+
+        with (
+            patch.object(g, "utc_now", side_effect=lambda: clock[0]),
+            patch.object(g, "fetch_remote_safely", side_effect=fetched),
+        ):
             status = g.collect_status(self.repo, self.root, self.cfg, fetch=True)
         self.assertEqual(status.measured_at, "2020-01-01T00:00:00+00:00")
         self.assertEqual(status.remotes[0].fetched_at, "2020-01-01T00:05:00+00:00")

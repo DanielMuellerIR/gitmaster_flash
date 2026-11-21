@@ -4,7 +4,6 @@ import copy
 import io
 import json
 import os
-import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -26,7 +25,6 @@ class BranchInventoryTests(unittest.TestCase):
         lang = patch.object(gmf, "UI_LANG", "en")
         lang.start()
         self.addCleanup(lang.stop)
-        gmf.resume_git_calls()
         self.repo, self.bare = gmf._demo_repo(self.root, "project")
 
     def topic(self):
@@ -55,8 +53,12 @@ class BranchInventoryTests(unittest.TestCase):
         self.assertEqual(data["repos"][0]["branch_coverage_basis"], "local-remote-tracking-refs")
         topic = next(b for b in data["repos"][0]["branches"] if b["name"] == "topic")
         self.assertRegex(topic["oid"], r"^[0-9a-f]{40}$")
-        self.assertTrue(any("topic" in line and "only" in line for line in
-                            gmf.diff_status(before, data, "here", "there")))
+        self.assertTrue(
+            any(
+                "topic" in line and "only" in line
+                for line in gmf.diff_status(before, data, "here", "there")
+            )
+        )
         output = io.StringIO()
         with redirect_stdout(output):
             gmf.print_list([st], self.root)
@@ -117,7 +119,9 @@ class BranchInventoryTests(unittest.TestCase):
         self.assertEqual(st.branch_review_count, 1)
 
     def test_inventory_failure_is_visible_and_not_an_empty_success(self):
-        with patch.object(gmf, "read_branch_inventory", side_effect=gmf.GitReadError("unreadable refs")):
+        with patch.object(
+            gmf, "read_branch_inventory", side_effect=gmf.GitReadError("unreadable refs")
+        ):
             st = self.status()
         self.assertIn("unreadable refs", st.branches_error)
         self.assertFalse(st.clean_and_synced)
@@ -152,6 +156,7 @@ class BranchInventoryTests(unittest.TestCase):
         self.topic()
         real = gmf.run_git
         changed = False
+
         def race(repo, *args, **kwargs):
             nonlocal changed
             result = real(repo, *args, **kwargs)
@@ -159,6 +164,7 @@ class BranchInventoryTests(unittest.TestCase):
                 changed = True
                 gmf._dgit(self.repo, "branch", "raced")
             return result
+
         with patch.object(gmf, "run_git", side_effect=race):
             st = self.status()
         self.assertIn("refs changed", st.branches_error)
@@ -168,6 +174,7 @@ class BranchInventoryTests(unittest.TestCase):
         gmf._dgit(self.repo, "branch", "other")
         real = gmf.read_ref_snapshot
         reads = 0
+
         def race(*args, **kwargs):
             nonlocal reads
             result = real(*args, **kwargs)
@@ -175,6 +182,7 @@ class BranchInventoryTests(unittest.TestCase):
             if reads == 2:
                 gmf._dgit(self.repo, "switch", "-q", "other")
             return result
+
         with patch.object(gmf, "read_ref_snapshot", side_effect=race):
             st = self.status()
         self.assertIn("HEAD changed", st.branches_error)
@@ -183,8 +191,10 @@ class BranchInventoryTests(unittest.TestCase):
         oid = gmf.current_head(self.repo, 10).encode("ascii")
         names = ["line\u2028break".encode(), b"we\xffird"]
         packed = gmf._git_path(self.repo, "packed-refs", 10)
-        packed.write_bytes(b"# pack-refs with: sorted\n" + b"".join(
-            oid + b" refs/heads/" + name + b"\n" for name in names))
+        packed.write_bytes(
+            b"# pack-refs with: sorted\n"
+            + b"".join(oid + b" refs/heads/" + name + b"\n" for name in names)
+        )
         payload = self.payload(self.status())
         self.assertTrue(gmf._valid_remote_payload(payload))
         text = json.dumps(payload, ensure_ascii=False)
@@ -212,7 +222,9 @@ class BranchInventoryTests(unittest.TestCase):
 
     def test_inventory_error_does_not_invent_missing_branches(self):
         good = self.payload(self.status())
-        with patch.object(gmf, "read_branch_inventory", side_effect=gmf.GitReadError("unreadable refs")):
+        with patch.object(
+            gmf, "read_branch_inventory", side_effect=gmf.GitReadError("unreadable refs")
+        ):
             bad = self.payload(self.status())
         lines = gmf.diff_status(good, bad, "here", "there")
         self.assertTrue(any("inventory unavailable" in line for line in lines), lines)

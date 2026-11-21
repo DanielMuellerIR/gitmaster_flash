@@ -1,4 +1,5 @@
 """Öffentliche Dateistände unabhängig von privaten Commit-Historien erkennen."""
+
 import copy
 import io
 import json
@@ -25,8 +26,9 @@ class PublicationContentTests(unittest.TestCase):
         self.addCleanup(self.language.stop)
         self.cfg = copy.deepcopy(g.DEFAULT_CONFIG)
         self.repo, _ = g._demo_repo(self.root, "project")
-        g._demo_extra_remote(self.root, self.repo, "github",
-                            url="https://github.com/example/project.git")
+        g._demo_extra_remote(
+            self.root, self.repo, "github", url="https://github.com/example/project.git"
+        )
         tree = self.git("rev-parse", "HEAD^{tree}")
         public = self.git("commit-tree", tree, "-m", "Public snapshot")
         self.git("update-ref", "refs/remotes/github/main", public)
@@ -74,8 +76,11 @@ class PublicationContentTests(unittest.TestCase):
         self.assertIn("\033[90mHistory ≠", output.getvalue())
         self.assertNotIn("publication pending", output.getvalue())
         self.assertNotIn("\033[31m", output.getvalue())
-        with patch.object(g, "load_config", return_value=self.cfg), patch.object(
-                g, "collect_all", return_value=[st]), redirect_stdout(io.StringIO()):
+        with (
+            patch.object(g, "load_config", return_value=self.cfg),
+            patch.object(g, "collect_all", return_value=[st]),
+            redirect_stdout(io.StringIO()),
+        ):
             self.assertEqual(g.main([str(self.root), "--json"]), 0)
 
     def test_new_source_change_after_squash_needs_publication(self):
@@ -178,13 +183,15 @@ class PublicationContentTests(unittest.TestCase):
         st = self.status()
         self.assertIn(("GitHub ✓", g.C_GREEN), g.selected_repo_context_parts(st, 120))
         self.assertIn(("History ≠", g.C_HISTORY), g.selected_repo_context_parts(st, 120))
-        context = g.selected_repo_context(st, 63)
+        context = "".join(text for text, _ in g.selected_repo_context_parts(st, 63))
         self.assertIn("GitHub ✓", context)
         self.assertIn("History ≠", context)
         self.assertLessEqual(g.cell_width(context), 63)
         for selected in (False, True):
-            with patch.object(g, "safe_addstr") as draw, patch.object(
-                    g.curses, "color_pair", side_effect=lambda pair: pair << 8):
+            with (
+                patch.object(g, "safe_addstr") as draw,
+                patch.object(g.curses, "color_pair", side_effect=lambda pair: pair << 8),
+            ):
                 ui.draw_repo_line(2, st, selected)
             parts = {call.args[3]: call.args[4] for call in draw.call_args_list}
             with patch.object(g.curses, "color_pair", side_effect=lambda pair: pair << 8):
@@ -196,8 +203,12 @@ class PublicationContentTests(unittest.TestCase):
             self.assertFalse(g.valid_publication_excludes({"example/project": paths}))
         payload = {"version": g.__version__, "repos": [g.status_dict(self.status())]}
         self.assertTrue(g._valid_remote_payload(payload))
-        for key, value in (("content_equal", "yes"), ("history_differs", 1),
-                           ("content_excludes", "all"), ("content_error", [])):
+        for key, value in (
+            ("content_equal", "yes"),
+            ("history_differs", 1),
+            ("content_excludes", "all"),
+            ("content_error", []),
+        ):
             invalid = copy.deepcopy(payload)
             invalid["repos"][0]["remotes"][-1][key] = value
             self.assertFalse(g._valid_remote_payload(invalid), key)
@@ -251,10 +262,17 @@ class PublicationContentTests(unittest.TestCase):
 
     def test_related_history_still_has_a_direction_and_legacy_snapshots_keep_their_counts(self):
         for ahead, behind, view in ((2, 0, "outgoing"), (0, 2, "incoming")):
-            remote = g.RemoteStatus("github", public=True, branch_exists=True,
-                                    ahead=ahead, behind=behind, content_equal=False)
-            st = g.RepoStatus(self.repo, "project", branch="main", head_oid="a"*40,
-                              remotes=[remote])
+            remote = g.RemoteStatus(
+                "github",
+                public=True,
+                branch_exists=True,
+                ahead=ahead,
+                behind=behind,
+                content_equal=False,
+            )
+            st = g.RepoStatus(
+                self.repo, "project", branch="main", head_oid="a" * 40, remotes=[remote]
+            )
             self.assertTrue(g.repo_matches_view(st, view))
         remote.ahead = remote.behind = 2
         remote.content_equal = None

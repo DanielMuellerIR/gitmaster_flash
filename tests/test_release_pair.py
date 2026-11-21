@@ -1,13 +1,12 @@
 import importlib.util
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "tools" / "install-release-pair.py"
 SPEC = importlib.util.spec_from_file_location("install_release_pair", SCRIPT)
@@ -58,9 +57,20 @@ assert signal.getsignal(sig) == disposition
 assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask
 """
             result = subprocess.run(
-                [sys.executable, "-c", code, str(SCRIPT), str(int(sig)), str(int(disposition)),
-                 str(source), str(checksum), str(target), str(target_checksum)],
-                capture_output=True, timeout=15,
+                [
+                    sys.executable,
+                    "-c",
+                    code,
+                    str(SCRIPT),
+                    str(int(sig)),
+                    str(int(disposition)),
+                    str(source),
+                    str(checksum),
+                    str(target),
+                    str(target_checksum),
+                ],
+                capture_output=True,
+                timeout=15,
             )
             self.assertEqual(result.returncode, expected, result.stderr)
             self.assertEqual(target.read_bytes(), b"archive")
@@ -129,11 +139,15 @@ class ReleaseScriptTests(unittest.TestCase):
         shell = self.repo / "shell-env"
         home.mkdir()
         shell.mkdir()
-        self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith("GIT_")}
-        self.env.update(HOME=str(home), ZDOTDIR=str(shell), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
-                        PYTHONDONTWRITEBYTECODE="1")
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        self.env.update(
+            HOME=str(home),
+            ZDOTDIR=str(shell),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_ATTR_NOSYSTEM="1",
+            PYTHONDONTWRITEBYTECODE="1",
+        )
         self.git("init", "-q")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -143,26 +157,60 @@ class ReleaseScriptTests(unittest.TestCase):
         shutil.copy2(SCRIPT, self.repo / "tools" / SCRIPT.name)
         shutil.copy2(SCRIPT.parents[1] / "release.sh", self.repo / "release.sh")
         (self.repo / "gitmaster_flash.py").write_text('print("1.0.0")\n')
-        for name in ("gmf.zsh", "install.sh", "README.md", "README.de.md", "LICENSE"):
+        (self.repo / "tests").mkdir()
+        for name in (
+            "gmf.zsh",
+            "install.sh",
+            "install-linux.sh",
+            "tools/install.py",
+            "tools/check-zshrc.zsh",
+            "tests/test_fixture.py",
+            "README.md",
+            "README.de.md",
+            "LICENSE",
+        ):
             (self.repo / name).write_text("fixture\n")
         (self.repo / ".gitignore").write_text("dist/\n")
 
     def git(self, *args):
-        return subprocess.run(["git", "-C", str(self.repo), *args], env=self.env,
-                              capture_output=True, text=True, check=True, timeout=15)
+        return subprocess.run(
+            ["git", "-C", str(self.repo), *args],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
 
     def release_with_build(self, body):
         build = self.repo / "build.sh"
         build.write_text("#!/bin/zsh\nset -eu\n" + body + "\n")
         build.chmod(0o755)
-        self.git("add", "release.sh", "build.sh", "tools/install-release-pair.py",
-                 "gitmaster_flash.py", "gmf.zsh", "install.sh", "README.md", "README.de.md",
-                 "LICENSE", ".gitignore")
+        self.git(
+            "add",
+            "release.sh",
+            "build.sh",
+            "tools",
+            "gitmaster_flash.py",
+            "gmf.zsh",
+            "install.sh",
+            "install-linux.sh",
+            "tests/test_fixture.py",
+            "README.md",
+            "README.de.md",
+            "LICENSE",
+            ".gitignore",
+        )
         self.git("commit", "-qm", "fixture")
-        with subprocess.Popen([str(self.repo / "release.sh")], cwd=self.repo,
-                              env=self.env, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True,
-                              start_new_session=True) as proc:
+        with subprocess.Popen(
+            [str(self.repo / "release.sh")],
+            cwd=self.repo,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        ) as proc:
             try:
                 # Der gesamte Release umfasst mehrere Interpreterstarts. Ein
                 # isolierter erfolgreicher Lauf benötigte bereits 26 Sekunden;
@@ -178,7 +226,8 @@ class ReleaseScriptTests(unittest.TestCase):
 
     def test_commit_during_build_aborts_without_publishing_an_archive(self):
         result = self.release_with_build(
-            "print changed > introduced.txt\ngit add introduced.txt\ngit commit -qm concurrent")
+            "print changed > introduced.txt\ngit add introduced.txt\ngit commit -qm concurrent"
+        )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse(list((self.repo / "dist").glob("*.tar.gz")))
 
@@ -193,8 +242,13 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         archive = self.repo / "dist" / "gitmaster_flash-1.0.0.tar.gz"
         self.assertTrue(archive.exists())
-        checked = subprocess.run(["shasum", "-c", archive.name + ".sha256"],
-                                 cwd=archive.parent, capture_output=True, text=True, timeout=15)
+        checked = subprocess.run(
+            ["shasum", "-c", archive.name + ".sha256"],
+            cwd=archive.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
 

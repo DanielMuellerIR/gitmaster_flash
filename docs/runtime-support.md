@@ -13,8 +13,9 @@ there is no guessed fallback to newline-delimited paths.
 The TUI needs standard-library curses, a POSIX terminal and a UTF-8 locale.
 No third-party Python modules are required. macOS app shortcuts use `open -a`;
 Linux starts a configured executable launcher in a local desktop session,
-passing the selected repository as one folder argument. SSH sessions remain blocked. The Linux installer (`install-linux.sh`) supports Bash, Fish and Zsh, including
-Enter-to-cd. The original macOS installer and build/release scripts need Zsh.
+passing the selected repository as one folder argument. App shortcuts require a local desktop session. The shared installer supports
+Bash, Fish and Zsh, including Enter-to-cd. The macOS entry point defaults to
+Zsh. The build and release scripts use Zsh. See the [installer guide](installation.md).
 On a Linux host without Zsh its Zsh-specific tests are skipped. The optional
 release-checksum verification also needs `shasum` and is skipped when it is absent.
 Windows and OS versions beyond the recorded checks have not been validated.
@@ -31,7 +32,7 @@ Each combination records interpreter, Git and product versions, the source hash,
 exit codes, duration and test count. Full is the default and includes the existing
 safety, CLI and release fixtures. Core selects only the separately maintained
 feature-contract suites; it does not substitute for the full safety suite.
-`--screens` verifies the six generated images. No runtime is installed or updated.
+`--screens` verifies the eight generated images. No runtime is installed or updated.
 Temporary PATH wrappers select the requested Git without changing global settings.
 An unavailable or below-floor runtime is a failed check, not a skipped success.
 

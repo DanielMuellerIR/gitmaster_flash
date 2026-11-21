@@ -9,10 +9,8 @@
 #
 # Danach in einer neuen Shell einfach `gmf` (z.B. im Projekt-Sammelordner) aufrufen.
 
-# Skript-Pfad beim Sourcen festhalten: Hier ist $0 noch diese Datei (in der
-# Funktion wäre es der Funktionsname). ${0:A:h} = ihr Ordner, absolut aufgelöst.
-# So funktioniert der Wrapper unabhängig davon, wohin das Repo geklont wurde.
-GMF_SCRIPT="${0:A:h}/gitmaster_flash.py"
+# %x bezeichnet die geladene Datei auch mit abgeschaltetem FUNCTION_ARGZERO.
+GMF_SCRIPT="${${(%):-%x}:A:h}/gitmaster_flash.py"
 
 gmf() {
   local cdfile target

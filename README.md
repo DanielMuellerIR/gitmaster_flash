@@ -6,1056 +6,114 @@
 
 **🌐 Sprache / Language:** [English](README.md) · [Deutsch](README.de.md)
 
-<p align="center">
-  <em>“It's like a jungle sometimes”</em><br>
-  <sub>— Grandmaster Flash and the Furious Five, “The Message”</sub>
-</p>
+A terminal overview of the Git repositories below a directory. Review local
+changes, stashes, branches and remote status in one list, then inspect or act on
+the selected repository. Gitmaster Flash uses the Python standard library and Git.
 
-A fast terminal overview (TUI) of every Git repository below the current
-directory, so you can see what still needs attention and tidy it up on the spot.
+![Compact repository list with the command log underneath](docs/compact.svg)
 
-Green means clean and in sync with your remote; red and yellow mean something is
-left over. One Python file, standard library only — no `pip install`, no daemon,
-no registration of repositories. It scans whatever is below the directory you
-start it in.
+## Quick start
 
-![Compact view: every repository as a mark plus its name, the command log underneath](docs/compact.svg)
-
-<sub>Every screen in this README is generated from the real program on the `--demo` sandbox — `python3 docs/make-screens.py` (and `--check` in CI). No screenshots to retake when the UI changes. The command in the log below the list was really run on the sandbox: a selective commit.</sub>
-
-
-Try it without touching your own repositories:
+Requires Python 3.9+, Git 2.36+ and a UTF-8 terminal with curses on macOS or
+Linux. From a checkout or an unpacked source archive, try the demo first.
 
 ```sh
 python3 gitmaster_flash.py --demo
 ```
 
-`--demo` builds a throwaway sandbox of fake repositories covering every state and
-opens the UI on it. The folder lives in your temp directory; delete it when done.
+The demo uses temporary example repositories. The picture above comes from a
+real demo session in a pseudo-terminal.
 
-## First 60 seconds
-
-```sh
-git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
-cd gitmaster_flash
-./install.sh          # macOS; on Linux use ./install-linux.sh
-```
-
-Open a new shell or terminal tab so it reads the new wrapper line, then:
+Install the shell function from the project directory as your own user.
 
 ```sh
-gmf ~/projects        # or just `gmf` for the current directory
+./install.sh          # macOS, Zsh
+./install-linux.sh    # Linux, Bash, Fish or Zsh
 ```
 
-Three keys carry you through the first session:
+Open a new shell, then run `gmf ~/projects` or `gmf` for the current directory.
+With the shell function loaded, Enter exits the overview and changes to the
+selected repository. To run directly, use `python3 gitmaster_flash.py ~/projects`.
+See the [installation guide](docs/installation.md) for shell selection,
+existing registrations and the startup files involved.
 
-- `↑`/`↓` picks a repository (`←`/`→` jump a whole column in the compact view);
-  the ones needing attention are already at the top.
-- `A` shows what changed in a file, `C` commits it with a guided helper.
-- `H` lists every state-changing Git command gmf ran for you — that is how you
-  pick up the syntax without memorizing it.
+## Repository overview
 
-Nothing is ever pushed, dropped or deleted without a confirmation that names the
-exact command first. Details are further down; you do not need them to start.
+Repositories needing attention appear first. The detail layout shows file
+counts, branch and remotes. Above 20 repositories the default is a compact
+column layout. `M` changes layout, `/` filters by repository path and `B`
+selects a work view such as local changes, incoming commits or pending
+publication.
 
-## List layouts (`M`)
+![Detail view with file counts, branches and remotes](docs/overview.svg)
 
-With up to 20 repositories gmf opens in the **detail view**: one full line each,
-with counts, branch and remotes. Above that the same list turns into a long
-scroll, so it starts in the **compact view** instead — one mark plus the name per
-repository, filled column by column like `ls`, using the width of the window
-rather than its height. That is the screen at the top of this page; the threshold
-is `compact_from` in `config.json`.
+Use `A` to inspect a file in the working tree, index or combined diff and `C`
+to prepare a commit from selected paths. `S` organizes stashes by file. `W`
+and `O` show related worktrees and submodule state. `R` refreshes remote status
+in the background while the list stays usable. The command log records the
+Git actions taken in the session. The [interface guide](docs/interface.md)
+shows how the views work.
 
-The detail view deliberately remains the default for 20 repositories or fewer:
-at that size, having every count, branch and remote directly on screen is still
-the clearest overview. The compact view is its natural evolution as the
-collection grows, not a replacement. It gets you to a repository in a few
-keystrokes; press `M` there to see all of that repository's details.
-
-The mark is the whole status, condensed into one field:
-
-| Mark | Meaning |
-|---|---|
-| ✔ | clean and in sync |
-| ● | modified, deleted or untracked files |
-| ⚠ | merge conflict |
-| ↻ | Git operation in progress (merge, rebase, cherry-pick, revert, sequence or bisect) |
-| ⚑ | stash present |
-| ↑n / ↓n | ahead of / behind the sync remote |
-| Bn | n other local branches need review |
-| ⇅ | diverged (both ahead and behind) |
-| ✘ | repository scan error or last fetch failed for a remote |
-| G | privately synced, with GitHub publication still outstanding |
-| ? | no sync remote, no remote branch, or detached HEAD |
-
-When several states apply, the mark shows the most urgent one: `✘`, then `⚠`,
-`↻`, `●`, `⚑`, the sync distance, other branches, and finally `?`. A pending Git operation needs
-attention even when its working tree is clean. Red means an error, conflict,
-local change, missing incoming commits or divergent private synchronization; yellow marks a stash,
-outgoing commits or missing sync relationship; green `✔` means clean and
-synchronized. `M` or `I` reveals the details behind the condensed mark.
-
-`M` switches between compact and detail view and keeps the selected repository,
-so you can find a repository in the wide overview and then work on it in detail.
-`←`/`→` move one column at a time, which crosses 60 repositories in a few
-keystrokes. Expanding files and stashes stays in the detail view.
-
-## What a detail line tells you
-
-![Detail view: one line per repository, problem repos sorted to the top](docs/overview.svg)
-
-- **remote names are always visible** — every line ends with all configured
-  remotes, even when everything is synchronized. Their order is the private sync
-  remote first, other remotes next, and GitHub at the far right.
-- **↑n / ↓n next to a private remote** — commits ahead of / behind that exact remote for
-  the current branch, based on the last fetch. `R` refreshes every remote in every
-  repository by fetching the current branch from each remote separately, without
-  changing a working tree. The network fetch writes no local target ref; gmf then
-  updates only the matching tracking ref without dereferencing symbolic refs. If several
-  remotes fail for different reasons, each keeps its own diagnosis and Git error.
-- **M / D / U** — number of modified, deleted and untracked files.
-- **⚑Stash:n** — stashes that exist in the repo (easy to forget, so it is shown).
-- **⚠conflict:n** — unmerged files, e.g. after a `git stash apply` that did not
-  apply cleanly. Kept separate from "modified", because it needs different work.
-- Warnings such as "no sync remote" or "branch not on remote".
-
-Repositories that need attention sort to the top, clean ones to the bottom. Both
-views use that same order, so in the compact view the leftmost column is the one
-worth reading.
-
-## Command log, always visible
-
-The last commands stay below the list: three lines in the detail view, and in the
-compact view everything the columns leave over. `Tab` moves the focus there — in
-the detail view the pane grows to a third of the window for it. The selection bar
-moves with the focus: while you are in the log, the repository list has none, so
-it is always obvious which pane the arrow keys belong to. `↑`/`↓` walk through the
-commands, `Tab` returns to the list — both sides remember where you were.
-
-![The focus in the command log: the selection bar sits there, the repository list has none](docs/command-log.svg)
-
-Cancelled dialogs appear as `⊘ … (not run — cancelled)`, so the log never
-suggests something ran that did not. Two `fetch` lines are no glitch either:
-gmf fetches once before it asks and once after you confirm, and only acts if
-nothing moved in between (their random one-time URL aliases differ; see "Safe push").
-
-`H` shows the same log in full, above the safety rules. Read-only scan commands
-are deliberately left out — they would bury the interesting lines. Arguments are
-quoted the way a shell needs them, so every recorded line can be typed or pasted
-as-is. State-changing actions are recorded with their real, fully pinned Git
-arguments; cancelled confirmations remain explicitly marked as not run.
+Pull, push and GitHub publication use previews or confirmations bound to the
+reviewed repository state. See the [transfer and safety guide](docs/security.md)
+for their conditions and what a fetch updates.
 
 ## Keys
 
-The footer shows common shortcuts; `H` lists all actions. Case does not matter — `f` works like `F`.
+The footer shows common shortcuts. `H` lists all actions. Letter keys work in either case.
 
 | Key | Action |
 |---|---|
 | ↑ / ↓ | select a repository |
 | → / ← | expand / collapse (files with M/D/U/C, stashes) |
-| / | filter the repo list by name (see below) |
-| , | settings: view them, change the harmless ones (see below) |
+| / | filter by repository path |
+| , | view or edit settings |
 | B | choose a work view independently of path search |
 | M | switch between compact and detail view |
 | Tab | move the focus to the command log and back |
-| ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper, see below) |
+| ⏎ | quit and `cd` into the repository (needs the `gmf` wrapper) |
 | E | open the repository in a configured app (add your own in `config.json`) |
 | A | inspect changes file by file in a read-only diff viewer |
-| C | commit helper with selection suggestions (see below) |
+| C | commit helper with selection suggestions |
 | L | choose a pull remote (or fetch all first), preview and confirm a fast-forward |
 | P | safely push the current branch to the private sync remote |
-| G | guarded GitHub push: preview of outgoing commits and files, confirmed with Y ⏎ |
+| G | preview outgoing GitHub commits and files, then confirm with Y ⏎ |
 | H | show the command log of this session plus the Git safety rules |
 | W | inspect the worktree family, including registered paths outside the scan root |
 | O | inspect submodule references, contents and initialization state |
-| I | repository, remote and branch details; there: `T` tests a remote, `X` removes one (cannot be undone) |
-| S | browse stashes by file; apply, pop or delete selected/all stashes |
-| R | fetch every safe remote in the background; the list stays usable |
+| I | repository, remote and branch details, where `T` tests a remote, `X` removes one (cannot be undone) |
+| S | browse stashes by file or apply, pop or delete selected/all stashes |
+| R | fetch safe remotes in the background while the list stays usable |
 | N | reread the selected repo locally, without fetching |
 | U | fetch one remote of the selected repo |
-| X | stop the background fetch; retain completed results |
+| X | stop the background fetch and retain completed results |
 | Q | quit |
 
-The stash view lists **all stashes with their filenames**. Use ↑/↓ to select,
-→ to expand a stash or file, and ← to collapse it. Enter or Space toggles a
-section. Changes appear directly below their file; the selected filename stays
-above the scrolling content. Untracked, binary and staged-only changes are
-included. Differing staged changes have their own labelled section.
-
-- **A — Apply:** apply the selected stash and keep it.
-- **P — Pop:** apply it, then delete its entry only after success.
-- **D — Delete:** remove the selected stash without applying it; no undo in gmf.
-- **\* — selected/all:** switch the action scope to all displayed stashes or back
-  to the selected one. The scope is shown above the list and resets after an action.
-
-Each action previews the affected stashes and filenames and requires `Y ⏎`.
-Apply/pop starts with a clean index and working tree and no ongoing Git operation.
-It uses `--index` to restore both file contents and saved staging.
-For all stashes, apply/pop runs **oldest first**, stopping at the first error or
-conflict. Earlier successes remain; no automatic rollback runs. A failed apply
-can already have changed files, but its stash is kept. Check conflicts before
-continuing. If an earlier stash restored staged changes, the batch stops before the next
-apply to protect that staging, even for separate files; review and commit those
-changes before continuing. The view refreshes the repository after every attempt.
-
-The preview binds apply to the saved commit ID and rechecks the target and stash
-list before execution. Git cannot atomically protect the branch, index, working
-tree or stash numbering against other programs; close other Git operations and
-editors for this repo during the action. Deletion is permanent and has a separate
-warning. After an uncertain result, inspect files and the stash list before retrying.
-
-For a read-only report with the same file grouping, use `gmf REPO --stashes`
-(or `python3 gitmaster_flash.py REPO --stashes --json`). It starts no scan or
-network access and applies/deletes nothing. Exit codes: 0 for a report (including
-an empty stash list), 2 for a read error or invalid options. JSON uses the result
-kind `stashes`, with stash OIDs, selectors and subjects plus `files` containing
-`path`, byte-preserving `path_key`, working/staged status codes, `untracked` and
-labelled `diff` lines. The usual `--list`/snapshot `--json` stash counts and exit
-codes remain unchanged.
-
-## Work views (`B`)
-
-`B` narrows the list by the work ahead. Path search with `/` stays independent.
-`M` still changes only the detail/compact layout.
-
-| `--view` | Selection |
-|---|---|
-| `all` | every repo |
-| `changes` | local files, stashes or active Git operations |
-| `incoming` | known incoming commits on any remote |
-| `outgoing` | known outgoing commits, missing remote branches or uncovered local branches |
-| `access` | fetch/read failures or proven unsafe remote configuration |
-| `publish` | committed GitHub content differs, or the current branch is missing there |
-
-Views use locally known data and do not start a fetch. `R` and `U` renew remote
-measurements. The header names the active view, match count and hidden repos
-needing attention. An empty view does not claim a clean inventory. Esc clears
-path search first, then an active work view, and only then quits.
-
-In compact layout a context line shows the selected repo, branch, sync state,
-remotes and relevant action keys. `Sync ✔` and `G pending` can coexist: privately
-synced, with publication to GitHub still outstanding. That receives the `G` mark
-and counts as needing attention. `I` explains both states in full. Action keys
-never replace a safety check or confirmation. Key hints become shorter below
-100 columns; below 65 columns they show common actions and `H` for full help.
-
-GitHub content and history have separate indicators:
-
-![Matching GitHub content with neutral different history](docs/publication.svg)
-
-`GitHub ✓` is green: the committed files match the last known GitHub branch.
-`History ≠` is gray: the commits differ, for example after publishing a squashed
-snapshot. With matching content, that history difference does not trigger the
-publication mark, raise the review count or enter the incoming/outgoing views.
-Private sync remotes still use commit ancestry. Their synchronization
-requirements remain independent of publication.
-
-`GitHub ≠` means the committed content differs and needs review. It does not
-infer which side is newer from unrelated histories. The info view retains the
-commit counts and lists explicitly excluded paths. A failed fetch or comparison
-never displays a green GitHub check. `R` or `U` refreshes the remote state;
-uncommitted files keep their own change indicators. This is a source comparison,
-not a check for a published GitHub Release.
-With differing content and divergent histories, `publish` shows the repository;
-the directional incoming/outgoing views do not guess a direction.
-
-Non-interactively: `gmf --list --view outgoing` or
-`gmf --json --view publish --filter api`. JSON adds `sync_clean` and
-`publication_pending` per repo; `view` metadata gives its ID, matches, inventory
-total and hidden attention count. Exit status still concerns visible repos.
-`--diff HOST --view changes` compares each matching repo path on **both**
-machines when either side matches. A working copy changed only here therefore
-does not become a false “repo only here” finding. Path filters still apply to
-both sides.
-
-## Fetching in the background (`R`)
-
-`R` asks every safe remote for its state. Over the network and across dozens of
-repositories that takes minutes, so it runs in a worker thread: the list stays
-usable the whole time, every repository is entered as soon as its own fetch is
-done, and the header counts along — `fetching 12/61`.
-
-While the run is going, the order deliberately stays put. Re-sorting on every
-incoming result would move rows out from under the cursor, and you would act on
-a different repository than the one you meant. Sorting happens once, at the end,
-together with repositories that appeared or vanished in the meantime.
-
-If you commit, push or view a stash during the run, that repository keeps the
-state you are looking at: the scan's result for it is older and is dropped. Its
-remote counters can then lag until the next `R` — the opposite mistake would be
-worse, showing a finished commit as an open change again.
-
-`X` stops the background scan and keeps results already entered. It ends only
-that scan's Git process groups; independent actions remain untouched. Quitting
-also stops the active scan. `N` rereads the selected repo locally, even during
-a scan. `U` chooses exactly one remote to fetch; first stop an active full scan
-with `X`. Fetch leaves the branch, index and working tree unchanged.
-
-The line above the keys shows the age of the local measurement and the last
-**proven successful fetch of each remote for the current branch**. `I` shows
-ISO-8601 timestamps. Fetch age starts unknown on launch; gmf does not guess it
-from Git file times. A local refresh renews only the local measurement. A failed
-fetch keeps the last successful time alongside the failure. Branch or remote
-configuration changes discard inherited fetch times. These measurements never
-replace immediate safety checks before transfers.
-JSON includes `measured_at` per repo and `fetched_at` per remote; an empty string
-means unknown. Time differences alone do not count as machine drift.
-Non-interactively, `gmf --json --fetch-remote origin /path/to/repo` fetches only
-that remote; with a scan root the choice applies to each repo, and missing
-remotes are explicitly reported as errors.
-
-## Filtering the repo list (`/`)
-
-Past a few hundred repositories, typing beats scrolling. `/` opens a one-line
-prompt; the list shrinks to the repositories whose **path** contains what you
-typed. `Esc` in the prompt keeps the current filter, an empty input clears it,
-and `Esc` in the list clears an active filter instead of quitting.
-
-Several terms separated by spaces must **all** occur, in any order — so
-`work api` also finds `work/customer/api-server` without you knowing the part in
-between. Matching ignores case, and it ignores how an accent is stored: macOS
-hands out folder names in either Unicode normalisation, so a name pasted from
-Finder finds its repository just like one you typed.
-
-The filter is display only: it changes nothing in any repository and does not
-re-run the scan, so lifting it is instant. It matches the path alone, never the
-branch, remote or file contents — the path is the one thing visible in every
-view, and a filter keyed on something invisible would leave you guessing why a
-repository is missing.
-
-Because gmf exists to give you the overview, the header keeps saying what is
-hidden:
-
-```text
- gitmaster_flash 0.34.1 · ~/git · 3/61 repos · filter “api” · 2 to review (+7 hidden)
-```
-
-`3/61` is how much you see, and `+7 hidden` counts the repositories the filter
-removed that would need attention. Without that number a filter could quietly
-hide exactly the repositories you started gmf for.
-
-## Changes: read-only inspection (`A`)
-
-`→` shows *that* a file changed; `A` shows *what* changed in it. Pick a file with
-`↑`/`↓` (or `Tab`), press `⏎`, and its diff opens in the scrollable viewer —
-including new files, which `git diff` normally ignores, and deleted ones.
-
-```text
- Changes · api-gateway
- M  README.md
- M  server.py
- U  notes.txt
- D  old-config.yml
-
- ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back
-```
-
-This view is deliberately read-only: it changes no index entry — mode, object ID,
-stage and path all stay as they are — and no working-tree file. One byte-level
-exception: `git diff` refreshes the index stat cache (the recorded timestamps)
-even with `GIT_OPTIONAL_LOCKS=0`, so `.git/index` may be rewritten with unchanged
-entries. Discarding or unstaging a file would require an atomic comparison with
-every editor and Git process that may change it between preview and mutation.
-Git does not provide that guarantee for a working-tree path, so gmf leaves these
-actions to an explicitly reviewed terminal command instead of risking unseen data
-loss.
-
-## Repository info and remotes (`I`)
-
-`I` opens a scrollable overview for the selected repository. It shows the path,
-branch and full HEAD, latest commit, history size, upstream ahead/behind state,
-working-tree counts, stashes, tags at HEAD, and every remote.
-Fetch and push addresses are listed separately because Git can configure them to
-different targets. GitHub remotes additionally get a credential-free
-`https://github.com/…` web URL that can be opened directly from supporting
-terminals. Embedded URL credentials, query parameters, and fragments are never
-displayed. Opening the view changes nothing.
-
-The remotes are selectable: `↑`/`↓` or `Tab` moves the highlight from one remote
-block to the next, `PgUp`/`PgDn` scrolls the text.
-
-**`T` tests the selected remote.** It runs `git ls-remote`, which only asks for
-the remote's ref list — no objects are transferred and nothing changes locally.
-The answer distinguishes the cases that otherwise look identical:
-
-| Result | Meaning |
-|---|---|
-| exists and answers (n branches) | address correct, access works |
-| answers but has no branches | reachable, repository still empty |
-| address reachable, but no repository there | deleted, renamed, or no access |
-| server wants a login | credential helper or SSH key missing |
-| not measurable from this session | the credential helper needs the login keychain, which only the GUI session opens |
-| SSH host key unknown or changed | connect once in a terminal and verify it |
-| host name does not resolve | no network or DNS problem |
-| no connection to the host | offline, firewall, or the server is down |
-| server replied with an error | problem on their side, not your repository |
-| no answer within n seconds | network or server too slow |
-
-The info view also keeps Git's own error message as evidence, underneath the
-plain-language classification.
-
-**`X` removes the selected remote** — the only writing action in this view, and
-it cannot be undone. The preview supports separate standard fetch mappings only;
-custom or shared mappings block removal before confirmation. Besides the section in `.git/config`, `git remote remove`
-deletes every remote-tracking branch `refs/remotes/<name>/*` together with its
-reflog, and local branches tracking that remote lose their upstream. So gmf shows
-a preview before asking: the addresses, the number of tracking branches
-affected, the local branches that lose their upstream, and how many commits on
-those tracking branches exist in no local branch, tag or other remote — after
-removal only Git's garbage collector still knows them. Below that stands the
-warning that there is no undo: `git remote add` only re-creates the address; the
-refs come back only if the server still has them. For the sync remote the
-preview additionally warns that `P` stops working for this repository. Confirm
-with `Y ⏎` as for the GitHub push; anything else cancels and is logged as a `⊘`
-line in the command log. If the address or the set of tracking refs changes
-between preview and yes (a fetch, a terminal next door), nothing is removed.
-Commits, files, local branches and stashes stay untouched; nothing changes on
-the server.
-
-Everything else in this view stays read-only. `T` tests the selected remote and
-keeps Git's redacted response as evidence. Local branches are listed with their
-last commit, upstream, ahead/behind and merge state, but gmf does not delete
-branches: Git would also delete their reflogs, which can contain the last local
-reference to commits. Deletion remains an explicit terminal task after reviewing
-those details. `S` opens the separate stash view with file previews and
-confirmed apply, pop and delete actions.
-
-Values line up in one column, and identical fetch/push addresses share a single
-`fetch+push` line — they are only listed separately when they really differ
-(`git remote set-url --push` allows that, and gmf then blocks transfers).
-
-```text
- Repository info · api-gateway
-Path:            ~/projects/api-gateway
-Branch:          main
-HEAD:            a1b2c3d (a1b2c3d4e5f6789012345678901234567890abcd)
-Last commit:     2026-07-25T10:30:00+02:00 · Example Author
-  feat: add health endpoint
-History:         42 commit(s) · full clone
-Upstream:        origin/main (0 ahead / 0 behind)
-Working tree:    clean
-Stashes:         0
-Tags at HEAD:    v1.4.0
-
-Remotes:
-  origin [sync]
-    fetch+push:   git@example.invalid:team/api-gateway.git
-    branch main:  0 ahead / 0 behind
-
-  github [GitHub, last fetch failed]
-    fetch+push:   https://github.com/example/api-gateway.git
-    web:          https://github.com/example/api-gateway
-    branch main:  2 ahead / 0 behind
-
-Local branches:
-  main [current]
-    commit:       a1b2c3d · 2026-07-25 · feat: add health endpoint
-    upstream:     origin/main (0 ahead / 0 behind)
-
-  spike-caching [merged]
-    commit:       9f8e7d6 · 2026-07-11 · try a simpler cache key
-    upstream:     (none)
-```
-
-Other local branches are included in the main overview, too: `B2` means two
-non-current branches need review. Their info blocks show how many commits are
-outside **locally known, direct remote-tracking refs**. A branch without an
-upstream can still be fully covered by another remote's refs. This is a statement
-about cached refs, not proof of the current server state. `R` still fetches only
-the checked-out branch; it does not refresh every other branch. Symbolic remote
-refs pointing at local branches do not count as coverage. In a shallow clone,
-a positive remainder is shown as unknown because missing history may hide a path.
-An unreadable or concurrently changed inventory is labelled as unavailable.
-
-## Commit helper (`C`)
-
-```
- Commit helper · api-gateway — 4/6 selected, review then ⏎
- M  README.md                                      ✔ commit
- U  notes.txt                                      ✔ commit
- U  server.py                                      ✔ commit
- U  build/out.o                                    ✔ commit
- D  old-draft.md                                   — staged then deleted: nothing to commit
- U  vendor/lib/                                    — foreign repository: use the terminal
-
- ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel
-```
-
-1. Every changed and new file is listed. `␣` selects or excludes it; the helper
-   never edits `.gitignore` or any other working-tree file before the commit.
-   `A` takes all of them, `N` none. Two kinds of entry cannot be selected at all.
-   A file you staged and then deleted (`git add x && rm x`): the helper commits
-   the approved paths against `HEAD`, and such a path is in neither `HEAD` nor
-   the working tree — there is nothing to commit for it. And a path ending in
-   `/`, which is another Git repository inside the working tree: `git add` would
-   silently turn it into a submodule link, and `git commit -- sub/` refuses it
-   too. Both stay visible, because both differences are real; they just say so
-   instead of letting the whole commit fail.
-
-   Submodule entries identify Gitlink references. A changed, initialized module
-   checkout can be recorded in the parent commit; uncommitted files inside it
-   cannot. Content-only entries are disabled with an `O` detail hint. Conflicted,
-   unavailable or uninitialized references are not offered as ordinary files.
-   A removed module or one replaced by a file remains selectable when its
-   state is proven. Other paths may still contribute nothing against `HEAD`,
-   such as a path removed only with `git rm --cached`; the helper leaves those
-   out and explains when no selected path contributes a change.
-2. `G` offers ready-made subsets — because with thirty changed files you usually
-   want several coherent commits rather than one large one. Three views:
-   by kind of change (changed / new / deleted), by top-level folder, and by file
-   extension. A suggestion that would cover *everything* is left out, and two
-   views hitting the same files appear only once, so the list stays short:
-
-   ```
-    Suggestions — pick one, it replaces the current selection
-
-      changed files (4)
-      folder src/ (3)
-      folder docs/ (2)
-   ```
-
-   Picking one *replaces* the selection instead of adding to it — after two
-   suggestions nobody could otherwise say what is still ticked. A rename is never
-   split: source and target must go into the same commit, so a suggestion that
-   catches one half pulls in the other and says so with `+ rename partner`.
-   Suggestions only tick boxes; the commit still needs the confirmation in the
-   next step.
-3. Before you type the commit message, the repository's recent messages are shown
-   as a style reference — as many as fit above the input line, which always stays
-   visible.
-4. Merge conflicts block the helper completely. The commit is built in a temporary index containing
-   only the approved paths; an existing user index, including deliberately staged
-   but excluded work, stays intact. For the committed paths the real index adopts
-   the new commit, exactly as `git commit -- <path>` does — otherwise `git status`
-   would keep reporting them as modified. Push remains a separate, deliberate `P`
-   action. After an ordinary local commit, the result line includes
-   `git -c core.hooksPath=/dev/null update-ref --no-deref refs/heads/<branch> <old-oid> <new-oid>`
-   as the undo command. After the very first commit it uses
-   `git -c core.hooksPath=/dev/null update-ref --no-deref -d refs/heads/<branch> <new-oid>`.
-   The `core.hooksPath` part is shown because gmf runs it that way: undoing a
-   commit must not start the repository's own `reference-transaction` hook. The
-   full ref keeps the undo
-   bound to the approved branch even after a checkout; the expected new OID also
-   prevents changing that branch after it has moved. The committed files stay
-   staged and on disk. The helper is blocked on a detached HEAD.
-
-## Installation
-
-Requires Python 3.9+, Git 2.36+ and a UTF-8 terminal with curses.
-No third-party Python packages.
+## Command line
 
 ```sh
-git clone https://github.com/DanielMuellerIR/gitmaster_flash.git
-python3 gitmaster_flash/gitmaster_flash.py
-```
-
-### Linux: CachyOS, Linux Mint and other distributions
-
-From the checkout, run **without sudo**:
-
-```sh
-./install-linux.sh
-```
-
-The same installer supports **Bash, Fish and Zsh**. It chooses `$SHELL`; override
-that with `--shell bash`, `--shell fish` or `--shell zsh` if your terminal uses a
-different shell. It checks Python/curses, Git and the selected shell, then runs
-the self-tests before writing anything. Missing prerequisites are reported with
-package commands; the installer itself never installs packages or changes system files.
-
-If needed, install prerequisites first:
-
-```sh
-# CachyOS / Arch
-sudo pacman -S --needed python git
-# Linux Mint / Ubuntu
-sudo apt install python3 git
-```
-
-Fish gets an autoloaded `gmf.fish` under `${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions`;
-`config.fish` stays unchanged. Bash/Zsh gets a generated wrapper under
-`${XDG_CONFIG_HOME:-$HOME/.config}/gitmaster_flash/shell` and a marked source block
-in `.bashrc` / `${ZDOTDIR:-$HOME}/.zshrc`. Changed startup files receive a dated
-`.gmf-backup-*` copy. Repeated installation adds no duplicate block and leaves
-identical files untouched. Existing foreign wrappers, conflicting definitions,
-linked startup files and incomplete shell syntax stop registration. Startup files
-with non-comment `<<` syntax require manual configuration rather than guessing
-where a here-document ends.
-
-Open a new terminal, or use the exact `source` command printed by the installer.
-Then `gmf ~/projects` includes the usual Enter-to-cd behavior and preserves CLI
-exit codes. The wrapper points to this checkout: keep it in place, update it
-normally, and rerun the installer after moving it. `./install-linux.sh --check`
-checks dependencies and self-tests without installing files. App shortcuts also
-work in a local Linux desktop terminal: configure the absolute path to an
-executable launcher. The selected repository is passed as one folder argument.
-Launch results refer to the launcher process, not the lifetime of the editor it
-starts. Its exit status and a bounded diagnostic are reported even when a child
-keeps stderr open; successful exit does not prove that a window appeared.
-
-### macOS / existing Zsh installation
-
-For the `⏎ = cd into the repository` feature, source the shell wrapper — a child
-process cannot change the working directory of the shell that started it, so a
-small function has to do it. `install.sh` does that for you: it runs the
-self-test, then registers the safely quoted absolute path to `gmf.zsh` in your
-`~/.zshrc` (idempotent — a second run changes nothing, including from clone paths
-with spaces or shell metacharacters). When appending, it also terminates an
-existing final line that has no newline, so the `source` command cannot merge
-with it:
-
-```sh
-gitmaster_flash/install.sh
-```
-
-The repository provides four entry points:
-`build.sh` runs the self-test and regenerates the README pictures in `docs/`
-(`--check` only verifies them), `install.sh` registers the Zsh wrapper,
-`install-linux.sh` registers Linux shell wrappers, and
-`release.sh` writes a versioned source archive to `dist/` — see
-[Tests](#tests) and [Release](#release).
-
-A line that already sources the same wrapper is accepted in any spelling
-(`~/…`, `$HOME/…`, quoted or not); only a genuinely different path stops the
-installer and asks you to sort it out by hand.
-
-Or add the line manually:
-
-```sh
-printf '\n%s\n' 'source /path/to/gitmaster_flash/gmf.zsh' >> ~/.zshrc
-```
-
-In a new shell, `gmf` then starts the tool (and `cd`s where you asked it to):
-
-```sh
-cd ~/projects && gmf
-```
-
-Without the wrapper everything works the same, except that ⏎ prints the path
-instead of changing into it.
-
-## Two machines: `--diff` (read-only)
-
-If you keep the same repos on more than one machine (laptop + desktop, Mac + Linux),
-they drift apart in ways git never warns you about. **Remotes live in `.git/config`
-and git never transfers them** — add a `github` remote on one machine and the other
-simply doesn't have it, so a pending push is invisible there. Same for branches you
-don't currently have checked out.
-
-```sh
-gmf --diff mymac            # compare ~/git here with ~/git on mymac
-gmf --diff mymac --json     # machine-readable
-gmf --diff mymac:~/code     # different directory on the other side
-gmf --diff mymac --fetch    # refresh ahead/behind counts first
-```
-
-It prints **only the differences**, split into classes — that split is the point,
-a report that lists everything gets ignored:
-
-```
-DRIFT  favenio: remote 'github' only here (git never transfers remotes)
-DRIFT  notes: origin is 4 ahead/2 behind here, 0/0 on mymac
-SYNC   music: origin 0 ahead/3 behind on both machines
-local  webapp: [main] here, [feature/x] on mymac
-local  blog: 3 changed/new file(s) here
-only on mymac: experiment
-```
-
-`DRIFT` also covers errors, conflicts, stashes, branch availability, remote safety
-classification (including whether fetch/push URLs are executable without exposing
-credentials) and credential-free endpoint fingerprints. A remote's configured URL
-is never serialized as such — only its fingerprint. Credentials never enter JSON
-at all: a quoted Git error line keeps the target address (host and repository
-path) as evidence, but its user info, query and fragment are removed before it
-gets there. `DRIFT` = should be identical but isn't (worth
-acting on). `SYNC` = both machines agree, but together they sit ahead/behind the
-sync remote — invisible in a pure two-machine comparison, yet usually the number
-you actually care about. `local` = explainable (different branch checked out,
-dirty working tree). Exit code **0** =
-nothing to report, **1** = findings (note: a `SYNC` line means the machines agree
-with each other, so "identical machines" alone no longer guarantees exit 0),
-**2** = the other machine could not be reached.
-
-**Requirements:** `ssh HOST` has to work — that's it. gitmaster_flash does **not** need
-to be installed on the other machine: the script is piped over stdin, so the remote
-only needs `python3` and `git`, and both sides always run the exact same version (no
-version drift to reason about). Works against Linux too.
-
-For the same checked-out branch, gmf also compares the full commit IDs. Equal
-ahead/behind counts can describe different commits; those are reported as `DRIFT`,
-not as a shared `SYNC` state. Older JSON without commit IDs remains readable but
-cannot prove commit equality. Active Git operations are reported as local work,
-even with a clean working tree. JSON carries `head_oid` (null before the first
-commit, empty when unknown) and the stable `operation` code.
-
-The comparison also checks every local branch name and full commit ID, including
-branches checked out on neither machine. A shared non-current branch with commits
-outside known remote refs produces a `SYNC` finding. Differences in cached coverage
-are labelled local; they do not prove different server contents. JSON adds
-`branches`, `branches_error` and `branch_coverage_basis: "local-remote-tracking-refs"`.
-Each branch has its name, full `oid`, `current` flag, full upstream ref, upstream
-remote, ahead/behind counts, merge state, and `coverage` (`covered`, `uncovered`,
-`unknown`) with `uncovered_commits` (null when unknown). An unmeasured inventory
-is omitted; older payloads without it cannot prove branch equality and do not
-invent missing branches. Neither comparison nor inventory changes any ref.
-
-**Branch, index, and working tree stay untouched** — no remotes are added and
-nothing is committed or pushed. It tells you what differs; fixing is yours.
-Two things it does write: `--fetch` runs a real fetch on both machines — that is
-what the flag is for — with tag fetching, tag pruning, and submodule recursion
-disabled. For each remote it fetches only the advertised object ID of the current
-branch, without a local target ref, then updates only the matching
-`refs/remotes/<remote>/<branch>` ref with `--no-deref`. The checked URL is passed
-through a one-time alias; unsafe remotes are reported instead of run. The
-very first run also creates
-`~/.config/gitmaster_flash/config.json`, on the queried machine as well, because the
-same script runs there.
-
-**Tip:** put your machines in `~/.ssh/config` and add
-`ControlMaster auto` / `ControlPath ~/.ssh/cm-%C` / `ControlPersist 60s`. A `--fetch`
-scan may open up to eight ssh connections across repositories at once (each Git fetch
-itself uses one job), and the sshd default (`MaxStartups 10:30:100`) can otherwise drop
-some of them at random — which looks like a broken repo but isn't.
-
-## Non-interactive use (scripts, CI, agents)
-
-```sh
-python3 gitmaster_flash.py --list          # colored text list
-python3 gitmaster_flash.py --json          # machine-readable
-python3 gitmaster_flash.py --json --fetch  # fetch each repo first
-python3 gitmaster_flash.py --filter api    # only repos whose path matches
-python3 gitmaster_flash.py --lang de       # force the output language
-python3 gitmaster_flash.py --version       # bare version number, nothing else
-
-# Every output carries the version — so a diff of two machines' output shows
-# whether the same build produced them:
-#   --list header:  gitmaster_flash 0.6.0 · $HOME/git · 61 repos
-#   --json (0.6.0+): {"version": "0.6.0", "root": "…", "repos": [ … ]}
-#                    (before 0.6.0 --json printed a bare array)
-```
-
-`--filter` takes the same terms as `/` in the UI and works with `--list`,
-`--json` and `--diff`; started interactively it preselects the filter, which `/`
-then changes. With `--diff` it narrows **both** machines by the same terms —
-filtering only one side would report "only here" differences that do not exist.
-Every output names the active filter: the `--list` header, a structured `filter`
-object in JSON (query plus matching and total repository counts), and a leading
-line in the `--diff` text report that gives both machines' counts. A filter
-without a single hit says so on stderr — on stdout an empty list,
-or "no differences", together with exit code 0 would otherwise look exactly like
-"everything is fine". The `--list` header also counts the hidden repositories
-that would need attention (`(+7 hidden)`), the same way the UI header does: a
-single `✔` line with exit code 0 must not look like a clean estate while the
-filter is quietly hiding fifty dirty repositories.
-
-Exit code 0 means everything is clean and in sync, 1 means at least one
-repository needs attention; it is computed over the repositories that passed the
-filter. Without a TTY the tool prints the list instead of
-starting the UI, so a pipe does the sensible thing.
-
-One further flag exists but is not meant to be typed: `--cd-file` names the file
-the `gmf` shell wrapper reads the selected repository path from. The wrapper
-passes it; calling it by hand has no use.
-
-## Settings in the interface (`,`)
-
-`,` opens a list of the settings, `↑`/`↓` picks one, `⏎` changes it. The
-list scrolls in small terminals, including the read-only entries at the end.
-The line above the footer explains whatever you are standing on. A changed value takes
-effect at once and is written back to `config.json` — atomically, via a
-neighbouring temporary file, so an interrupted write cannot leave you with half
-a config and none of your settings.
-
-Editable here: language, when the compact view starts, the four timeouts, and
-the folders the scan skips. Every input is checked before it is stored — a
-timeout of `abc` never reaches the file, and a skipped folder must be a *name*,
-because the scan compares it against single path segments and an entry like
-`a/b` could never match.
-
-Two groups stay in the file on purpose, and the view shows them read-only with
-that note:
-
-- `sync_remote_names` / `sync_remote_hosts` decide which remote counts as your
-  private sync remote — and therefore where `P` pushes. Changing a push target
-  does not belong behind one keystroke in a list you are scrolling through.
-- `apps` holds program paths that gmf starts with `open -a`. A path typed into a
-  one-line field is not a path anyone has verified.
-
-Showing them read-only beats hiding them: a setting you cannot find is worse
-than one you have to edit in a file.
-
-## Configuration
-
-`~/.config/gitmaster_flash/config.json`, created on first run:
-
-Values loaded from this file use the same ranges and choices as the settings
-interface. Invalid entries fall back individually with a warning; the file is
-preserved for correction. Folder and remote lists must contain strings only.
-
-- `apps` — key → application used to open a repository (macOS `open -a`, Linux executable launcher). The key
-  shows up in the footer automatically, so `{"Z": {"name": "Zed", "path":
-  "/Applications/Zed.app"}}` gives you `Z Zed`. Pick a key that is not already
-  taken by the table above. Inside an SSH session gmf refuses this action with a
-  clear explanation: an app can only open in your local desktop session.
-- `sync_remote_names` / `sync_remote_hosts` — how the private sync remote is
-  recognized: by remote name, or by an exact normalized host in the remote URL
-  (substring matches are never accepted). Defaults to `origin`
-  for a generic installation. All remotes are displayed regardless; GitHub is
-  recognized from its URL and sorted last.
-- `skip_dirs` — directories the scan does not descend into.
-- `publication_excludes` — explicit literal paths omitted from the GitHub content
-  comparison, per `owner/repo`, for example
-  `{"example/project": ["internal/reviews", "docs/private-notes.md"]}`.
-  Directory paths include their contents; wildcards have no special meaning.
-  No paths are excluded by default. These rules only affect the comparison;
-  they never remove files from a push or relax its approval checks. JSON records
-  `content_equal` (`true`, `false`, or `null` when unknown), `content_excludes`,
-  `content_error` and `history_differs` per remote, alongside the raw commit counts.
-- `lang` — `"en"`, `"de"`, or `null` to follow `$LANG`.
-- `compact_from` — when the repository count exceeds this number, gmf starts in
-  the compact view (default 20: up to 20 use the detail view; `M` switches at any
-  time).
-- `git_timeout` — seconds per local git call (default 10).
-- `fetch_timeout` — seconds per fetch call (default 30).
-- `diff_timeout` — hard wall-clock limit for the complete SSH comparison
-  (default 3600 seconds). Individual Git calls still use `git_timeout` or
-  `fetch_timeout`; SSH connection setup has a separate ten-second limit.
-- `commit_timeout` — seconds for `git commit` alone (default 120). It runs the
-  repository's pre-commit hook, which often starts linters or tests and needs far
-  longer than `git_timeout`. When the limit is hit, git *and* everything the hook
-  started are terminated, and gmf reports it instead of aborting.
-
-## Safe push
-
-`P` is intentionally limited to a non-public sync remote. It fetches first,
-requires a clean working tree and rejects behind or divergent history. Fetch and push
-URLs must identify one identical credential-free host/repository target; multiple
-or differing push URLs are blocked. The mix that is common at hosting services —
-fetch over HTTPS, push over SSH through the virtual `git` user — counts as the
-same target: `git@host:org/repo` and `https://host/org/repo` mean the same
-repository. Immediately before a confirmed mutation the
-branch, HEAD, index, worktree, remote identity and target OID are checked again.
-Push sends the approved commit OID through an explicit refspec. An exact target-OID lease prevents a
-remote deletion or concurrent move from turning it into an unreviewed update;
-tags and submodule commits are never sent. The one push also disables repository
-hooks, so a pre-push hook cannot publish unreviewed tags or additional refs. The transfer uses the exact URL that was
-checked, not a remote name that concurrent configuration could redirect. The way
-to that address counts as well: for that one call an SSH wrapper from the
-environment or from the repository's config is ignored, and three settings in
-the repository's *own* config block the transfer outright — `core.gitProxy`,
-`http.proxy` (including its address-bound form) and `http.sslVerify = false`.
-Each of them can send a transfer somewhere other than the checked address, and
-none can be switched off for a single call: the first is a multi-valued key, and
-forcing the second empty would also disable a real corporate proxy. In your
-global Git config all three stay allowed: there you wrote them yourself, and a
-repository cannot slip them in. Its fetch
-refspec must map `refs/heads/<branch>` to that remote's matching tracking ref.
-
-Press `L` to choose a pull remote. “Fetch all remotes” first refreshes every safe
-remote of this repository, then opens the source chooser again. Only the
-**remote branch with the same name** is integrated into the current local branch;
-the existing upstream stays unchanged. gmf previews incoming commits and file names
-before **Y ⏎** confirmation. Only fast-forward with a clean working tree is allowed;
-divergence, conflicts and active Git operations stop the pull. Local ignored files
-are preserved if incoming files use the same paths; branch squash settings cannot
-change the fast-forward. Immediately before
-applying, gmf rechecks the approved state and integrates the fixed commit ID without
-hooks, autostash or recursive submodules. Do not edit or switch this repository in
-another program meanwhile: branch, index and working tree cannot be bound atomically
-against a concurrent checkout. Merge and rebase remain terminal special cases.
-
-GitHub uses the separate `G` path. It works only when the same branch already
-exists on exactly one GitHub remote and the histories are related. Before
-publishing it shows every outgoing commit and changed file name. The question
-sits below that list as a white-on-black bar with the `Y ⏎ = yes` part in red, a
-blank line above it and the terminal cursor visible behind it, so it still stands
-out after a hundred file names; it is answered with `Y` + ⏎ (any other input, an
-empty ⏎ or Esc cancels):
-
-```text
- GitHub push preview · app → github/master
- …
- M	components/SAMPLE_Search.4dbase/Contents/Info.plist
- A	components/SAMPLE_Search.4dbase/Contents/Documentation/Methods/SAMPLE_Version.md
-
- Publish this branch to github? Y ⏎ = yes, anything else cancels: ▮      ← bar
- ↑/↓ scroll · Esc cancel · line 41-72 / 72
-```
-
-The `P` question for the private sync remote uses the same bar, one line above
-the footer of the repo list. The final command still sends only the current
-branch: approved source OID, exact target lease, no tags, no new branch. A remote
-with multiple or differing fetch/push targets is blocked entirely, even if both
-targets are on GitHub. Complex cases stay terminal-only.
-
-Git never asks for credentials here. Every Git call runs with terminal prompts and
-askpass disabled and in its own session, because Git writes such a question
-(`Username for 'https://github.com':`) straight to the terminal rather than to the
-captured output — inside the curses screen that destroys the display and then waits
-for input that never arrives. A remote that needs a login therefore fails right away
-with `<remote> needs a login (no credential helper or SSH key).` instead of asking.
-Store HTTPS credentials in a credential helper (in a logged-in macOS GUI session:
-`git config --global credential.helper osxkeychain`) or use SSH with a key in the
-agent; both work without any prompt.
-
-## Saved comparisons and color output
-
-```sh
-gmf --json > before.json
-# ... later ...
-gmf --json > after.json
+gmf ~/projects --list --view changes
+gmf ~/projects --json > snapshot.json
+gmf ~/projects --diff buildbox:~/projects
 gmf --compare before.json after.json
-gmf --compare before.json after.json --json --view changes
-gmf --list --color never
 ```
 
-`--compare` reads only the two files, without scanning, SSH, fetch or config
-creation. Saved path searches must match. Save complete snapshots and apply
-work views when comparing, so an excluded counterpart does not become a false
-missing repo. Creation times, local measurement times and unknown capabilities
-remain visible; time differences alone are not drift. Incompatible files exit 2.
+Local scans and reports can run without curses interaction. SSH comparisons
+stream the same script to the other host, where it needs Python and Git.
+The [CLI guide](docs/cli.md) covers flags, exit codes, file diffs and stashes.
+The [JSON format](docs/json-format.md) describes snapshots and findings.
 
-JSON now carries `schema_version: 1`, independently of the program version.
-Comparison output retains readable `differences` and adds stable `findings`
-with types, categories, sides and values. Older object snapshots remain readable
-with explicit limits. The complete contract is in
-[JSON format and finding types](docs/json-format.md).
+## Configuration and development
 
-`--color auto` is the default for `--list`: colors only at a terminal and without
-`NO_COLOR` in the environment. `always` forces them even through a pipe and takes
-precedence over `NO_COLOR`; `never` suppresses them. JSON and comparison reports
-retain their fixed text format. The curses UI continues to use the terminal
-palette.
-
-## Tests
-
-```sh
-python3 -m unittest discover -s tests
-```
-
-The logic (status parsing, heuristics, repo scan) is separated from the curses UI
-and tested headlessly against real temporary repositories.
-
-```sh
-python3 docs/make-screens.py --check   # do the pictures still match the UI?
-```
-
-`--check` fails when the screens in `docs/` would come out different — after a UI
-change, run `./build.sh` (self-test, then `docs/make-screens.py`) and commit the
-result; `./build.sh --check` is the read-only variant. The capture waits for the
-complete demo header and for the command-log entry of each confirmed Git action;
-output silence alone is not treated as completion.
-
-## Release
-
-```sh
-./release.sh
-```
-
-There is no app bundle, so there is nothing to notarize: a release is a source
-archive of the committed state. The script refuses to run with uncommitted
-changes to tracked files, runs `./build.sh --check` (self-test, pictures still
-current), packs `git archive HEAD` into `dist/gitmaster_flash-<version>.tar.gz`,
-unpacks it once to confirm the program inside reports the same version, and
-writes a `.sha256` next to it. An existing artifact of the same version is never
-overwritten. Last line on success: `RELEASE OK: <path> (<version>)`.
+- [Configuration](docs/configuration.md) lists all settings and explains the remote and app selectors.
+- [Runtime support](docs/runtime-support.md) records tested Python and Git combinations and shows how to repeat the checks.
+- [Architecture and development](docs/architecture.md) covers tests, demo images and source releases.
+- [Changelog](CHANGELOG.md) lists release changes.
 
 ## Name
 
-A nod to Grandmaster Flash — the tool is mostly about quick cuts between many
-records.
+A nod to Grandmaster Flash and the quick cuts between records.
 
 ## License
 
-**WTFPL** — see [LICENSE](LICENSE).
-
-## Worktree families and submodules (`W`, `O`)
-
-`W` groups the selected working copy with registrations sharing its Git common
-directory. Each working copy remains a separate row in the scan. The family
-view names paths, branches and full commit IDs, plus detached, unborn, bare,
-locked, missing and prunable states. It reuses local measurements already in
-the scan; registered paths outside the scan root are labelled uninspected and
-receive no additional Git status scan. Registry and working-copy times are shown
-separately. Family identity is local to this machine.
-
-`O` separates three references for each direct submodule: parent HEAD, parent
-index and module checkout. Changed files, active operations and conflicted index
-stages are listed separately. Uninitialized, missing and replaced modules stay
-visible. Repository ignore settings do not hide module contents. The view does
-not initialize, update or fetch a module, and it does not run a configured module
-update command. Nested submodules are not recursively inventoried.
-
-Both actions reread the selected repository locally. `A` and the expanded list
-label module paths; `C` records an approved module reference only. Commit the
-files inside the module first. A module operation without file changes receives
-an `O<n>` review mark. Unreadable inventories are shown as unavailable, not as
-empty. `--list`, `--json`, work views and comparisons retain these distinctions.
-Absolute worktree paths and family IDs are not compared across machines; module
-reference/content differences are local findings. Old snapshots without module
-inventories cannot establish that modules are absent.
-
-Try `W` on `monorepo-sandbox` and `O` on `iot-firmware` in `gmf --demo`. The
-demo builds both examples using local repositories. Local measurement time is
-captured before a later fetch, so a slow fetch does not make old file status
-look newly measured. NUL-delimited Git paths preserve CR, LF and undecodable
-bytes internally; displays escape them.
-
-## Diff layers and command-line previews
-
-Within `A`, use `1` for all changes, `2` for staged changes (HEAD → index),
-and `3` for unstaged changes (index → working tree, including new files). The
-header names the active layer and the file list follows it. Empty layers remain
-switchable. A staged-and-edited file can show different changes in each layer. `C` continues
-to commit selected current working-tree paths and preserves staging elsewhere;
-the diff layer affects previews.
-Before the first commit, staged compares against the empty starting tree.
-Submodules show Gitlink references and a dirty-content marker; `O` explains the
-contents. Diff previews do not run external diff or text-conversion programs.
-They preserve index entries and file contents; Git may update its index stat cache.
-
-The same reader is available without a scan or config creation:
-
-```sh
-gmf /path/to/repo --file-diff src/main.py --diff-mode staged
-gmf /path/to/repo --file-diff src/main.py --diff-mode unstaged --json
-```
-
-The root must be the working-tree root, and the file path relative to it.
-`--diff-mode` accepts `combined` (default), `staged` or `unstaged` and requires
-`--file-diff`. This command cannot be combined with fetches, comparisons or scan
-filters. Text escapes terminal controls while retaining line breaks. JSON is a
-separate `kind: "file_diff"` result containing `schema_version`, `version`,
-`root`, `path`, `path_key`, `mode`, `ok`, `diff` and `error`; it is not a saved repo snapshot.
-The `diff` field contains escaped preview text; it is unsuitable for `git apply`.
-Git administration paths such as `.git/config` are excluded. Exit codes: 0 for
-no difference, 1 for a difference, 2 for failure.
-
-## Runtime checks and scan measurements
-
-The supported runtime floor is Python 3.9 and Git 2.36 on macOS or Linux, with
-curses and a UTF-8 terminal for the TUI. App opening uses macOS `open` or an executable Linux launcher. The Linux
-installer supports Bash, Fish and Zsh; the original macOS installer and
-release/build scripts require Zsh. Windows is not covered.
-See [runtime support and repeatable checks](docs/runtime-support.md).
-
-`python3 tools/check-compatibility.py` runs the full suite with the current
-Python/Git. Repeat `--python` and `--git` to check an installed matrix; `--suite core`
-selects feature-contract tests and `--screens` adds image verification. It installs
-nothing. `python3 tools/benchmark-scan.py` measures five runs per fixture, using
-only temporary local remotes. See [the recorded measurement](docs/scan-benchmark.json).
-With 25 branches pointing to the same commit and three remotes, the 0.30.0
-measurement used 33 rather than 57 Git calls locally and 136 rather than 160 with fetch.
-Version 0.30.3 adds four calls to detect HEAD/ref changes across the complete
-measurement: 37 locally and 140 with fetch, for either one or 25 identical tips.
-Only identical OID coverage counts within one ref measurement are shared; every
-ref/HEAD recheck and transfer preflight remains in place. Timings depend on load.
-
-Path previews distinguish an actual newline (`\n`) from a literal backslash
-followed by n (`\\n`). Git commands retain their executable shell escaping.
-Worktree members and submodules additionally export `path_key`, the hexadecimal
-UTF-8/surrogateescape bytes of the original path. This keeps snapshots valid
-when two paths have the same older display text. Module comparisons use that
-identity; ambiguous legacy names receive a capability limit instead of guessed
-pairings. Commit suggestions preserve disabled entries, including module contents.
+[WTFPL](LICENSE).

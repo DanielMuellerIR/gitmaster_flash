@@ -50,20 +50,22 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import curses
 import datetime
 import hashlib
 import json
 import math
 import os
+import queue
 import re
 import shlex
 import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
-import queue
 import sys
 import tempfile
 import threading
@@ -72,90 +74,9 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, Iterator, Literal, NamedTuple, Optional
 
-
-class AppDiagnostics:
-    """Ein unabhängiger Leser verwirft alte Diagnosebytes auch nach dem TUI-Ende."""
-
-    READER = """
-import os, select, socket, struct
-control = socket.socket(fileno=1)
-tail = b''
-while True:
-    ready, _, _ = select.select([0] + ([control] if control else []), [], [])
-    if 0 in ready:
-        data = os.read(0, 65536)
-        if not data:
-            break
-        tail = (tail + data)[-4096:]
-    if control and control in ready:
-        if not control.recv(1):
-            control.close()
-            control = None
-            continue
-        # Nach dem Starterende bereits gepufferte Ausgabe vor dem Snapshot lesen.
-        for _ in range(128):
-            if not select.select([0], [], [], 0)[0]:
-                break
-            data = os.read(0, 65536)
-            if not data:
-                break
-            tail = (tail + data)[-4096:]
-        try:
-            control.sendall(struct.pack('!I', len(tail)) + tail)
-        except OSError:
-            control.close()
-            control = None
-"""
-
-    def __init__(self):
-        reader, self.writer = os.pipe()
-        self.control, peer = socket.socketpair()
-        self.closed = False
-        try:
-            pid = os.posix_spawn(sys.executable, [sys.executable, "-I", "-S", "-c", self.READER],
-                os.environ, setsid=True, file_actions=[
-                    (os.POSIX_SPAWN_DUP2, reader, 0),
-                    (os.POSIX_SPAWN_DUP2, peer.fileno(), 1),
-                    (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)])
-        except BaseException:
-            self.close()
-            raise
-        finally:
-            os.close(reader)
-            peer.close()
-        threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
-
-    def fileno(self):
-        return self.writer
-
-    def read_tail(self):
-        import struct
-        self.control.settimeout(2)
-        self.control.sendall(b"r")
-
-        def receive(size):
-            data = b""
-            while len(data) < size:
-                part = self.control.recv(size - len(data))
-                if not part:
-                    raise OSError("diagnostic reader closed")
-                data += part
-            return data
-
-        length = struct.unpack("!I", receive(4))[0]
-        if length > 4096:
-            raise OSError("invalid diagnostic length")
-        return receive(length).decode(errors="replace")
-
-    def close(self):
-        if not self.closed:
-            self.closed = True
-            os.close(self.writer)
-            self.control.close()
-
-__version__ = "0.34.1"
+__version__ = "0.34.2"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -175,7 +96,7 @@ CONFIG_PATH = Path.home() / ".config" / "gitmaster_flash" / "config.json"
 
 # Defaults; die geschriebene config.json darf einzelne Schlüssel überschreiben.
 # Bewusst generisch gehalten: eigene Editoren/Remote-Namen setzt man in der Config.
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
     # Taste -> App zum Öffnen des Repo-Ordners (macOS `open -a`). Die Taste
     # erscheint automatisch im Footer ("E Editor"). Beispiel für weitere:
     #   "Z": {"name": "Zed", "path": "/Applications/Zed.app"}   (freie Taste waehlen)
@@ -221,6 +142,30 @@ NULLABLE_CONFIG_TYPES = {"lang": str}
 UI_LANG = "en"  # von main() gesetzt; Tests nutzen die englische Basis.
 
 TR = {
+    "install_description": {
+        "en": "Install the shell wrapper in your user account.",
+        "de": "Shell-Wrapper im Benutzerkonto einrichten.",
+    },
+    "install_unsafe_rc": {
+        "en": "cannot prove a top-level registration in the {shell} startup file. Configure it manually.",
+        "de": "Registrierung auf oberster Ebene der {shell}-Startdatei nicht nachweisbar. Bitte von Hand einrichten.",
+    },
+    "install_different_path": {
+        "en": "The startup file sources gmf.zsh from a different path. Resolve it manually first.",
+        "de": "Die Startdatei lädt gmf.zsh von einem anderen Pfad. Bitte zuerst von Hand klären.",
+    },
+    "install_check_ok": {
+        "en": "CHECK OK: {shell}; no files installed.",
+        "de": "CHECK OK: {shell}; keine Dateien installiert.",
+    },
+    "install_registered": {
+        "en": "Registered wrapper for {shell}: {p}",
+        "de": "Wrapper für {shell} registriert: {p}",
+    },
+    "install_existing": {
+        "en": "Already installed for {shell}: {p}",
+        "de": "Für {shell} bereits installiert: {p}",
+    },
     "remove_refspec_unsupported": {
         "en": "Remote removal requires separate standard fetch refspecs; custom or shared mappings cannot be previewed safely.",
         "de": "Remote-Entfernung braucht getrennte Standard-Fetch-Abbildungen; eigene oder geteilte Abbildungen lassen sich nicht sicher vorab anzeigen.",
@@ -233,90 +178,165 @@ TR = {
     # --diff (two machines)
     "diff_here": {"en": "here", "de": "hier"},
     "diff_same": {"en": "No differences to {h}.", "de": "Kein Unterschied zu {h}."},
-    "diff_need_host": {"en": "--diff needs a host, e.g. --diff mymac",
-                       "de": "--diff braucht einen Host, z.B. --diff meinmac"},
-    "diff_bad_host": {"en": "--diff host is not a safe SSH destination",
-                      "de": "Der --diff-Host ist kein sicheres SSH-Ziel"},
+    "diff_need_host": {
+        "en": "--diff needs a host, e.g. --diff mymac",
+        "de": "--diff braucht einen Host, z.B. --diff meinmac",
+    },
+    "diff_bad_host": {
+        "en": "--diff host is not a safe SSH destination",
+        "de": "Der --diff-Host ist kein sicheres SSH-Ziel",
+    },
     "diff_ssh_failed": {"en": "Cannot reach {h}: {e}", "de": "{h} nicht erreichbar: {e}"},
-    "diff_ssh_exit": {"en": "ssh exited with code {code}",
-                      "de": "ssh endete mit Code {code}"},
+    "diff_ssh_exit": {"en": "ssh exited with code {code}", "de": "ssh endete mit Code {code}"},
     "diff_ssh_no_output": {"en": "no output", "de": "keine Ausgabe"},
     "diff_ssh_bad_json": {"en": "unreadable JSON", "de": "unlesbares JSON"},
-    "diff_ssh_bad_schema": {"en": "incompatible JSON structure",
-                            "de": "inkompatible JSON-Struktur"},
-    "snapshot_error": {"en": "Cannot compare snapshots: {e}", "de": "Snapshots nicht vergleichbar: {e}"},
+    "diff_ssh_bad_schema": {
+        "en": "incompatible JSON structure",
+        "de": "inkompatible JSON-Struktur",
+    },
+    "snapshot_error": {
+        "en": "Cannot compare snapshots: {e}",
+        "de": "Snapshots nicht vergleichbar: {e}",
+    },
     "snapshot_too_large": {"en": "snapshot exceeds 64 MiB", "de": "Snapshot überschreitet 64 MiB"},
-    "snapshot_duplicate_key": {"en": "duplicate JSON key: {name}", "de": "Doppelter JSON-Schlüssel: {name}"},
-    "snapshot_nonfinite": {"en": "non-finite JSON number: {value}", "de": "Nicht endliche JSON-Zahl: {value}"},
-    "scan_head_changed": {"en": "HEAD changed during repository scan; refresh and retry",
-                          "de": "HEAD hat sich während des Repo-Scans geändert; bitte neu einlesen"},
-    "scan_refs_changed": {"en": "Branch or remote refs changed during repository scan; refresh and retry",
-                          "de": "Branch- oder Remote-Refs haben sich während des Repo-Scans geändert; bitte neu einlesen"},
+    "snapshot_duplicate_key": {
+        "en": "duplicate JSON key: {name}",
+        "de": "Doppelter JSON-Schlüssel: {name}",
+    },
+    "snapshot_nonfinite": {
+        "en": "non-finite JSON number: {value}",
+        "de": "Nicht endliche JSON-Zahl: {value}",
+    },
+    "scan_head_changed": {
+        "en": "HEAD changed during repository scan; refresh and retry",
+        "de": "HEAD hat sich während des Repo-Scans geändert; bitte neu einlesen",
+    },
+    "scan_refs_changed": {
+        "en": "Branch or remote refs changed during repository scan; refresh and retry",
+        "de": "Branch- oder Remote-Refs haben sich während des Repo-Scans geändert; bitte neu einlesen",
+    },
     "snapshot_depth": {"en": "JSON nesting is too deep", "de": "JSON-Verschachtelung ist zu tief"},
-    "cli_compare_options": {"en": "--compare cannot be combined with --diff, --demo or fetch options",
-                            "de": "--compare ist nicht mit --diff, --demo oder Fetch-Optionen kombinierbar"},
-    "cli_fetch_remote_output": {"en": "--fetch-remote requires non-interactive --list/--json output",
-                                "de": "--fetch-remote benötigt eine nicht interaktive --list/--json-Ausgabe"},
-    "cli_fetch_remote_name": {"en": "--fetch-remote requires a remote name", "de": "--fetch-remote benötigt einen Remote-Namen"},
-    "snapshot_filtered_view": {"en": "Saved work views can omit a counterpart. Save complete --json snapshots and apply --view when comparing.",
-                               "de": "Gespeicherte Arbeitsansichten können ein Gegenstück auslassen. Vollständige --json-Snapshots speichern und --view erst beim Vergleich anwenden."},
-    "snapshot_filter_mismatch": {"en": "Saved path filters differ; save both snapshots with the same filter or without a filter.",
-                                 "de": "Gespeicherte Pfadfilter unterscheiden sich; beide Snapshots mit demselben oder ohne Filter speichern."},
-    "snapshot_source": {"en": "{name}: snapshot {at} ({age}), {n} recorded repo(s)",
-                        "de": "{name}: Snapshot {at} ({age}), {n} erfasste Repos"},
-    "snapshot_measurements": {"en": "  Local measurements: {first} … {last}; unknown: {n}",
-                              "de": "  Lokale Messungen: {first} … {last}; unbekannt: {n}"},
+    "cli_compare_options": {
+        "en": "--compare cannot be combined with --diff, --demo or fetch options",
+        "de": "--compare ist nicht mit --diff, --demo oder Fetch-Optionen kombinierbar",
+    },
+    "cli_fetch_remote_output": {
+        "en": "--fetch-remote requires non-interactive --list/--json output",
+        "de": "--fetch-remote benötigt eine nicht interaktive --list/--json-Ausgabe",
+    },
+    "cli_fetch_remote_name": {
+        "en": "--fetch-remote requires a remote name",
+        "de": "--fetch-remote benötigt einen Remote-Namen",
+    },
+    "snapshot_filtered_view": {
+        "en": "Saved work views can omit a counterpart. Save complete --json snapshots and apply --view when comparing.",
+        "de": "Gespeicherte Arbeitsansichten können ein Gegenstück auslassen. Vollständige --json-Snapshots speichern und --view erst beim Vergleich anwenden.",
+    },
+    "snapshot_filter_mismatch": {
+        "en": "Saved path filters differ; save both snapshots with the same filter or without a filter.",
+        "de": "Gespeicherte Pfadfilter unterscheiden sich; beide Snapshots mit demselben oder ohne Filter speichern.",
+    },
+    "snapshot_source": {
+        "en": "{name}: snapshot {at} ({age}), {n} recorded repo(s)",
+        "de": "{name}: Snapshot {at} ({age}), {n} erfasste Repos",
+    },
+    "snapshot_measurements": {
+        "en": "  Local measurements: {first} … {last}; unknown: {n}",
+        "de": "  Lokale Messungen: {first} … {last}; unbekannt: {n}",
+    },
     "snapshot_limit": {"en": "  Limit: {detail}", "de": "  Grenze: {detail}"},
-    "snapshot_legacy_schema": {"en": "legacy JSON without schema version", "de": "älteres JSON ohne Formatversion"},
-    "snapshot_head_identity_unknown": {"en": "HEAD identity unknown in {n} repo(s)", "de": "HEAD-Identität in {n} Repos unbekannt"},
-    "snapshot_branch_inventory_unknown": {"en": "branch inventory absent in {n} repo(s)", "de": "Branch-Inventar in {n} Repos fehlt"},
-    "snapshot_local_measurement_unknown": {"en": "local measurement time unknown in {n} repo(s)", "de": "lokale Messzeit in {n} Repos unbekannt"},
-    "snapshot_fetch_age_unknown": {"en": "successful fetch time unknown for {n} remote(s)", "de": "erfolgreiche Fetch-Zeit für {n} Remotes unbekannt"},
-    "snapshot_empty": {"en": "No repositories recorded on either side; nothing was compared.",
-                       "de": "Auf keiner Seite Repos erfasst; es wurde nichts verglichen."},
+    "snapshot_legacy_schema": {
+        "en": "legacy JSON without schema version",
+        "de": "älteres JSON ohne Formatversion",
+    },
+    "snapshot_head_identity_unknown": {
+        "en": "HEAD identity unknown in {n} repo(s)",
+        "de": "HEAD-Identität in {n} Repos unbekannt",
+    },
+    "snapshot_branch_inventory_unknown": {
+        "en": "branch inventory absent in {n} repo(s)",
+        "de": "Branch-Inventar in {n} Repos fehlt",
+    },
+    "snapshot_local_measurement_unknown": {
+        "en": "local measurement time unknown in {n} repo(s)",
+        "de": "lokale Messzeit in {n} Repos unbekannt",
+    },
+    "snapshot_fetch_age_unknown": {
+        "en": "successful fetch time unknown for {n} remote(s)",
+        "de": "erfolgreiche Fetch-Zeit für {n} Remotes unbekannt",
+    },
+    "snapshot_empty": {
+        "en": "No repositories recorded on either side; nothing was compared.",
+        "de": "Auf keiner Seite Repos erfasst; es wurde nichts verglichen.",
+    },
     "diff_version": {
         "en": "! version differs: {a} {va} vs {b} {vb} — compare with care",
-        "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen"},
+        "de": "! Version verschieden: {a} {va} vs. {b} {vb} — Vergleich mit Vorsicht lesen",
+    },
     # {m}/{a}/{b} kommen vorformatiert aus _loc(): "hier" bleibt nackt,
     # Hostnamen bekommen "auf"/"on" — deshalb steht die Praeposition NICHT im Text.
     "diff_on": {"en": "on {m}", "de": "auf {m}"},
     "diff_only_on": {"en": "only {m}: {rel}", "de": "nur {m}: {rel}"},
     "diff_ambiguous_repo": {
         "en": "DRIFT  {rel}: duplicate normalized repository name; comparison is ambiguous",
-        "de": "DRIFT  {rel}: normalisierter Repo-Name doppelt; Vergleich ist mehrdeutig"},
+        "de": "DRIFT  {rel}: normalisierter Repo-Name doppelt; Vergleich ist mehrdeutig",
+    },
     "diff_remote_missing": {
         "en": "DRIFT  {rel}: remote '{r}' only {m} (git never transfers remotes)",
-        "de": "DRIFT  {rel}: Remote '{r}' nur {m} (Git uebertraegt Remotes nie)"},
+        "de": "DRIFT  {rel}: Remote '{r}' nur {m} (Git uebertraegt Remotes nie)",
+    },
     "diff_remote_state": {
         "en": "DRIFT  {rel}: {r} is {aa} ahead/{ab} behind {a}, {ba}/{bb} {b}",
-        "de": "DRIFT  {rel}: {r} {a} {aa} voraus/{ab} zurueck, {b} {ba}/{bb}"},
+        "de": "DRIFT  {rel}: {r} {a} {aa} voraus/{ab} zurueck, {b} {ba}/{bb}",
+    },
     "diff_publication_inspection_failed": {
         "en": "local  {rel}: GitHub content for {r} not inspected {m}: {e}",
-        "de": "lokal  {rel}: GitHub-Inhalt für {r} nicht geprüft {m}: {e}"},
+        "de": "lokal  {rel}: GitHub-Inhalt für {r} nicht geprüft {m}: {e}",
+    },
     "diff_sync_even": {
         "en": "SYNC   {rel}: {r} {aa} ahead/{ab} behind on both machines",
-        "de": "SYNC   {rel}: {r} auf beiden Rechnern {aa} voraus/{ab} zurueck"},
-    "diff_branch": {"en": "local  {rel}: [{ba}] {a}, [{bb}] {b}",
-                    "de": "lokal  {rel}: [{ba}] {a}, [{bb}] {b}"},
+        "de": "SYNC   {rel}: {r} auf beiden Rechnern {aa} voraus/{ab} zurueck",
+    },
+    "diff_branch": {
+        "en": "local  {rel}: [{ba}] {a}, [{bb}] {b}",
+        "de": "lokal  {rel}: [{ba}] {a}, [{bb}] {b}",
+    },
     "diff_head": {
         "en": "DRIFT  {rel}: commit on '{br}' differs: {oa} {a}, {ob} {b}",
-        "de": "DRIFT  {rel}: Commit auf '{br}' verschieden: {oa} {a}, {ob} {b}"},
-    "diff_operation": {"en": "local  {rel}: {op} in progress {m}",
-                       "de": "lokal  {rel}: {op} läuft {m}"},
-    "diff_worktree_inventory_failed": {"en": "local  {rel}: worktree inventory unavailable {m}: {e}",
-                                       "de": "lokal  {rel}: Worktree-Inventar nicht lesbar {m}: {e}"},
-    "diff_submodule_inventory_failed": {"en": "local  {rel}: submodule inventory unavailable {m}: {e}",
-                                        "de": "lokal  {rel}: Submodule-Inventar nicht lesbar {m}: {e}"},
-    "diff_submodule_inspection_failed": {"en": "local  {rel}: submodule '{path}' not inspected {m}: {e}",
-                                         "de": "lokal  {rel}: Submodul '{path}' nicht geprüft {m}: {e}"},
-    "diff_submodule_state": {"en": "local  {rel}: submodule '{path}' reference/content state differs",
-                             "de": "lokal  {rel}: Verweis-/Inhaltszustand von Submodul '{path}' verschieden"},
-    "snapshot_submodule_path_identity_unknown": {"en": "ambiguous legacy path identity in {n} submodule(s)",
-                                                "de": "mehrdeutige alte Pfadidentität bei {n} Submodulen"},
-    "snapshot_same_limited": {"en": "No differences established in the comparable measurements; see the capability limits above.",
-                              "de": "Keine Unterschiede in den vergleichbaren Messungen belegt; die Fähigkeitsgrenzen stehen oben."},
-    "snapshot_submodule_inventory_unknown": {"en": "submodule inventory absent in {n} compared repo(s)",
-                                            "de": "Submodule-Inventar in {n} verglichenen Repos fehlt"},
+        "de": "DRIFT  {rel}: Commit auf '{br}' verschieden: {oa} {a}, {ob} {b}",
+    },
+    "diff_operation": {
+        "en": "local  {rel}: {op} in progress {m}",
+        "de": "lokal  {rel}: {op} läuft {m}",
+    },
+    "diff_worktree_inventory_failed": {
+        "en": "local  {rel}: worktree inventory unavailable {m}: {e}",
+        "de": "lokal  {rel}: Worktree-Inventar nicht lesbar {m}: {e}",
+    },
+    "diff_submodule_inventory_failed": {
+        "en": "local  {rel}: submodule inventory unavailable {m}: {e}",
+        "de": "lokal  {rel}: Submodule-Inventar nicht lesbar {m}: {e}",
+    },
+    "diff_submodule_inspection_failed": {
+        "en": "local  {rel}: submodule '{path}' not inspected {m}: {e}",
+        "de": "lokal  {rel}: Submodul '{path}' nicht geprüft {m}: {e}",
+    },
+    "diff_submodule_state": {
+        "en": "local  {rel}: submodule '{path}' reference/content state differs",
+        "de": "lokal  {rel}: Verweis-/Inhaltszustand von Submodul '{path}' verschieden",
+    },
+    "snapshot_submodule_path_identity_unknown": {
+        "en": "ambiguous legacy path identity in {n} submodule(s)",
+        "de": "mehrdeutige alte Pfadidentität bei {n} Submodulen",
+    },
+    "snapshot_same_limited": {
+        "en": "No differences established in the comparable measurements; see the capability limits above.",
+        "de": "Keine Unterschiede in den vergleichbaren Messungen belegt; die Fähigkeitsgrenzen stehen oben.",
+    },
+    "snapshot_submodule_inventory_unknown": {
+        "en": "submodule inventory absent in {n} compared repo(s)",
+        "de": "Submodule-Inventar in {n} verglichenen Repos fehlt",
+    },
     "operation_merge": {"en": "Merge", "de": "Merge"},
     "operation_rebase": {"en": "Rebase", "de": "Rebase"},
     "operation_cherry_pick": {"en": "Cherry-pick", "de": "Cherry-Pick"},
@@ -325,82 +345,128 @@ TR = {
     "operation_bisect": {"en": "Bisect", "de": "Bisect"},
     "operation_active": {"en": "{op} in progress", "de": "{op} läuft"},
     "info_operation": {"en": "Git operation", "de": "Git-Vorgang"},
-    "config_string_list": {"en": "expected a list of strings",
-                           "de": "eine Liste von Zeichenketten erwartet"},
-    "set_err_names": {"en": "Enter a list of folder names.",
-                      "de": "Eine Liste von Ordnernamen eingeben."},
-    "other_branches_review": {"en": "Other branches to review: {n}",
-                              "de": "Weitere Branches prüfen: {n}"},
-    "branch_inventory_failed": {"en": "Branch inventory unavailable: {e}",
-                                "de": "Branch-Inventar nicht lesbar: {e}"},
+    "config_string_list": {
+        "en": "expected a list of strings",
+        "de": "eine Liste von Zeichenketten erwartet",
+    },
+    "set_err_names": {
+        "en": "Enter a list of folder names.",
+        "de": "Eine Liste von Ordnernamen eingeben.",
+    },
+    "other_branches_review": {
+        "en": "Other branches to review: {n}",
+        "de": "Weitere Branches prüfen: {n}",
+    },
+    "branch_inventory_failed": {
+        "en": "Branch inventory unavailable: {e}",
+        "de": "Branch-Inventar nicht lesbar: {e}",
+    },
     "info_branch_coverage": {"en": "Known remote refs", "de": "Bekannte Remote-Refs"},
-    "branch_covered": {"en": "commit contained in locally known remote refs",
-                       "de": "Commit in lokal bekannten Remote-Refs enthalten"},
-    "branch_uncovered": {"en": "commits outside locally known remote refs: {n}",
-                         "de": "Commits außerhalb lokal bekannter Remote-Refs: {n}"},
-    "branch_coverage_unknown": {"en": "coverage not provable from shallow history",
-                                "de": "Abdeckung mit flacher Historie nicht belegbar"},
+    "branch_covered": {
+        "en": "commit contained in locally known remote refs",
+        "de": "Commit in lokal bekannten Remote-Refs enthalten",
+    },
+    "branch_uncovered": {
+        "en": "commits outside locally known remote refs: {n}",
+        "de": "Commits außerhalb lokal bekannter Remote-Refs: {n}",
+    },
+    "branch_coverage_unknown": {
+        "en": "coverage not provable from shallow history",
+        "de": "Abdeckung mit flacher Historie nicht belegbar",
+    },
     "branch_needs_review": {"en": "review", "de": "prüfen"},
-    "diff_local_branch_missing": {"en": "DRIFT  {rel}: local branch '{br}' only {m}",
-                                  "de": "DRIFT  {rel}: lokaler Branch '{br}' nur {m}"},
+    "diff_local_branch_missing": {
+        "en": "DRIFT  {rel}: local branch '{br}' only {m}",
+        "de": "DRIFT  {rel}: lokaler Branch '{br}' nur {m}",
+    },
     "diff_branch_pending": {
         "en": "SYNC   {rel}: branch '{br}' has {n} commit(s) outside known remote refs on both machines",
-        "de": "SYNC   {rel}: Branch '{br}' auf beiden Rechnern mit {n} Commits außerhalb bekannter Remote-Refs"},
+        "de": "SYNC   {rel}: Branch '{br}' auf beiden Rechnern mit {n} Commits außerhalb bekannter Remote-Refs",
+    },
     "diff_branch_coverage": {
         "en": "local  {rel}: cached remote coverage of branch '{br}' differs",
-        "de": "lokal  {rel}: gespeicherte Remote-Abdeckung von Branch '{br}' verschieden"},
+        "de": "lokal  {rel}: gespeicherte Remote-Abdeckung von Branch '{br}' verschieden",
+    },
     "diff_branch_inventory_failed": {
         "en": "local  {rel}: branch inventory unavailable {m}: {e}",
-        "de": "lokal  {rel}: Branch-Inventar nicht lesbar {m}: {e}"},
+        "de": "lokal  {rel}: Branch-Inventar nicht lesbar {m}: {e}",
+    },
     "diff_branch_coverage_unknown": {
         "en": "local  {rel}: remote coverage unknown for other branches {m}: {n}",
-        "de": "lokal  {rel}: Remote-Abdeckung weiterer Branches {m} unbekannt: {n}"},
-    "diff_dirty": {"en": "local  {rel}: {n} changed/new file(s) {m}",
-                   "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}"},
+        "de": "lokal  {rel}: Remote-Abdeckung weiterer Branches {m} unbekannt: {n}",
+    },
+    "diff_dirty": {
+        "en": "local  {rel}: {n} changed/new file(s) {m}",
+        "de": "lokal  {rel}: {n} geaenderte/neue Datei(en) {m}",
+    },
     # Einmal je Lauf, nicht je Repo: sonst wiederholt ein einziger fehlgeschlagener
     # Fetch dieselbe Zeile fuer jedes Repo des Rechners.
     "diff_fetch_failed_side": {
-        "en": ("local  fetch failed {m} for {n} repo(s) — remote state not measurable "
-               "there, not a difference between the machines"),
-        "de": ("lokal  Fetch scheiterte {m} bei {n} Repo(s) — der Remote-Stand ist dort "
-               "nicht messbar, das ist kein Unterschied zwischen den Rechnern")},
+        "en": (
+            "local  fetch failed {m} for {n} repo(s) — remote state not measurable "
+            "there, not a difference between the machines"
+        ),
+        "de": (
+            "lokal  Fetch scheiterte {m} bei {n} Repo(s) — der Remote-Stand ist dort "
+            "nicht messbar, das ist kein Unterschied zwischen den Rechnern"
+        ),
+    },
     "diff_repo_field": {
         "en": "DRIFT  {rel}: {field} is {va} {a}, {vb} {b}",
-        "de": "DRIFT  {rel}: {field} {a}={va}, {b}={vb}"},
+        "de": "DRIFT  {rel}: {field} {a}={va}, {b}={vb}",
+    },
     "diff_remote_security": {
         "en": "DRIFT  {rel}: security/endpoint identity for {r} differs",
-        "de": "DRIFT  {rel}: Sicherheit/Ziel-Identität für {r} unterscheidet sich"},
+        "de": "DRIFT  {rel}: Sicherheit/Ziel-Identität für {r} unterscheidet sich",
+    },
     "diff_remote_branch": {
         "en": "DRIFT  {rel}: branch '{br}' exists on {r} only {m}",
-        "de": "DRIFT  {rel}: Branch '{br}' existiert auf {r} nur {m}"},
+        "de": "DRIFT  {rel}: Branch '{br}' existiert auf {r} nur {m}",
+    },
     "hdr_review": {"en": "{n} to review", "de": "{n} zu prüfen"},
     "hdr_clean": {"en": "all clean ✔", "de": "alles sauber ✔"},
     # Filter über die Repo-Liste (Taste /)
-    "hdr_filtered": {"en": "{n}/{total} repos · filter “{q}”",
-                     "de": "{n}/{total} Repos · Filter „{q}“"},
+    "hdr_filtered": {
+        "en": "{n}/{total} repos · filter “{q}”",
+        "de": "{n}/{total} Repos · Filter „{q}“",
+    },
     # Wie viele der ausgeblendeten Repos Aufmerksamkeit bräuchten. Muss in die
     # Kopfzeile, sonst versteckt ein Filter genau die Repos, deretwegen man gmf
     # startet.
     "hdr_hidden_dirty": {"en": "(+{n} hidden)", "de": "(+{n} ausgeblendet)"},
     "filter_no_match": {"en": "no match", "de": "kein Treffer"},
-    "filter_prompt": {"en": "Filter (empty = all repos): ",
-                      "de": "Filter (leer = alle Repos): "},
+    "filter_prompt": {"en": "Filter (empty = all repos): ", "de": "Filter (leer = alle Repos): "},
     "filter_empty_hint": {
         "en": "No repo matches “{q}”.  /  change filter · Esc show all again",
-        "de": "Kein Repo passt auf „{q}“.  /  Filter ändern · Esc wieder alle zeigen"},
-    "no_repos_found": {"en": "No Git repo below this directory.",
-                       "de": "Kein Git-Repo unterhalb dieses Ordners."},
-    "filter_cleared": {"en": "Filter cleared — all repos visible again.",
-                       "de": "Filter aufgehoben — wieder alle Repos sichtbar."},
-    "filter_no_hit": {"en": "No repo matches “{q}”. Esc shows all again.",
-                      "de": "Kein Repo passt auf „{q}“. Esc zeigt wieder alle."},
-    "filter_active": {"en": "Filter “{q}”: {n} of {total} repos.",
-                      "de": "Filter „{q}“: {n} von {total} Repos."},
+        "de": "Kein Repo passt auf „{q}“.  /  Filter ändern · Esc wieder alle zeigen",
+    },
+    "no_repos_found": {
+        "en": "No Git repo below this directory.",
+        "de": "Kein Git-Repo unterhalb dieses Ordners.",
+    },
+    "filter_cleared": {
+        "en": "Filter cleared — all repos visible again.",
+        "de": "Filter aufgehoben — wieder alle Repos sichtbar.",
+    },
+    "filter_no_hit": {
+        "en": "No repo matches “{q}”. Esc shows all again.",
+        "de": "Kein Repo passt auf „{q}“. Esc zeigt wieder alle.",
+    },
+    "filter_active": {
+        "en": "Filter “{q}”: {n} of {total} repos.",
+        "de": "Filter „{q}“: {n} von {total} Repos.",
+    },
     "hdr_filter_note": {"en": "filter “{q}”", "de": "Filter „{q}“"},
     "view_all": {"en": "All repositories", "de": "Alle Repos"},
-    "view_changes": {"en": "Local changes / stashes / operations", "de": "Lokale Änderungen / Stashes / Vorgänge"},
+    "view_changes": {
+        "en": "Local changes / stashes / operations",
+        "de": "Lokale Änderungen / Stashes / Vorgänge",
+    },
     "view_incoming": {"en": "Incoming commits", "de": "Eingehende Commits"},
-    "view_outgoing": {"en": "Outgoing commits / missing remote branches", "de": "Ausgehende Commits / fehlende Remote-Branches"},
+    "view_outgoing": {
+        "en": "Outgoing commits / missing remote branches",
+        "de": "Ausgehende Commits / fehlende Remote-Branches",
+    },
     "view_access": {"en": "Access / inspection problems", "de": "Zugriffs- / Prüfprobleme"},
     "view_publish": {"en": "GitHub publication pending", "de": "GitHub-Veröffentlichung offen"},
     "view_short_all": {"en": "all", "de": "alle"},
@@ -409,26 +475,53 @@ TR = {
     "view_short_outgoing": {"en": "outgoing", "de": "ausgehend"},
     "view_short_access": {"en": "access", "de": "Zugriff"},
     "view_short_publish": {"en": "GitHub", "de": "GitHub"},
-    "view_header": {"en": "{v} · {n}/{total} · {review} review · {hidden} hidden",
-                    "de": "{v} · {n}/{total} · {review} offen · {hidden} verdeckt"},
+    "view_header": {
+        "en": "{v} · {n}/{total} · {review} review · {hidden} hidden",
+        "de": "{v} · {n}/{total} · {review} offen · {hidden} verdeckt",
+    },
     "view_hidden": {"en": "{n} hidden", "de": "{n} verdeckt"},
-    "view_title": {"en": "Work view · path filter stays unchanged", "de": "Arbeitsansicht · Pfadfilter bleibt erhalten"},
+    "view_title": {
+        "en": "Work view · path filter stays unchanged",
+        "de": "Arbeitsansicht · Pfadfilter bleibt erhalten",
+    },
     "view_active": {"en": "view: {v}", "de": "Ansicht: {v}"},
-    "view_empty": {"en": "No repo in this view. B choose view · / path filter · Esc reset",
-                   "de": "Kein Repo in dieser Ansicht. B Ansicht wählen · / Pfadfilter · Esc zurücksetzen"},
-    "view_cli_empty": {"en": "Note: no repo matches the work view — nothing was checked.",
-                       "de": "Hinweis: Kein Repo passt zur Arbeitsansicht — es wurde nichts geprüft."},
+    "view_empty": {
+        "en": "No repo in this view. B choose view · / path filter · Esc reset",
+        "de": "Kein Repo in dieser Ansicht. B Ansicht wählen · / Pfadfilter · Esc zurücksetzen",
+    },
+    "view_cli_empty": {
+        "en": "Note: no repo matches the work view — nothing was checked.",
+        "de": "Hinweis: Kein Repo passt zur Arbeitsansicht — es wurde nichts geprüft.",
+    },
     "sync_clean": {"en": "sync clean", "de": "Sync sauber"},
     "sync_open": {"en": "sync needs attention", "de": "Sync prüfen"},
-    "publication_pending": {"en": "GitHub publication pending", "de": "GitHub-Veröffentlichung offen"},
+    "publication_pending": {
+        "en": "GitHub publication pending",
+        "de": "GitHub-Veröffentlichung offen",
+    },
     "github_current": {"en": "GitHub ✓", "de": "GitHub ✓"},
     "github_different": {"en": "GitHub ≠", "de": "GitHub ≠"},
     "history_different": {"en": "History ≠", "de": "Historie ≠"},
-    "selected_context_short": {"en": "{rel} [{branch}] · {remotes} · {actions}", "de": "{rel} [{branch}] · {remotes} · {actions}"},
-    "info_publication_excludes": {"en": "Excluded from content comparison", "de": "Vom Inhaltsvergleich ausgenommen"},
-    "info_content_error": {"en": "Content comparison failed", "de": "Inhaltsvergleich fehlgeschlagen"},
-    "publication_excludes_invalid": {"en": "expected owner/repo keys and relative literal paths", "de": "owner/repo-Schlüssel und relative wörtliche Pfade erwartet"},
-    "publication_target_ambiguous": {"en": "GitHub fetch target is not unique", "de": "GitHub-Fetch-Ziel ist nicht eindeutig"},
+    "selected_context_short": {
+        "en": "{rel} [{branch}] · {remotes} · {actions}",
+        "de": "{rel} [{branch}] · {remotes} · {actions}",
+    },
+    "info_publication_excludes": {
+        "en": "Excluded from content comparison",
+        "de": "Vom Inhaltsvergleich ausgenommen",
+    },
+    "info_content_error": {
+        "en": "Content comparison failed",
+        "de": "Inhaltsvergleich fehlgeschlagen",
+    },
+    "publication_excludes_invalid": {
+        "en": "expected owner/repo keys and relative literal paths",
+        "de": "owner/repo-Schlüssel und relative wörtliche Pfade erwartet",
+    },
+    "publication_target_ambiguous": {
+        "en": "GitHub fetch target is not unique",
+        "de": "GitHub-Fetch-Ziel ist nicht eindeutig",
+    },
     "context_sync_clean": {"en": "Sync ✔", "de": "Sync ✔"},
     "context_sync_open": {"en": "Sync !", "de": "Sync !"},
     "context_publish": {"en": "G pending", "de": "G offen"},
@@ -436,8 +529,10 @@ TR = {
     "info_publication": {"en": "GitHub publication", "de": "GitHub-Veröffentlichung"},
     "worktrees_title": {"en": "Worktree family · {rel}", "de": "Worktree-Familie · {rel}"},
     "submodules_title": {"en": "Submodules · {rel}", "de": "Submodule · {rel}"},
-    "worktrees_summary": {"en": "W {n} worktree(s), {outside} outside scan root",
-                          "de": "W {n} Worktrees, {outside} außerhalb der Scan-Wurzel"},
+    "worktrees_summary": {
+        "en": "W {n} worktree(s), {outside} outside scan root",
+        "de": "W {n} Worktrees, {outside} außerhalb der Scan-Wurzel",
+    },
     "submodules_summary": {"en": "O {n} submodule(s)", "de": "O {n} Submodule"},
     "modules_review": {"en": "O {n} to review", "de": "O {n} prüfen"},
     "family_common": {"en": "Shared Git directory", "de": "Gemeinsames Git-Verzeichnis"},
@@ -445,25 +540,47 @@ TR = {
     "info_modules": {"en": "Submodules", "de": "Submodule"},
     "family_measured": {"en": "Registry measured", "de": "Registrierung gemessen"},
     "family_current": {"en": "selected worktree", "de": "gewählter Worktree"},
-    "family_outside": {"en": "outside scan root; working state not inspected",
-                       "de": "außerhalb der Scan-Wurzel; Arbeitszustand nicht geprüft"},
-    "family_unmeasured": {"en": "inside scan root; no repository measurement available",
-                          "de": "innerhalb der Scan-Wurzel; keine Repo-Messung vorhanden"},
+    "family_outside": {
+        "en": "outside scan root; working state not inspected",
+        "de": "außerhalb der Scan-Wurzel; Arbeitszustand nicht geprüft",
+    },
+    "family_unmeasured": {
+        "en": "inside scan root; no repository measurement available",
+        "de": "innerhalb der Scan-Wurzel; keine Repo-Messung vorhanden",
+    },
     "family_missing": {"en": "working directory missing", "de": "Arbeitsverzeichnis fehlt"},
-    "family_unknown_presence": {"en": "path availability unknown", "de": "Verfügbarkeit des Pfads unbekannt"},
+    "family_unknown_presence": {
+        "en": "path availability unknown",
+        "de": "Verfügbarkeit des Pfads unbekannt",
+    },
     "family_bare": {"en": "bare repository", "de": "Bare-Repository"},
     "family_locked": {"en": "locked: {reason}", "de": "gesperrt: {reason}"},
     "family_prunable": {"en": "prunable: {reason}", "de": "bereinigbar: {reason}"},
-    "family_unknown": {"en": "No worktree measurement available. N rereads the repository.",
-                       "de": "Keine Worktree-Messung vorhanden. N liest das Repo neu."},
-    "family_error": {"en": "Worktree inventory unavailable: {e}", "de": "Worktree-Inventar nicht lesbar: {e}"},
+    "family_unknown": {
+        "en": "No worktree measurement available. N rereads the repository.",
+        "de": "Keine Worktree-Messung vorhanden. N liest das Repo neu.",
+    },
+    "family_error": {
+        "en": "Worktree inventory unavailable: {e}",
+        "de": "Worktree-Inventar nicht lesbar: {e}",
+    },
     "inspection_unavailable": {"en": "unavailable", "de": "nicht lesbar"},
-    "submodule_error": {"en": "Submodule inventory unavailable: {e}", "de": "Submodule-Inventar nicht lesbar: {e}"},
-    "submodule_unknown": {"en": "No submodule measurement available. N rereads the repository.",
-                          "de": "Keine Submodule-Messung vorhanden. N liest das Repo neu."},
-    "submodule_none": {"en": "No submodules in this repository.", "de": "Keine Submodule in diesem Repo."},
-    "submodule_note": {"en": "A parent commit records Gitlink references. Uncommitted files inside a module stay in that module. This view does not initialize, update or fetch modules.",
-                       "de": "Ein Commit im Eltern-Repo speichert Gitlink-Verweise. Uncommittete Dateien im Modul bleiben dort. Diese Ansicht initialisiert, aktualisiert oder fetcht keine Module."},
+    "submodule_error": {
+        "en": "Submodule inventory unavailable: {e}",
+        "de": "Submodule-Inventar nicht lesbar: {e}",
+    },
+    "submodule_unknown": {
+        "en": "No submodule measurement available. N rereads the repository.",
+        "de": "Keine Submodule-Messung vorhanden. N liest das Repo neu.",
+    },
+    "submodule_none": {
+        "en": "No submodules in this repository.",
+        "de": "Keine Submodule in diesem Repo.",
+    },
+    "submodule_note": {
+        "en": "A parent commit records Gitlink references. Uncommitted files inside a module stay in that module. This view does not initialize, update or fetch modules.",
+        "de": "Ein Commit im Eltern-Repo speichert Gitlink-Verweise. Uncommittete Dateien im Modul bleiben dort. Diese Ansicht initialisiert, aktualisiert oder fetcht keine Module.",
+    },
     "submodule_head": {"en": "Parent HEAD", "de": "Eltern-HEAD"},
     "submodule_index": {"en": "Parent index", "de": "Eltern-Index"},
     "submodule_checkout": {"en": "Module checkout", "de": "Modul-Checkout"},
@@ -472,30 +589,42 @@ TR = {
     "submodule_uninitialized": {"en": "not initialized", "de": "nicht initialisiert"},
     "submodule_replaced": {"en": "replaced by a file", "de": "durch Datei ersetzt"},
     "submodule_staged": {"en": "reference changed in index", "de": "Verweis im Index geändert"},
-    "submodule_checkout_changed": {"en": "checkout differs from index", "de": "Checkout weicht vom Index ab"},
+    "submodule_checkout_changed": {
+        "en": "checkout differs from index",
+        "de": "Checkout weicht vom Index ab",
+    },
     "submodule_stages": {"en": "Index stages", "de": "Index-Stufen"},
-    "submodule_only_contents": {"en": "Only module contents changed. Commit inside the module first; O shows details.",
-                               "de": "Nur Modul-Inhalte geändert. Zuerst im Modul committen; O zeigt die Details."},
-    "submodule_commit_unavailable": {"en": "The module reference cannot be committed from this state. O shows content and staging details.",
-                                    "de": "Der Modul-Verweis lässt sich in diesem Zustand nicht committen. O zeigt Inhalts- und Staging-Details."},
+    "submodule_only_contents": {
+        "en": "Only module contents changed. Commit inside the module first; O shows details.",
+        "de": "Nur Modul-Inhalte geändert. Zuerst im Modul committen; O zeigt die Details.",
+    },
+    "submodule_commit_unavailable": {
+        "en": "The module reference cannot be committed from this state. O shows content and staging details.",
+        "de": "Der Modul-Verweis lässt sich in diesem Zustand nicht committen. O zeigt Inhalts- und Staging-Details.",
+    },
     "file_submodule": {"en": "submodule", "de": "Submodul"},
-    "do_submodule_content": {"en": "(module contents; O details)", "de": "(Modul-Inhalt; O Details)"},
+    "do_submodule_content": {
+        "en": "(module contents; O details)",
+        "de": "(Modul-Inhalt; O Details)",
+    },
     "do_submodule_skip": {"en": "(module state; O details)", "de": "(Modul-Zustand; O Details)"},
     "do_commit_reference": {"en": "commit reference", "de": "Verweis committen"},
     "access_attention": {"en": "Inspect remote configuration", "de": "Remote-Konfiguration prüfen"},
-    "selected_context": {"en": "Selected: {rel} [{branch}] · {state} · {actions} · {remotes}",
-                         "de": "Gewählt: {rel} [{branch}] · {state} · {actions} · {remotes}"},
+    "selected_context": {
+        "en": "Selected: {rel} [{branch}] · {state} · {actions} · {remotes}",
+        "de": "Gewählt: {rel} [{branch}] · {state} · {actions} · {remotes}",
+    },
     "filter_cli_no_hit": {
         "en": "Note: no repo matches the filter “{q}” — nothing was checked.",
-        "de": "Hinweis: Kein Repo passt auf den Filter „{q}“ — es wurde nichts geprüft."},
+        "de": "Hinweis: Kein Repo passt auf den Filter „{q}“ — es wurde nichts geprüft.",
+    },
     # Der Rechnervergleich braucht dieselbe Angabe: Seine Ausgabe wird gelesen
     # und aufgehoben wie eine Liste, und ohne den Filter im Text hielte man
     # einen ausgeblendeten Bestand für Übereinstimmung.
     "diff_filter_note": {
-        "en": "Filter “{q}”: comparing {n} of {total} repos here, "
-              "{m} of {mt} on {h}.",
-        "de": "Filter „{q}“: verglichen werden {n} von {total} Repos hier, "
-              "{m} von {mt} auf {h}."},
+        "en": "Filter “{q}”: comparing {n} of {total} repos here, {m} of {mt} on {h}.",
+        "de": "Filter „{q}“: verglichen werden {n} von {total} Repos hier, {m} von {mt} auf {h}.",
+    },
     # Repo-Zeile
     "clean_synced": {"en": "✔ clean & synced", "de": "✔ sauber & synchron"},
     "no_sync_remote": {"en": "no sync remote", "de": "kein Sync-Remote"},
@@ -509,157 +638,272 @@ TR = {
     "no_changes": {"en": "(no changes)", "de": "(keine Änderungen)"},
     # Änderungen ansehen (A)
     "changes_title": {"en": "Changes · {rel}", "de": "Änderungen · {rel}"},
-    "changes_modes": {"en": "1 all · 2 staged · 3 unstaged + new", "de": "1 gesamt · 2 Index · 3 übrig + neu"},
+    "changes_modes": {
+        "en": "1 all · 2 staged · 3 unstaged + new",
+        "de": "1 gesamt · 2 Index · 3 übrig + neu",
+    },
     "diff_mode_combined": {"en": "all changes", "de": "gesamt"},
     "diff_mode_staged": {"en": "staged", "de": "vorgemerkt"},
     "diff_mode_unstaged": {"en": "unstaged + new", "de": "übrig + neu"},
-    "diff_mode_empty": {"en": "No changed files in this mode. Use 1/2/3 to switch.", "de": "Keine geänderten Dateien in dieser Ansicht. Mit 1/2/3 wechseln."},
+    "diff_mode_empty": {
+        "en": "No changed files in this mode. Use 1/2/3 to switch.",
+        "de": "Keine geänderten Dateien in dieser Ansicht. Mit 1/2/3 wechseln.",
+    },
     "diff_title_mode": {"en": "Diff · {mode} · {p}", "de": "Diff · {mode} · {p}"},
-    "cli_file_diff_options": {"en": "--file-diff cannot be combined with scans, fetches, comparisons, filters or list colors.", "de": "--file-diff lässt sich nicht mit Scans, Fetches, Vergleichen, Filtern oder Listenfarben verbinden."},
-    "cli_file_diff_mode": {"en": "--diff-mode requires --file-diff.", "de": "--diff-mode benötigt --file-diff."},
-    "cli_file_diff_path": {"en": "Use a relative Git path inside the repository root.", "de": "Einen relativen Git-Pfad innerhalb der Repo-Wurzel verwenden."},
-    "cli_file_diff_root": {"en": "The root argument must be the repository's working-tree root.", "de": "Das root-Argument muss die Arbeitsbaum-Wurzel des Repos sein."},
+    "cli_file_diff_options": {
+        "en": "--file-diff cannot be combined with scans, fetches, comparisons, filters or list colors.",
+        "de": "--file-diff lässt sich nicht mit Scans, Fetches, Vergleichen, Filtern oder Listenfarben verbinden.",
+    },
+    "cli_file_diff_mode": {
+        "en": "--diff-mode requires --file-diff.",
+        "de": "--diff-mode benötigt --file-diff.",
+    },
+    "cli_file_diff_path": {
+        "en": "Use a relative Git path inside the repository root.",
+        "de": "Einen relativen Git-Pfad innerhalb der Repo-Wurzel verwenden.",
+    },
+    "cli_file_diff_root": {
+        "en": "The root argument must be the repository's working-tree root.",
+        "de": "Das root-Argument muss die Arbeitsbaum-Wurzel des Repos sein.",
+    },
     "changes_footer": {
         "en": " ↑/↓ or Tab select file · ⏎ show diff · Q/Esc back",
-        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück"},
-    "changes_footer_short": {"en": " ↑↓/Tab file · ⏎ diff · Q/Esc back",
-                             "de": " ↑↓/Tab Datei · ⏎ Diff · Q/Esc zurück"},
-    "no_changes_to_show": {"en": "Nothing changed in this repository.",
-                           "de": "In diesem Repo hat sich nichts geändert."},
-    "diff_title": {"en": "Diff · {p}", "de": "Diff · {p}"},
-    "diff_empty": {"en": "(no differences in this mode)",
-                   "de": "(keine Unterschiede in dieser Ansicht)"},
-    "diff_failed": {"en": "Diff for {p} failed: {e}",
-                    "de": "Diff für {p} fehlgeschlagen: {e}"},
-    "diff_failed_exit": {"en": "Git diff failed (exit {c}, no error message).",
-                         "de": "Git-Diff fehlgeschlagen (Exit {c}, keine Fehlermeldung)."},
+        "de": " ↑/↓ oder Tab Datei wählen · ⏎ Diff ansehen · Q/Esc zurück",
+    },
+    "changes_footer_short": {
+        "en": " ↑↓/Tab file · ⏎ diff · Q/Esc back",
+        "de": " ↑↓/Tab Datei · ⏎ Diff · Q/Esc zurück",
+    },
+    "no_changes_to_show": {
+        "en": "Nothing changed in this repository.",
+        "de": "In diesem Repo hat sich nichts geändert.",
+    },
+    "diff_empty": {
+        "en": "(no differences in this mode)",
+        "de": "(keine Unterschiede in dieser Ansicht)",
+    },
+    "diff_failed": {"en": "Diff for {p} failed: {e}", "de": "Diff für {p} fehlgeschlagen: {e}"},
+    "diff_failed_exit": {
+        "en": "Git diff failed (exit {c}, no error message).",
+        "de": "Git-Diff fehlgeschlagen (Exit {c}, keine Fehlermeldung).",
+    },
     # Footer
-    "f1": {"en": " ↑↓←→ select · ⏎ cd/quit · / search · M layout · B work view · Tab log · Q quit",
-           "de": " ↑↓←→ wählen · ⏎ cd/Exit · / Suche · M Layout · B Arbeitsansicht · Tab Log · Q Ende"},
-    "f2": {"en": " {apps} · A changes · C commit · L pull · S stashes · I info · W worktrees · O modules · H help",
-           "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · I Info · W Worktrees · O Module · H Hilfe"},
-    "f3": {"en": " N reread · R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings",
-           "de": " N neu lesen · R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einst."},
-    "f1_short": {"en": " ↑↓←→ · ⏎ cd · / find · M layout · B work · W/O · Tab log · Q",
-                 "de": " ↑↓←→ · ⏎ cd · / Suche · M Layout · B Ansicht · W/O · Tab · Q"},
-    "f2_short": {"en": " {apps} · A diff · C commit · L pull · S stash · I info · H ?",
-                 "de": " {apps} · A Diff · C Commit · L Pull · S Stash · I Info · H ?"},
-    "f3_short": {"en": " N read · R all · U fetch · X stop · P sync · G GitHub · , setup",
-                 "de": " N neu · R alle · U Fetch · X Stop · P Sync · G GitHub · , Setup"},
-    "f1_tiny": {"en": " ↑↓ · ⏎ cd · B view · / find · Q", "de": " ↑↓ · ⏎ cd · B Ansicht · / Suche · Q"},
-    "f2_tiny": {"en": " A diff · C commit · L pull · P/G push", "de": " A Diff · C Commit · L Pull · P/G Push"},
-    "f3_tiny": {"en": " M layout · I info · W/O · H help", "de": " M Layout · I Info · W/O · H Hilfe"},
-    "pull_choose": {"en": "Pull source · {rel} · local branch {b}",
-                    "de": "Pull-Quelle · {rel} · lokaler Branch {b}"},
-    "pull_all": {"en": "Fetch all remotes, then choose one pull source",
-                 "de": "Alle Remotes abrufen, danach eine Pull-Quelle wählen"},
-    "pull_choose_footer": {"en": " ↑/↓ select · ⏎ continue · Q/Esc cancel",
-                           "de": " ↑/↓ wählen · ⏎ weiter · Q/Esc abbrechen"},
+    "f1": {
+        "en": " ↑↓←→ select · ⏎ cd/quit · / search · M layout · B work view · Tab log · Q quit",
+        "de": " ↑↓←→ wählen · ⏎ cd/Exit · / Suche · M Layout · B Arbeitsansicht · Tab Log · Q Ende",
+    },
+    "f2": {
+        "en": " {apps} · A changes · C commit · L pull · S stashes · I info · W worktrees · O modules · H help",
+        "de": " {apps} · A Änderungen · C Commit · L Pull · S Stashes · I Info · W Worktrees · O Module · H Hilfe",
+    },
+    "f3": {
+        "en": " N reread · R fetch all · U fetch one · X stop · P sync push · G GitHub · , settings",
+        "de": " N neu lesen · R Fetch alle · U Fetch einzeln · X Stopp · P Sync-Push · G GitHub · , Einst.",
+    },
+    "f1_short": {
+        "en": " ↑↓←→ · ⏎ cd · / find · M layout · B work · W/O · Tab log · Q",
+        "de": " ↑↓←→ · ⏎ cd · / Suche · M Layout · B Ansicht · W/O · Tab · Q",
+    },
+    "f2_short": {
+        "en": " {apps} · A diff · C commit · L pull · S stash · I info · H ?",
+        "de": " {apps} · A Diff · C Commit · L Pull · S Stash · I Info · H ?",
+    },
+    "f3_short": {
+        "en": " N read · R all · U fetch · X stop · P sync · G GitHub · , setup",
+        "de": " N neu · R alle · U Fetch · X Stop · P Sync · G GitHub · , Setup",
+    },
+    "f1_tiny": {
+        "en": " ↑↓ · ⏎ cd · B view · / find · Q",
+        "de": " ↑↓ · ⏎ cd · B Ansicht · / Suche · Q",
+    },
+    "f2_tiny": {
+        "en": " A diff · C commit · L pull · P/G push",
+        "de": " A Diff · C Commit · L Pull · P/G Push",
+    },
+    "f3_tiny": {
+        "en": " M layout · I info · W/O · H help",
+        "de": " M Layout · I Info · W/O · H Hilfe",
+    },
+    "pull_choose": {
+        "en": "Pull source · {rel} · local branch {b}",
+        "de": "Pull-Quelle · {rel} · lokaler Branch {b}",
+    },
+    "pull_all": {
+        "en": "Fetch all remotes, then choose one pull source",
+        "de": "Alle Remotes abrufen, danach eine Pull-Quelle wählen",
+    },
+    "pull_choose_footer": {
+        "en": " ↑/↓ select · ⏎ continue · Q/Esc cancel",
+        "de": " ↑/↓ wählen · ⏎ weiter · Q/Esc abbrechen",
+    },
     "pull_title": {"en": "Pull {r}/{b} → {rel}", "de": "Pull {r}/{b} → {rel}"},
-    "pull_effect": {"en": "Fast-forward: {n} incoming commit(s). Upstream stays unchanged.",
-                    "de": "Fast-Forward: {n} eingehende Commit(s). Der Upstream bleibt erhalten."},
-    "pull_caution": {"en": "Do not edit or switch this repository in another program during the pull.",
-                     "de": "Während des Pulls dieses Repo nicht in einem anderen Programm bearbeiten oder wechseln."},
-    "pull_confirm": {"en": "Apply this fast-forward? Type Y then ⏎; anything else cancels.",
-                     "de": "Diesen Fast-Forward anwenden? J tippen, dann ⏎; alles andere bricht ab."},
+    "pull_effect": {
+        "en": "Fast-forward: {n} incoming commit(s). Upstream stays unchanged.",
+        "de": "Fast-Forward: {n} eingehende Commit(s). Der Upstream bleibt erhalten.",
+    },
+    "pull_caution": {
+        "en": "Do not edit or switch this repository in another program during the pull.",
+        "de": "Während des Pulls dieses Repo nicht in einem anderen Programm bearbeiten oder wechseln.",
+    },
+    "pull_confirm": {
+        "en": "Apply this fast-forward? Type Y then ⏎; anything else cancels.",
+        "de": "Diesen Fast-Forward anwenden? J tippen, dann ⏎; alles andere bricht ab.",
+    },
     "pull_done": {"en": "Pulled {r}/{b}: {n} commit(s).", "de": "Pull von {r}/{b}: {n} Commit(s)."},
-    "pull_nothing": {"en": "No incoming commits from {r}.", "de": "Keine eingehenden Commits von {r}."},
-    "pull_operation": {"en": "A Git operation is already in progress; finish it before pulling.",
-                       "de": "Ein Git-Vorgang läuft bereits; vor dem Pull abschließen."},
-    "pull_changed": {"en": "Repository or pull source changed after approval; review and retry.",
-                     "de": "Repo oder Pull-Quelle haben sich nach der Freigabe geändert; prüfen und erneut starten."},
-    "pull_failed": {"en": "Pull failed (exit {code}): {e}", "de": "Pull fehlgeschlagen (Exit {code}): {e}"},
-    "pull_local_collision": {"en": "Pull stopped: incoming files would overwrite local untracked or ignored files. Move those files before retrying.",
-                             "de": "Pull gestoppt: Eingehende Dateien würden lokale unversionierte oder ignorierte Dateien überschreiben. Diese Dateien vor dem nächsten Versuch verschieben."},
-    "pull_unknown": {"en": "Pull outcome is unclear; repository refreshed. Inspect it before retrying.",
-                     "de": "Pull-Ausgang unklar; Repo neu eingelesen. Vor erneutem Versuch prüfen."},
+    "pull_nothing": {
+        "en": "No incoming commits from {r}.",
+        "de": "Keine eingehenden Commits von {r}.",
+    },
+    "pull_operation": {
+        "en": "A Git operation is already in progress; finish it before pulling.",
+        "de": "Ein Git-Vorgang läuft bereits; vor dem Pull abschließen.",
+    },
+    "pull_changed": {
+        "en": "Repository or pull source changed after approval; review and retry.",
+        "de": "Repo oder Pull-Quelle haben sich nach der Freigabe geändert; prüfen und erneut starten.",
+    },
+    "pull_failed": {
+        "en": "Pull failed (exit {code}): {e}",
+        "de": "Pull fehlgeschlagen (Exit {code}): {e}",
+    },
+    "pull_local_collision": {
+        "en": "Pull stopped: incoming files would overwrite local untracked or ignored files. Move those files before retrying.",
+        "de": "Pull gestoppt: Eingehende Dateien würden lokale unversionierte oder ignorierte Dateien überschreiben. Diese Dateien vor dem nächsten Versuch verschieben.",
+    },
+    "pull_unknown": {
+        "en": "Pull outcome is unclear; repository refreshed. Inspect it before retrying.",
+        "de": "Pull-Ausgang unklar; Repo neu eingelesen. Vor erneutem Versuch prüfen.",
+    },
     "pull_no_remotes": {"en": "No remotes configured.", "de": "Keine Remotes konfiguriert."},
-    "pull_fetch_failures": {"en": "Some remotes could not be fetched; no pull applied: {r}",
-                            "de": "Einige Remotes konnten nicht abgerufen werden; kein Pull angewendet: {r}"},
+    "pull_fetch_failures": {
+        "en": "Some remotes could not be fetched; no pull applied: {r}",
+        "de": "Einige Remotes konnten nicht abgerufen werden; kein Pull angewendet: {r}",
+    },
     # Hintergrund-Fetch (Taste R)
-    "scan_started": {"en": "Fetching in the background — the list stays usable.",
-                     "de": "Fetch läuft im Hintergrund — die Liste bleibt bedienbar."},
-    "scan_already_running": {"en": "A background fetch is already running.",
-                             "de": "Ein Hintergrund-Fetch läuft bereits."},
-    "scan_progress": {"en": "fetching {done}/{total}",
-                      "de": "fetche {done}/{total}"},
-    "scan_done": {"en": "Fetch finished — {n} repos read again.",
-                  "de": "Fetch fertig — {n} Repos neu eingelesen."},
-    "scan_failed": {"en": "Background fetch stopped: {e}",
-                    "de": "Hintergrund-Fetch abgebrochen: {e}"},
-    "scan_stopped": {"en": "Background fetch stopped; completed results retained.",
-                     "de": "Hintergrund-Fetch gestoppt; fertige Ergebnisse erhalten."},
-    "scan_not_running": {"en": "No background fetch is running.",
-                         "de": "Kein Hintergrund-Fetch läuft."},
-    "local_refreshed": {"en": "{rel}: local state read again; no fetch.",
-                        "de": "{rel}: lokalen Stand neu gelesen; kein Fetch."},
-    "fetch_one_title": {"en": "Fetch remote · {rel} · {b}",
-                        "de": "Remote abrufen · {rel} · {b}"},
-    "fetch_one_done": {"en": "{r}: fetched; local state read again.",
-                       "de": "{r}: abgerufen; lokalen Stand neu gelesen."},
+    "scan_started": {
+        "en": "Fetching in the background — the list stays usable.",
+        "de": "Fetch läuft im Hintergrund — die Liste bleibt bedienbar.",
+    },
+    "scan_already_running": {
+        "en": "A background fetch is already running.",
+        "de": "Ein Hintergrund-Fetch läuft bereits.",
+    },
+    "scan_progress": {"en": "fetching {done}/{total}", "de": "fetche {done}/{total}"},
+    "scan_done": {
+        "en": "Fetch finished — {n} repos read again.",
+        "de": "Fetch fertig — {n} Repos neu eingelesen.",
+    },
+    "scan_failed": {
+        "en": "Background fetch stopped: {e}",
+        "de": "Hintergrund-Fetch abgebrochen: {e}",
+    },
+    "scan_stopped": {
+        "en": "Background fetch stopped; completed results retained.",
+        "de": "Hintergrund-Fetch gestoppt; fertige Ergebnisse erhalten.",
+    },
+    "scan_not_running": {
+        "en": "No background fetch is running.",
+        "de": "Kein Hintergrund-Fetch läuft.",
+    },
+    "local_refreshed": {
+        "en": "{rel}: local state read again; no fetch.",
+        "de": "{rel}: lokalen Stand neu gelesen; kein Fetch.",
+    },
+    "fetch_one_title": {"en": "Fetch remote · {rel} · {b}", "de": "Remote abrufen · {rel} · {b}"},
+    "fetch_one_done": {
+        "en": "{r}: fetched; local state read again.",
+        "de": "{r}: abgerufen; lokalen Stand neu gelesen.",
+    },
     "age_unknown": {"en": "unknown", "de": "unbekannt"},
     "age_clock": {"en": "clock changed", "de": "Uhr geändert"},
-    "measurement_summary": {"en": "Local: {local} · Successful fetch: {remote} · I details",
-                            "de": "Lokal: {local} · Erfolgreicher Fetch: {remote} · I Details"},
+    "measurement_summary": {
+        "en": "Local: {local} · Successful fetch: {remote} · I details",
+        "de": "Lokal: {local} · Erfolgreicher Fetch: {remote} · I Details",
+    },
     "info_measured": {"en": "Local measurement", "de": "Lokale Messung"},
     "info_fetched": {"en": "Successful fetch", "de": "Erfolgreicher Fetch"},
     # Einstellungen (Taste ,)
     "set_title": {"en": "Settings · {p}", "de": "Einstellungen · {p}"},
-    "set_footer": {"en": " ↑/↓ select · ⏎ change · Q/Esc back",
-                   "de": " ↑/↓ wählen · ⏎ ändern · Q/Esc zurück"},
+    "set_footer": {
+        "en": " ↑/↓ select · ⏎ change · Q/Esc back",
+        "de": " ↑/↓ wählen · ⏎ ändern · Q/Esc zurück",
+    },
     "set_prompt": {"en": "{name}: ", "de": "{name}: "},
     "set_locked_head": {
         "en": "Only in the file — they decide where gmf writes or what it starts:",
-        "de": "Nur in der Datei — sie entscheiden, wohin gmf schreibt oder was es "
-              "startet:"},
+        "de": "Nur in der Datei — sie entscheiden, wohin gmf schreibt oder was es startet:",
+    },
     "set_value_none": {"en": "(none)", "de": "(keine)"},
-    "set_not_saved": {"en": "demo mode — nothing is saved",
-                      "de": "Demo-Modus — es wird nichts gespeichert"},
+    "set_not_saved": {
+        "en": "demo mode — nothing is saved",
+        "de": "Demo-Modus — es wird nichts gespeichert",
+    },
     "set_not_saved_hint": {
         "en": "Demo mode: a change applies to this session only.",
-        "de": "Demo-Modus: Eine Änderung gilt nur für diese Sitzung."},
+        "de": "Demo-Modus: Eine Änderung gilt nur für diese Sitzung.",
+    },
     "set_saved": {"en": "Saved.", "de": "Gespeichert."},
-    "set_saved_rescan": {"en": "Saved — R reads again with the new list.",
-                         "de": "Gespeichert — R liest mit der neuen Liste neu ein."},
+    "set_saved_rescan": {
+        "en": "Saved — R reads again with the new list.",
+        "de": "Gespeichert — R liest mit der neuen Liste neu ein.",
+    },
     "set_save_failed": {
         "en": "Applied for this session, but saving failed: {e}",
-        "de": "Für diese Sitzung übernommen, aber das Speichern schlug fehl: {e}"},
-    "set_err_choice": {"en": "Please enter one of: {opts}",
-                       "de": "Bitte eines davon eingeben: {opts}"},
-    "set_err_number": {"en": "Please enter a whole number.",
-                       "de": "Bitte eine ganze Zahl eingeben."},
-    "set_err_range": {"en": "Please enter a number between {lo} and {hi}.",
-                      "de": "Bitte eine Zahl zwischen {lo} und {hi} eingeben."},
+        "de": "Für diese Sitzung übernommen, aber das Speichern schlug fehl: {e}",
+    },
+    "set_err_choice": {
+        "en": "Please enter one of: {opts}",
+        "de": "Bitte eines davon eingeben: {opts}",
+    },
+    "set_err_number": {
+        "en": "Please enter a whole number.",
+        "de": "Bitte eine ganze Zahl eingeben.",
+    },
+    "set_err_range": {
+        "en": "Please enter a number between {lo} and {hi}.",
+        "de": "Bitte eine Zahl zwischen {lo} und {hi} eingeben.",
+    },
     "set_err_dirname": {
         "en": "“{n}” is a folder name, not a path — a “/” can never match.",
-        "de": "„{n}“ ist ein Ordnername, kein Pfad — ein „/“ kann nie zutreffen."},
+        "de": "„{n}“ ist ein Ordnername, kein Pfad — ein „/“ kann nie zutreffen.",
+    },
     "set_lang": {"en": "Language", "de": "Sprache"},
     "set_lang_hint": {"en": "auto follows $LANG", "de": "auto folgt $LANG"},
     "set_compact_from": {"en": "Compact view from", "de": "Kompaktansicht ab"},
     "set_compact_from_hint": {
         "en": "above this count gmf starts compact; M switches anytime",
-        "de": "darüber startet gmf kompakt; M schaltet jederzeit um"},
+        "de": "darüber startet gmf kompakt; M schaltet jederzeit um",
+    },
     "set_git_timeout": {"en": "Git timeout (s)", "de": "Git-Timeout (s)"},
-    "set_git_timeout_hint": {"en": "per single git call",
-                             "de": "je einzelnem Git-Aufruf"},
+    "set_git_timeout_hint": {"en": "per single git call", "de": "je einzelnem Git-Aufruf"},
     "set_fetch_timeout": {"en": "Fetch timeout (s)", "de": "Fetch-Timeout (s)"},
-    "set_fetch_timeout_hint": {"en": "per fetch — the network is slower",
-                               "de": "je Fetch — das Netz ist langsamer"},
+    "set_fetch_timeout_hint": {
+        "en": "per fetch — the network is slower",
+        "de": "je Fetch — das Netz ist langsamer",
+    },
     "set_commit_timeout": {"en": "Commit timeout (s)", "de": "Commit-Timeout (s)"},
-    "set_commit_timeout_hint": {"en": "the pre-commit hook often needs minutes",
-                                "de": "der pre-commit-Hook braucht oft Minuten"},
+    "set_commit_timeout_hint": {
+        "en": "the pre-commit hook often needs minutes",
+        "de": "der pre-commit-Hook braucht oft Minuten",
+    },
     "set_diff_timeout": {"en": "Diff timeout (s)", "de": "Diff-Timeout (s)"},
-    "set_diff_timeout_hint": {"en": "whole --diff run over ssh",
-                              "de": "ganzer --diff-Lauf über ssh"},
+    "set_diff_timeout_hint": {
+        "en": "whole --diff run over ssh",
+        "de": "ganzer --diff-Lauf über ssh",
+    },
     "set_skip_dirs": {"en": "Skip folders", "de": "Ordner überspringen"},
-    "set_skip_dirs_hint": {"en": "names, comma-separated; the scan skips them",
-                           "de": "Namen, mit Komma getrennt; der Scan lässt sie aus"},
+    "set_skip_dirs_hint": {
+        "en": "names, comma-separated; the scan skips them",
+        "de": "Namen, mit Komma getrennt; der Scan lässt sie aus",
+    },
     # Kompakte Ansicht und Protokollbereich
     "compact_more": {"en": "columns {a}-{b}/{n}", "de": "Spalten {a}-{b}/{n}"},
     "log_pane_title": {"en": " Commands", "de": " Befehle"},
     "log_pane_hint": {"en": "  (Tab to scroll)", "de": "  (Tab zum Scrollen)"},
-    "log_pane_focus": {"en": "  ↑/↓ scroll · Tab back to the list",
-                       "de": "  ↑/↓ scrollen · Tab zurück zur Liste"},
+    "log_pane_focus": {
+        "en": "  ↑/↓ scroll · Tab back to the list",
+        "de": "  ↑/↓ scrollen · Tab zurück zur Liste",
+    },
     "yesno": {"en": "  (Y/N)", "de": "  (J/N)"},
     # Rot hervorgehobene Ja-Taste in den beiden Rückfragen (draw_question);
     # muss wörtlich in "yesno" bzw. "github_confirm" vorkommen.
@@ -667,43 +911,109 @@ TR = {
     "yes_accent": {"en": "Y ⏎ = yes", "de": "J ⏎ = ja"},
     "cancelled": {"en": "Cancelled.", "de": "Abgebrochen."},
     # Apps
-    "app_not_found": {"en": "App not found: {p} (edit config.json)",
-                      "de": "App nicht gefunden: {p} (config.json anpassen)"},
+    "app_not_found": {
+        "en": "App not found: {p} (edit config.json)",
+        "de": "App nicht gefunden: {p} (config.json anpassen)",
+    },
     "app_starting": {"en": "Started {name}: {rel}", "de": "{name} gestartet: {rel}"},
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
-    "app_open_failed": {"en": "Failed to open {name}: {e}",
-                        "de": "{name} öffnen fehlgeschlagen: {e}"},
-    "app_mac_only": {"en": "Configured app shortcuts require macOS or a Linux desktop session.",
-                     "de": "Konfigurierte App-Tasten benötigen macOS oder eine Linux-Desktopsitzung."},
-    "app_no_desktop": {"en": "No Linux desktop session found. Open gmf in a desktop terminal.",
-                       "de": "Keine Linux-Desktopsitzung gefunden. gmf in einem Desktop-Terminal öffnen."},
+    "app_open_timeout": {
+        "en": "Could not confirm {name} opened within {s}s.",
+        "de": "Der Start von {name} ist nach {s} s noch unbestätigt.",
+    },
+    "app_open_failed": {
+        "en": "Failed to open {name}: {e}",
+        "de": "{name} öffnen fehlgeschlagen: {e}",
+    },
+    "app_mac_only": {
+        "en": "Configured app shortcuts require macOS or a Linux desktop session.",
+        "de": "Konfigurierte App-Tasten benötigen macOS oder eine Linux-Desktopsitzung.",
+    },
+    "app_no_desktop": {
+        "en": "No Linux desktop session found. Open gmf in a desktop terminal.",
+        "de": "Keine Linux-Desktopsitzung gefunden. gmf in einem Desktop-Terminal öffnen.",
+    },
     "app_over_ssh": {
         "en": "This is an SSH session — {name} can only open in your local desktop session.",
-        "de": "Das ist eine SSH-Sitzung — {name} öffnet nur in deiner lokalen Desktopsitzung."},
-    "cd_hint": {"en": "(Tip: install the `gmf` shell wrapper from gmf.zsh, "
-                      "then you land there automatically.)",
-                "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
-                      "dann landet man automatisch dort.)"},
-    "linux_description": {"en": "Install the Linux shell wrapper in your user account.", "de": "Linux-Shell-Wrapper im Benutzerkonto einrichten."},
-    "linux_shell_help": {"en": "target shell; auto uses $SHELL", "de": "Ziel-Shell; auto verwendet $SHELL"},
-    "linux_check_help": {"en": "check dependencies and run self-tests without installing", "de": "Abhängigkeiten und Selbsttests prüfen, ohne zu installieren"},
-    "linux_only": {"en": "This installer requires Linux. Use install.sh on macOS.", "de": "Dieser Installer benötigt Linux. Unter macOS install.sh verwenden."},
-    "linux_shell": {"en": "Choose bash, fish or zsh with --shell.", "de": "Mit --shell bash, fish oder zsh wählen."},
-    "linux_absolute": {"en": "Installation paths must be absolute.", "de": "Installationspfade müssen absolut sein."},
-    "linux_dependencies": {"en": "Requires Python 3.9+ with curses, Git 2.36+ and {shell}.", "de": "Benötigt Python 3.9+ mit curses, Git 2.36+ und {shell}."},
-    "linux_complex_rc": {"en": "Startup file contains << syntax; automatic registration refused. Keep it unchanged and configure the wrapper manually.", "de": "Startdatei enthält <<-Syntax; automatische Registrierung abgelehnt. Unverändert lassen und den Wrapper von Hand einrichten."},
-    "linux_syntax": {"en": "Invalid or incomplete {shell} startup file/wrapper; nothing registered.", "de": "Ungültige oder unvollständige {shell}-Startdatei/Wrapper; nichts registriert."},
-    "linux_file_conflict": {"en": "Existing, linked or changed file protected: {p}", "de": "Vorhandene, verlinkte oder geänderte Datei geschützt: {p}"},
-    "linux_registration_conflict": {"en": "Existing gmf definition or damaged registration; resolve it manually first.", "de": "Vorhandene gmf-Definition oder beschädigte Registrierung; zuerst von Hand klären."},
-    "linux_testing": {"en": "Running self-tests before installation ...", "de": "Selbsttests vor der Installation laufen ..."},
-    "linux_tests_failed": {"en": "Self-tests failed; not installing.", "de": "Selbsttests fehlgeschlagen; keine Installation."},
-    "linux_check_ok": {"en": "CHECK OK: Linux / {shell}; no files installed.", "de": "CHECK OK: Linux / {shell}; keine Dateien installiert."},
-    "linux_installed": {"en": "Installed gmf for {shell}: {p}", "de": "gmf für {shell} eingerichtet: {p}"},
-    "linux_activate": {"en": "Open a new terminal, or run: {command}", "de": "Neues Terminal öffnen oder ausführen: {command}"},
+        "de": "Das ist eine SSH-Sitzung — {name} öffnet nur in deiner lokalen Desktopsitzung.",
+    },
+    "cd_hint": {
+        "en": "(Tip: install the `gmf` shell wrapper from gmf.zsh, "
+        "then you land there automatically.)",
+        "de": "(Tipp: Shell-Wrapper `gmf` aus gmf.zsh installieren, "
+        "dann landet man automatisch dort.)",
+    },
+    "linux_description": {
+        "en": "Install the Linux shell wrapper in your user account.",
+        "de": "Linux-Shell-Wrapper im Benutzerkonto einrichten.",
+    },
+    "linux_shell_help": {
+        "en": "target shell; auto uses $SHELL",
+        "de": "Ziel-Shell; auto verwendet $SHELL",
+    },
+    "linux_check_help": {
+        "en": "check dependencies and run self-tests without installing",
+        "de": "Abhängigkeiten und Selbsttests prüfen, ohne zu installieren",
+    },
+    "linux_only": {
+        "en": "This installer requires Linux. Use install.sh on macOS.",
+        "de": "Dieser Installer benötigt Linux. Unter macOS install.sh verwenden.",
+    },
+    "linux_shell": {
+        "en": "Choose bash, fish or zsh with --shell.",
+        "de": "Mit --shell bash, fish oder zsh wählen.",
+    },
+    "linux_absolute": {
+        "en": "Installation paths must be absolute.",
+        "de": "Installationspfade müssen absolut sein.",
+    },
+    "linux_dependencies": {
+        "en": "Requires Python 3.9+ with curses, Git 2.36+ and {shell}.",
+        "de": "Benötigt Python 3.9+ mit curses, Git 2.36+ und {shell}.",
+    },
+    "linux_complex_rc": {
+        "en": "Startup file contains << syntax; automatic registration refused. Keep it unchanged and configure the wrapper manually.",
+        "de": "Startdatei enthält <<-Syntax; automatische Registrierung abgelehnt. Unverändert lassen und den Wrapper von Hand einrichten.",
+    },
+    "linux_syntax": {
+        "en": "Invalid or incomplete {shell} startup file/wrapper; nothing registered.",
+        "de": "Ungültige oder unvollständige {shell}-Startdatei/Wrapper; nichts registriert.",
+    },
+    "linux_file_conflict": {
+        "en": "Existing, linked or changed file protected: {p}",
+        "de": "Vorhandene, verlinkte oder geänderte Datei geschützt: {p}",
+    },
+    "linux_registration_conflict": {
+        "en": "Existing gmf definition or damaged registration; resolve it manually first.",
+        "de": "Vorhandene gmf-Definition oder beschädigte Registrierung; zuerst von Hand klären.",
+    },
+    "linux_testing": {
+        "en": "Running self-tests before installation ...",
+        "de": "Selbsttests vor der Installation laufen ...",
+    },
+    "linux_tests_failed": {
+        "en": "Self-tests failed; not installing.",
+        "de": "Selbsttests fehlgeschlagen; keine Installation.",
+    },
+    "linux_check_ok": {
+        "en": "CHECK OK: Linux / {shell}; no files installed.",
+        "de": "CHECK OK: Linux / {shell}; keine Dateien installiert.",
+    },
+    "linux_installed": {
+        "en": "Installed gmf for {shell}: {p}",
+        "de": "gmf für {shell} eingerichtet: {p}",
+    },
+    "linux_activate": {
+        "en": "Open a new terminal, or run: {command}",
+        "de": "Neues Terminal öffnen oder ausführen: {command}",
+    },
     "linux_failed": {"en": "Installation failed: {e}", "de": "Installation fehlgeschlagen: {e}"},
     # Stash
     "stash_title": {"en": "Stashes · {rel}", "de": "Stashes · {rel}"},
-    "stash_keys": {"en": "↑↓ select · →/← expand/collapse · A apply · P pop · D delete · * all/one · Q back", "de": "↑↓ wählen · →/← auf/zu · A Apply · P Pop · D löschen · * alle/einzeln · Q zurück"},
+    "stash_keys": {
+        "en": "↑↓ select · →/← expand/collapse · A apply · P pop · D delete · * all/one · Q back",
+        "de": "↑↓ wählen · →/← auf/zu · A Apply · P Pop · D löschen · * alle/einzeln · Q zurück",
+    },
     "stash_scope": {"en": "Scope: {scope}", "de": "Ziel: {scope}"},
     "stash_all": {"en": "ALL stashes", "de": "ALLE Stashes"},
     "stash_apply": {"en": "Apply (keep stash)", "de": "Apply (Stash behalten)"},
@@ -711,59 +1021,117 @@ TR = {
     "stash_drop": {"en": "Delete stash permanently", "de": "Stash endgültig löschen"},
     "stash_worktree": {"en": "Working tree", "de": "Arbeitsbaum"},
     "stash_index": {"en": "Staged changes", "de": "Vorgemerkte Änderungen"},
-    "stash_untracked": {"en": "Untracked / ignored file", "de": "Unversionierte / ignorierte Datei"},
-    "stash_guard": {"en": "Stash list or target changed. Reopen the view and review again.", "de": "Stash-Liste oder Ziel geändert. Ansicht neu öffnen und erneut prüfen."},
-    "stash_clean": {"en": "Apply/pop requires a clean index and working tree, without an ongoing Git operation.", "de": "Apply/Pop braucht einen sauberen Index und Arbeitsbaum ohne laufenden Git-Vorgang."},
-    "stash_warning": {"en": "Close other Git operations/editors for this repo. Git cannot atomically protect the target or stash numbering against parallel changes.", "de": "Andere Git-Aktionen/Editoren für dieses Repo schließen. Git kann Ziel und Stash-Nummern nicht atomar gegen parallele Änderungen schützen."},
-    "stash_order": {"en": "Apply keeps stashes; pop deletes each only after success. Stop at first error/conflict; earlier successes remain. No automatic rollback.", "de": "Apply behält Stashes; Pop löscht jeden erst nach Erfolg. Stopp beim ersten Fehler/Konflikt; vorherige Erfolge bleiben. Kein automatisches Zurücksetzen."},
-    "stash_delete_warning": {"en": "Deletion removes these stash entries, including their saved files. There is no undo in gmf.", "de": "Löschen entfernt diese Stash-Einträge samt gespeicherten Dateien. In gmf gibt es kein Rückgängig."},
+    "stash_untracked": {
+        "en": "Untracked / ignored file",
+        "de": "Unversionierte / ignorierte Datei",
+    },
+    "stash_guard": {
+        "en": "Stash list or target changed. Reopen the view and review again.",
+        "de": "Stash-Liste oder Ziel geändert. Ansicht neu öffnen und erneut prüfen.",
+    },
+    "stash_clean": {
+        "en": "Apply/pop requires a clean index and working tree, without an ongoing Git operation.",
+        "de": "Apply/Pop braucht einen sauberen Index und Arbeitsbaum ohne laufenden Git-Vorgang.",
+    },
+    "stash_warning": {
+        "en": "Close other Git operations/editors for this repo. Git cannot atomically protect the target or stash numbering against parallel changes.",
+        "de": "Andere Git-Aktionen/Editoren für dieses Repo schließen. Git kann Ziel und Stash-Nummern nicht atomar gegen parallele Änderungen schützen.",
+    },
+    "stash_order": {
+        "en": "Apply keeps stashes; pop deletes each only after success. Stop at first error/conflict; earlier successes remain. No automatic rollback.",
+        "de": "Apply behält Stashes; Pop löscht jeden erst nach Erfolg. Stopp beim ersten Fehler/Konflikt; vorherige Erfolge bleiben. Kein automatisches Zurücksetzen.",
+    },
+    "stash_delete_warning": {
+        "en": "Deletion removes these stash entries, including their saved files. There is no undo in gmf.",
+        "de": "Löschen entfernt diese Stash-Einträge samt gespeicherten Dateien. In gmf gibt es kein Rückgängig.",
+    },
     "stash_question": {"en": "{yes} · {action} × {n}? ", "de": "{yes} · {action} × {n}? "},
-    "stash_done": {"en": "{action}: {n} stash(es) completed.", "de": "{action}: {n} Stash(es) erledigt."},
-    "stash_stopped": {"en": "Stopped after {n} completed stash(es): {e}", "de": "Nach {n} erledigten Stash(es) gestoppt: {e}"},
-    "stash_apply_failed": {"en": "Apply failed; the stash was kept. Files may already be changed; inspect conflicts before continuing.", "de": "Anwenden fehlgeschlagen; der Stash bleibt erhalten. Dateien können bereits geändert sein; vor dem Fortsetzen Konflikte prüfen."},
-    "stash_index_failed": {"en": "Saved staging could not be restored; the stash was kept. Inspect file contents and staging before continuing.", "de": "Gespeicherte Vormerkung nicht wiederhergestellt; der Stash bleibt erhalten. Vor dem Fortsetzen Dateiinhalte und Vormerkung prüfen."},
-    "stash_batch_hint": {"en": "Batch: if a stash restores staged changes, review and commit them before applying the next stash.", "de": "Sammelaktion: Stellt ein Stash vorgemerkte Änderungen wieder her, diese vor dem nächsten Stash prüfen und committen."},
-    "stash_batch_staged": {"en": "An earlier stash restored staged changes. Stopped before applying the next stash to preserve that staging; remaining stashes were kept. Review and commit the restored changes before continuing.", "de": "Ein früherer Stash hat vorgemerkte Änderungen wiederhergestellt. Vor dem nächsten Stash gestoppt, damit diese Vormerkung erhalten bleibt; übrige Stashes behalten. Wiederhergestellte Änderungen vor dem Fortsetzen prüfen und committen."},
-    "stash_unknown": {"en": "Result uncertain; no further action. Inspect files and stash list before retrying.", "de": "Ergebnis unklar; keine weitere Aktion. Vor erneutem Versuch Dateien und Stash-Liste prüfen."},
-    "stash_applied_kept": {"en": "Applied, but deletion was not confirmed; stash kept where still present. Do not apply again without checking.", "de": "Angewendet, aber Löschen nicht bestätigt; Stash soweit vorhanden behalten. Vor erneutem Anwenden prüfen."},
-    "stash_cli_options": {"en": "--stashes is read-only and only accepts a repository root, --json and --lang.", "de": "--stashes ist rein lesend und erlaubt nur einen Repo-Ordner, --json und --lang."},
-    "stash_cli_help": {"en": "read all stashes grouped by file; optionally with --json (never applies/deletes)", "de": "alle Stashes nach Dateien lesen; optional mit --json (kein Anwenden/Löschen)"},
+    "stash_done": {
+        "en": "{action}: {n} stash(es) completed.",
+        "de": "{action}: {n} Stash(es) erledigt.",
+    },
+    "stash_stopped": {
+        "en": "Stopped after {n} completed stash(es): {e}",
+        "de": "Nach {n} erledigten Stash(es) gestoppt: {e}",
+    },
+    "stash_apply_failed": {
+        "en": "Apply failed; the stash was kept. Files may already be changed; inspect conflicts before continuing.",
+        "de": "Anwenden fehlgeschlagen; der Stash bleibt erhalten. Dateien können bereits geändert sein; vor dem Fortsetzen Konflikte prüfen.",
+    },
+    "stash_index_failed": {
+        "en": "Saved staging could not be restored; the stash was kept. Inspect file contents and staging before continuing.",
+        "de": "Gespeicherte Vormerkung nicht wiederhergestellt; der Stash bleibt erhalten. Vor dem Fortsetzen Dateiinhalte und Vormerkung prüfen.",
+    },
+    "stash_batch_hint": {
+        "en": "Batch: if a stash restores staged changes, review and commit them before applying the next stash.",
+        "de": "Sammelaktion: Stellt ein Stash vorgemerkte Änderungen wieder her, diese vor dem nächsten Stash prüfen und committen.",
+    },
+    "stash_batch_staged": {
+        "en": "An earlier stash restored staged changes. Stopped before applying the next stash to preserve that staging; remaining stashes were kept. Review and commit the restored changes before continuing.",
+        "de": "Ein früherer Stash hat vorgemerkte Änderungen wiederhergestellt. Vor dem nächsten Stash gestoppt, damit diese Vormerkung erhalten bleibt; übrige Stashes behalten. Wiederhergestellte Änderungen vor dem Fortsetzen prüfen und committen.",
+    },
+    "stash_unknown": {
+        "en": "Result uncertain; no further action. Inspect files and stash list before retrying.",
+        "de": "Ergebnis unklar; keine weitere Aktion. Vor erneutem Versuch Dateien und Stash-Liste prüfen.",
+    },
+    "stash_applied_kept": {
+        "en": "Applied, but deletion was not confirmed; stash kept where still present. Do not apply again without checking.",
+        "de": "Angewendet, aber Löschen nicht bestätigt; Stash soweit vorhanden behalten. Vor erneutem Anwenden prüfen.",
+    },
+    "stash_cli_options": {
+        "en": "--stashes is read-only and only accepts a repository root, --json and --lang.",
+        "de": "--stashes ist rein lesend und erlaubt nur einen Repo-Ordner, --json und --lang.",
+    },
     "no_stash": {"en": "No stash in this repo.", "de": "Kein Stash in diesem Repo."},
-    "stash_preview_failed": {"en": "Stash preview failed: {e}",
-                              "de": "Stash-Vorschau fehlgeschlagen: {e}"},
+    "stash_preview_failed": {
+        "en": "Stash preview failed: {e}",
+        "de": "Stash-Vorschau fehlgeschlagen: {e}",
+    },
     "stash_preview_empty": {
         "en": "(stash exists, but Git produced no displayable patch)",
-        "de": "(Stash vorhanden, aber Git erzeugte keinen darstellbaren Patch)"},
+        "de": "(Stash vorhanden, aber Git erzeugte keinen darstellbaren Patch)",
+    },
     # Pager
-    "pager_footer": {"en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
-                     "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}"},
-    "pager_footer_confirm": {"en": " ↑/↓ scroll · Esc cancel · line {a}-{b} / {n}",
-                             "de": " ↑/↓ scrollen · Esc abbrechen · Zeile {a}-{b} / {n}"},
+    "pager_footer": {
+        "en": " ↑/↓ scroll · Q/Esc close · line {a}-{b} / {n}",
+        "de": " ↑/↓ scrollen · Q/Esc schließen · Zeile {a}-{b} / {n}",
+    },
+    "pager_footer_confirm": {
+        "en": " ↑/↓ scroll · Esc cancel · line {a}-{b} / {n}",
+        "de": " ↑/↓ scrollen · Esc abbrechen · Zeile {a}-{b} / {n}",
+    },
     # Commit-Hilfe
     "commit_title": {
         "en": "Commit helper · {rel} — {n}/{total} selected, review then ⏎",
-        "de": "Commit-Hilfe · {rel} — {n}/{total} gewählt, prüfen, dann ⏎"},
+        "de": "Commit-Hilfe · {rel} — {n}/{total} gewählt, prüfen, dann ⏎",
+    },
     "do_commit": {"en": "✔ commit", "de": "✔ committen"},
     "do_skip": {"en": "✘ skip", "de": "✘ auslassen"},
     "do_nothing_vs_head": {
         "en": "— staged then deleted: nothing to commit",
-        "de": "— gestaget und gelöscht: nichts zu committen"},
+        "de": "— gestaget und gelöscht: nichts zu committen",
+    },
     "do_embedded_repo": {
         "en": "— foreign repository: use the terminal",
-        "de": "— fremdes Repo: im Terminal erledigen"},
+        "de": "— fremdes Repo: im Terminal erledigen",
+    },
     "commit_footer": {
         "en": " ␣ commit on/off · G suggestions · A all · N none · ⏎ next · Esc cancel",
-        "de": (" ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter ·"
-               " Esc abbrechen")},
+        "de": (" ␣ committen an/aus · G Vorschläge · A alle · N keine · ⏎ weiter · Esc abbrechen"),
+    },
     # Vorschlaege fuer die Dateiauswahl (Taste G in der Commit-Hilfe)
     "group_title": {
         "en": "Suggestions — pick one, it replaces the current selection",
-        "de": "Vorschläge — einer davon ersetzt die aktuelle Auswahl"},
-    "group_footer": {"en": " ↑/↓ select · ⏎ take it · Q/Esc back",
-                     "de": " ↑/↓ wählen · ⏎ übernehmen · Q/Esc zurück"},
+        "de": "Vorschläge — einer davon ersetzt die aktuelle Auswahl",
+    },
+    "group_footer": {
+        "en": " ↑/↓ select · ⏎ take it · Q/Esc back",
+        "de": " ↑/↓ wählen · ⏎ übernehmen · Q/Esc zurück",
+    },
     "group_none": {
         "en": "No sensible subset here — the changes do not fall apart.",
-        "de": "Keine sinnvolle Teilmenge — die Änderungen zerfallen nicht."},
+        "de": "Keine sinnvolle Teilmenge — die Änderungen zerfallen nicht.",
+    },
     "group_code": {"en": "{what} ({n})", "de": "{what} ({n})"},
     "group_code_M": {"en": "changed files", "de": "geänderte Dateien"},
     "group_code_U": {"en": "new files", "de": "neue Dateien"},
@@ -779,178 +1147,244 @@ TR = {
     "nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "commit_in": {"en": "Commit in {rel}", "de": "Commit in {rel}"},
     "to_commit_n": {"en": "To commit: {n} file(s)", "de": "Zu committen: {n} Datei(en)"},
-    "recent_msgs": {"en": "Recent commit messages (style reference):",
-                    "de": "Letzte Commit-Messages (Stil-Vorlage):"},
+    "recent_msgs": {
+        "en": "Recent commit messages (style reference):",
+        "de": "Letzte Commit-Messages (Stil-Vorlage):",
+    },
     "commit_msg_prompt": {"en": "Commit message: ", "de": "Commit-Message: "},
     "empty_msg": {"en": "Empty message — cancelled.", "de": "Leere Message — abgebrochen."},
     "commit_failed": {"en": "Commit failed: {e}", "de": "Commit fehlgeschlagen: {e}"},
     "commit_exists_index_failed": {
         "en": "Commit {oid} exists, but the real index was not updated — inspect git status before continuing.",
-        "de": "Commit {oid} ist vorhanden, aber der echte Index wurde nicht übernommen — vor dem Weiterarbeiten git status prüfen."},
+        "de": "Commit {oid} ist vorhanden, aber der echte Index wurde nicht übernommen — vor dem Weiterarbeiten git status prüfen.",
+    },
     "commit_outcome_unknown": {
         "en": "The commit outcome could not be verified — a commit may exist; inspect git log and git status before continuing.",
-        "de": "Der Commit-Ausgang konnte nicht sicher geprüft werden — ein Commit kann vorhanden sein; vor dem Weiterarbeiten git log und git status prüfen."},
+        "de": "Der Commit-Ausgang konnte nicht sicher geprüft werden — ein Commit kann vorhanden sein; vor dem Weiterarbeiten git log und git status prüfen.",
+    },
     # Ein Commit läuft nicht immer sofort durch: der pre-commit-Hook des Repos kann
     # Linter oder Tests starten. Ohne diese Zeile sähe die TUI so lange tot aus.
     "commit_running": {
         "en": "Committing … a pre-commit hook may run (up to {s}s).",
-        "de": "Committe … ein pre-commit-Hook kann laufen (bis zu {s}s)."},
+        "de": "Committe … ein pre-commit-Hook kann laufen (bis zu {s}s).",
+    },
     "commit_timeout_none": {
         "en": "Commit cancelled after {s}s — nothing was committed. Raise commit_timeout "
-              "in the config file if the hook needs longer.",
+        "in the config file if the hook needs longer.",
         "de": "Commit nach {s}s abgebrochen — es wurde nichts committet. Bei Bedarf "
-              "commit_timeout in der config.json erhöhen."},
+        "commit_timeout in der config.json erhöhen.",
+    },
     "commit_timeout_done": {
         "en": "Commit cancelled after {s}s, but the commit exists — check git log.",
-        "de": "Commit nach {s}s abgebrochen, aber der Commit ist da — git log prüfen."},
+        "de": "Commit nach {s}s abgebrochen, aber der Commit ist da — git log prüfen.",
+    },
     "commit_conflicts": {
         "en": "Commit helper is blocked while merge conflicts exist.",
-        "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen."},
+        "de": "Die Commit-Hilfe ist gesperrt, solange Merge-Konflikte bestehen.",
+    },
     "commit_operation": {
         "en": "Commit helper is blocked while a merge, rebase, cherry-pick, or revert is active.",
-        "de": "Die Commit-Hilfe ist während Merge, Rebase, Cherry-Pick oder Revert gesperrt."},
+        "de": "Die Commit-Hilfe ist während Merge, Rebase, Cherry-Pick oder Revert gesperrt.",
+    },
     "commit_detached": {
         "en": "Commit helper is blocked on a detached HEAD; switch to a branch first.",
-        "de": "Die Commit-Hilfe ist bei detached HEAD gesperrt; zuerst auf einen Branch wechseln."},
+        "de": "Die Commit-Hilfe ist bei detached HEAD gesperrt; zuerst auf einen Branch wechseln.",
+    },
     # Der Rückgängig-Befehl steht bewusst in der Meldung: Wer gerade committet hat,
     # soll nicht suchen müssen, wie er es zurücknimmt.
-    "committed_in": {"en": "Committed in {rel}. Undo: {undo}",
-                     "de": "Committet in {rel}. Rückgängig: {undo}"},
+    "committed_in": {
+        "en": "Committed in {rel}. Undo: {undo}",
+        "de": "Committet in {rel}. Rückgängig: {undo}",
+    },
     "push_outcome_unknown": {
         "en": "Push outcome is unknown (Git exit code {code}); fetch/check the remote before retrying.",
-        "de": "Push-Ausgang unklar (Git-Exit-Code {code}); vor dem Wiederholen Remote fetchen/prüfen."},
+        "de": "Push-Ausgang unklar (Git-Exit-Code {code}); vor dem Wiederholen Remote fetchen/prüfen.",
+    },
     "push_io_unknown": {
         "en": "Push outcome is unknown; the process result could not be read — fetch/check the remote before retrying.",
-        "de": "Push-Ausgang unklar; das Prozessergebnis konnte nicht gelesen werden — vor dem Wiederholen Remote fetchen/prüfen."},
+        "de": "Push-Ausgang unklar; das Prozessergebnis konnte nicht gelesen werden — vor dem Wiederholen Remote fetchen/prüfen.",
+    },
     "push_tracking_changed": {
         "en": "Push succeeded, but the local tracking ref changed concurrently; reload before another push.",
-        "de": "Push erfolgreich, aber der lokale Tracking-Ref änderte sich parallel; vor einem weiteren Push neu laden."},
+        "de": "Push erfolgreich, aber der lokale Tracking-Ref änderte sich parallel; vor einem weiteren Push neu laden.",
+    },
     "push_config_changed": {
         "en": "Push succeeded, but the remote configuration changed meanwhile; the tracking ref was left as it was — reload before another push.",
-        "de": "Push erfolgreich, aber die Remote-Konfiguration änderte sich inzwischen; der Tracking-Ref blieb, wie er war — vor einem weiteren Push neu laden."},
+        "de": "Push erfolgreich, aber die Remote-Konfiguration änderte sich inzwischen; der Tracking-Ref blieb, wie er war — vor einem weiteren Push neu laden.",
+    },
     "push_tracking_unknown": {
         "en": "Push succeeded, but whether the local tracking ref was updated is unknown; reload before another push.",
-        "de": "Push erfolgreich, aber ob der lokale Tracking-Ref nachgezogen wurde, ist unklar; vor einem weiteren Push neu laden."},
-    "nothing_to_commit": {"en": "Nothing to commit in this repo.",
-                          "de": "Nichts zu committen in diesem Repo."},
+        "de": "Push erfolgreich, aber ob der lokale Tracking-Ref nachgezogen wurde, ist unklar; vor einem weiteren Push neu laden.",
+    },
+    "nothing_to_commit": {
+        "en": "Nothing to commit in this repo.",
+        "de": "Nichts zu committen in diesem Repo.",
+    },
     # Sichere Push-Hilfe
-    "no_sync_for_action": {"en": "No sync remote is configured for this repository.",
-                           "de": "Für dieses Repo ist kein Sync-Remote konfiguriert."},
+    "no_sync_for_action": {
+        "en": "No sync remote is configured for this repository.",
+        "de": "Für dieses Repo ist kein Sync-Remote konfiguriert.",
+    },
     "public_simple_block": {
         "en": "The sync remote is public. Use G for the guarded GitHub preview.",
-        "de": "Der Sync-Remote ist öffentlich. Nutze G für die geschützte GitHub-Vorschau."},
-    "transfer_fetch_failed": {"en": "Fetch from {r} failed (Git exit code {code}).",
-                              "de": "Fetch von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+        "de": "Der Sync-Remote ist öffentlich. Nutze G für die geschützte GitHub-Vorschau.",
+    },
+    "transfer_fetch_failed": {
+        "en": "Fetch from {r} failed (Git exit code {code}).",
+        "de": "Fetch von {r} fehlgeschlagen (Git-Exit-Code {code}).",
+    },
     "fetch_outcome_unknown": {
         "en": "Fetch outcome for {r} is unknown; its tracking ref may have changed — reload before retrying.",
-        "de": "Fetch-Ausgang für {r} unklar; sein Tracking-Ref kann geändert sein — vor dem Wiederholen neu laden."},
+        "de": "Fetch-Ausgang für {r} unklar; sein Tracking-Ref kann geändert sein — vor dem Wiederholen neu laden.",
+    },
     # Kurz halten: diese Meldung erscheint auch als Badge in der Repo-Zeile und
     # wird dort auf die Terminalbreite abgeschnitten. Die Langfassung steht im README.
     "transfer_auth_missing": {
         "en": "{r} needs a login (no credential helper or SSH key).",
-        "de": "{r} braucht einen Login (kein Credential-Helper/SSH-Key)."},
+        "de": "{r} braucht einen Login (kein Credential-Helper/SSH-Key).",
+    },
     "transfer_inspect_failed": {
         "en": "Git could not inspect the branch safely; no transfer was attempted.",
-        "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen."},
+        "de": "Git konnte den Branch nicht sicher prüfen; es wurde nichts übertragen.",
+    },
     "remote_url_mismatch": {
         "en": "{r} has multiple or differing fetch/push targets; transfer is blocked.",
-        "de": "{r} hat mehrere oder abweichende Fetch-/Push-Ziele; Transfer ist gesperrt."},
+        "de": "{r} hat mehrere oder abweichende Fetch-/Push-Ziele; Transfer ist gesperrt.",
+    },
     "transfer_changed": {
         "en": "Branch, files, index, remote, or target changed after approval; review again.",
-        "de": "Branch, Dateien, Index, Remote oder Ziel änderten sich nach der Freigabe; erneut prüfen."},
-    "transfer_dirty": {"en": "Working tree is not clean — commit, ignore, or stash first.",
-                       "de": "Arbeitsbaum ist nicht sauber — erst committen, ignorieren oder stashen."},
+        "de": "Branch, Dateien, Index, Remote oder Ziel änderten sich nach der Freigabe; erneut prüfen.",
+    },
+    "transfer_dirty": {
+        "en": "Working tree is not clean — commit, ignore, or stash first.",
+        "de": "Arbeitsbaum ist nicht sauber — erst committen, ignorieren oder stashen.",
+    },
     "transfer_unsafe_transport": {
-        "en": ("Transfer blocked: this repository's own config sets {k}. That can "
-               "send the push somewhere other than the checked address; move it to "
-               "your global Git config."),
-        "de": ("Übertragung gesperrt: Die Config dieses Repos setzt {k}. Damit kann "
-               "der Push woanders landen als bei der geprüften Adresse; gehört in "
-               "die globale Git-Config.")},
-    "transfer_detached": {"en": "Detached HEAD — use the terminal for this special case.",
-                          "de": "Detached HEAD — diesen Sonderfall im Terminal bearbeiten."},
-    "transfer_missing": {"en": "Branch '{b}' does not exist on {r}; creating remote branches is blocked here.",
-                         "de": "Branch '{b}' existiert nicht auf {r}; neue Remote-Branches sind hier gesperrt."},
-    "transfer_divergent": {"en": "Local and {r} have diverged ({a} ahead, {b} behind); no automatic reconciliation.",
-                           "de": "Lokal und {r} sind divergiert ({a} voraus, {b} zurück); kein automatischer Abgleich."},
-    "transfer_behind": {"en": "Local branch is {n} commit(s) behind {r}; pull first.",
-                        "de": "Der lokale Branch ist {n} Commit(s) hinter {r}; zuerst pullen."},
+        "en": (
+            "Transfer blocked: this repository's own config sets {k}. That can "
+            "send the push somewhere other than the checked address; move it to "
+            "your global Git config."
+        ),
+        "de": (
+            "Übertragung gesperrt: Die Config dieses Repos setzt {k}. Damit kann "
+            "der Push woanders landen als bei der geprüften Adresse; gehört in "
+            "die globale Git-Config."
+        ),
+    },
+    "transfer_detached": {
+        "en": "Detached HEAD — use the terminal for this special case.",
+        "de": "Detached HEAD — diesen Sonderfall im Terminal bearbeiten.",
+    },
+    "transfer_missing": {
+        "en": "Branch '{b}' does not exist on {r}; creating remote branches is blocked here.",
+        "de": "Branch '{b}' existiert nicht auf {r}; neue Remote-Branches sind hier gesperrt.",
+    },
+    "transfer_divergent": {
+        "en": "Local and {r} have diverged ({a} ahead, {b} behind); no automatic reconciliation.",
+        "de": "Lokal und {r} sind divergiert ({a} voraus, {b} zurück); kein automatischer Abgleich.",
+    },
+    "transfer_behind": {
+        "en": "Local branch is {n} commit(s) behind {r}; pull first.",
+        "de": "Der lokale Branch ist {n} Commit(s) hinter {r}; zuerst pullen.",
+    },
     "nothing_to_push": {"en": "Nothing to push to {r}.", "de": "Nichts zu {r} zu pushen."},
-    "confirm_sync_push": {"en": "Push {n} commit(s) to the private sync remote {r}?",
-                          "de": "{n} Commit(s) zum privaten Sync-Remote {r} pushen?"},
-    "sync_pushed": {"en": "Pushed current branch to {r} (no tags).",
-                    "de": "Aktuellen Branch zu {r} gepusht (keine Tags)."},
-    "no_github": {"en": "No GitHub remote in this repository.",
-                  "de": "Dieses Repo hat keinen GitHub-Remote."},
-    "many_github": {"en": "Several GitHub remotes ({names}); use the terminal to choose deliberately.",
-                    "de": "Mehrere GitHub-Remotes ({names}); bitte im Terminal bewusst auswählen."},
-    "github_preview": {"en": "GitHub push preview · {rel} → {r}/{b}",
-                       "de": "GitHub-Push-Vorschau · {rel} → {r}/{b}"},
+    "confirm_sync_push": {
+        "en": "Push {n} commit(s) to the private sync remote {r}?",
+        "de": "{n} Commit(s) zum privaten Sync-Remote {r} pushen?",
+    },
+    "sync_pushed": {
+        "en": "Pushed current branch to {r} (no tags).",
+        "de": "Aktuellen Branch zu {r} gepusht (keine Tags).",
+    },
+    "no_github": {
+        "en": "No GitHub remote in this repository.",
+        "de": "Dieses Repo hat keinen GitHub-Remote.",
+    },
+    "many_github": {
+        "en": "Several GitHub remotes ({names}); use the terminal to choose deliberately.",
+        "de": "Mehrere GitHub-Remotes ({names}); bitte im Terminal bewusst auswählen.",
+    },
+    "github_preview": {
+        "en": "GitHub push preview · {rel} → {r}/{b}",
+        "de": "GitHub-Push-Vorschau · {rel} → {r}/{b}",
+    },
     "github_confirm": {
         "en": "Publish this branch to {r}? Y ⏎ = yes, anything else cancels: ",
-        "de": "Diesen Branch zu {r} veröffentlichen? J ⏎ = ja, sonst Abbruch: "},
-    "github_cancelled": {"en": "GitHub push cancelled — nothing was published.",
-                         "de": "GitHub-Push abgebrochen — nichts wurde veröffentlicht."},
-    "github_pushed": {"en": "Published current branch to {r}; no tags were sent.",
-                      "de": "Aktuellen Branch zu {r} veröffentlicht; keine Tags übertragen."},
-    "github_changed": {"en": "Remote or outgoing files changed after the preview; review again.",
-                       "de": "Remote oder ausgehende Dateien änderten sich nach der Vorschau; bitte erneut prüfen."},
+        "de": "Diesen Branch zu {r} veröffentlichen? J ⏎ = ja, sonst Abbruch: ",
+    },
+    "github_cancelled": {
+        "en": "GitHub push cancelled — nothing was published.",
+        "de": "GitHub-Push abgebrochen — nichts wurde veröffentlicht.",
+    },
+    "github_pushed": {
+        "en": "Published current branch to {r}; no tags were sent.",
+        "de": "Aktuellen Branch zu {r} veröffentlicht; keine Tags übertragen.",
+    },
+    "github_changed": {
+        "en": "Remote or outgoing files changed after the preview; review again.",
+        "de": "Remote oder ausgehende Dateien änderten sich nach der Vorschau; bitte erneut prüfen.",
+    },
     "preview_branch_only": {
         "en": "Branch only: approved OID + target lease, no tags or new remote branch.",
-        "de": "Nur Branch: freigegebene OID + Ziel-Lease, keine Tags/neuen Remote-Branches."},
+        "de": "Nur Branch: freigegebene OID + Ziel-Lease, keine Tags/neuen Remote-Branches.",
+    },
     "preview_privacy": {
         "en": "Review every outgoing commit and file name; this is not an automatic privacy approval.",
-        "de": "Jeden ausgehenden Commit und Dateinamen prüfen; dies ist keine automatische Privacy-Freigabe."},
+        "de": "Jeden ausgehenden Commit und Dateinamen prüfen; dies ist keine automatische Privacy-Freigabe.",
+    },
     "outgoing_commits": {"en": "Outgoing commits:", "de": "Ausgehende Commits:"},
     "changed_files": {"en": "Changed files:", "de": "Geänderte Dateien:"},
     "none_label": {"en": "(none)", "de": "(keine)"},
-    "git_help_title": {"en": "Safe Git actions & command log",
-                       "de": "Sichere Git-Aktionen & Befehlsprotokoll"},
+    "git_help_title": {
+        "en": "Safe Git actions & command log",
+        "de": "Sichere Git-Aktionen & Befehlsprotokoll",
+    },
     "git_help_body": {
         "en": "W  Read the selected repository's worktree family. External paths stay unscanned.\n"
-              "O  Read submodule references and contents; no initialization, update or fetch.\n\n"
-              "B  Choose a work view; / adds a path filter, M changes the layout.\n"
-              "N  Reread the selected repo locally. U fetches one chosen remote.\n"
-              "X  Stop the background scan and retain completed results.\n\n"
-              "P  Push only the current branch to the private sync remote.\n"
-              "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
-              "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
-              "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
-              "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
-              "L  Choose a remote, or fetch all first and then choose a pull source.\n"
-              "   Preview incoming commits/files, confirm with Y ⏎; clean tree, fast-forward only.\n"
-              "   Keep other programs from editing/checking out this repo during the pull.\n\n"
-              "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
-              "I  Repository, remote and branch details. T tests the selected remote.\n"
-              "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
-              "A  Shows every changed file and its diff without modifying the repository.\n"
-              "   Discarding or unstaging remains an explicit terminal operation.\n\n"
-              "S  Browse all stashes by file; arrows expand/collapse.\n"
-              "   A applies, P pops, D deletes; * switches selected/all. Confirm with Y ⏎.\n"
-              "   Apply/pop starts clean; all runs oldest first and stops at the first error.\n"
-              "   Keep other programs from changing this repo during the action.",
+        "O  Read submodule references and contents; no initialization, update or fetch.\n\n"
+        "B  Choose a work view; / adds a path filter, M changes the layout.\n"
+        "N  Reread the selected repo locally. U fetches one chosen remote.\n"
+        "X  Stop the background scan and retain completed results.\n\n"
+        "P  Push only the current branch to the private sync remote.\n"
+        "   Requires a clean tree, fetches first, and rejects behind/divergent history.\n\n"
+        "G  Guarded GitHub push. Shows outgoing commits and file names first.\n"
+        "   Confirm with Y ⏎ in that preview; pins source and target OIDs, sends no tags.\n"
+        "   New or unrelated GitHub branches remain terminal-only special cases.\n\n"
+        "L  Choose a remote, or fetch all first and then choose a pull source.\n"
+        "   Preview incoming commits/files, confirm with Y ⏎; clean tree, fast-forward only.\n"
+        "   Keep other programs from editing/checking out this repo during the pull.\n\n"
+        "R  Fetches each safe remote separately; working trees stay unchanged.\n\n"
+        "I  Repository, remote and branch details. T tests the selected remote.\n"
+        "   X removes it after a warning: its tracking refs and reflogs are gone for good.\n\n"
+        "A  Shows every changed file and its diff without modifying the repository.\n"
+        "   Discarding or unstaging remains an explicit terminal operation.\n\n"
+        "S  Browse all stashes by file; arrows expand/collapse.\n"
+        "   A applies, P pops, D deletes; * switches selected/all. Confirm with Y ⏎.\n"
+        "   Apply/pop starts clean; all runs oldest first and stops at the first error.\n"
+        "   Keep other programs from changing this repo during the action.",
         "de": "W  Worktree-Familie des gewählten Repos lesen. Externe Pfade bleiben ungeprüft.\n"
-              "O  Submodule-Verweise und Inhalte lesen; kein Initialisieren, Update oder Fetch.\n\n"
-              "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
-              "N  Gewähltes Repo lokal neu lesen. U ruft ein gewähltes Remote ab.\n"
-              "X  Hintergrundscan stoppen und fertige Ergebnisse behalten.\n\n"
-              "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
-              "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
-              "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
-              "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
-              "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
-              "L  Remote wählen, oder alle abrufen und danach eine Pull-Quelle wählen.\n"
-              "   Vorschau von Commits/Dateien, J ⏎ bestätigt; sauberer Tree, nur Fast-Forward.\n"
-              "   Währenddessen das Repo nicht in anderen Programmen bearbeiten/wechseln.\n\n"
-              "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
-              "I  Repo-, Remote- und Branch-Details. T prüft das gewählte Remote.\n"
-              "   X entfernt es nach Warnung: Tracking-Refs und Reflogs sind danach endgültig weg.\n\n"
-              "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
-              "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion.\n\n"
-              "S  Alle Stashes nach Dateien ansehen; Pfeile klappen auf/zu.\n"
-              "   A wendet an, P poppt, D löscht; * wechselt einzeln/alle. J ⏎ bestätigt.\n"
-              "   Apply/Pop beginnt sauber; alle laufen ältester zuerst bis zum ersten Fehler.\n"
-              "   Währenddessen das Repo nicht in anderen Programmen ändern."},
+        "O  Submodule-Verweise und Inhalte lesen; kein Initialisieren, Update oder Fetch.\n\n"
+        "B  Arbeitsansicht wählen; / ergänzt den Pfadfilter, M wechselt das Layout.\n"
+        "N  Gewähltes Repo lokal neu lesen. U ruft ein gewähltes Remote ab.\n"
+        "X  Hintergrundscan stoppen und fertige Ergebnisse behalten.\n\n"
+        "P  Nur den aktuellen Branch zum privaten Sync-Remote pushen.\n"
+        "   Verlangt einen sauberen Tree, fetcht zuerst und blockiert Rückstand/Divergenz.\n\n"
+        "G  Geschützter GitHub-Push mit Vorschau von Commits und Dateinamen.\n"
+        "   Bestätigung mit J ⏎ in der Vorschau; pinnt Quell-/Ziel-OID, sendet keine Tags.\n"
+        "   Neue oder unverbundene GitHub-Branches bleiben Terminal-Sonderfälle.\n\n"
+        "L  Remote wählen, oder alle abrufen und danach eine Pull-Quelle wählen.\n"
+        "   Vorschau von Commits/Dateien, J ⏎ bestätigt; sauberer Tree, nur Fast-Forward.\n"
+        "   Währenddessen das Repo nicht in anderen Programmen bearbeiten/wechseln.\n\n"
+        "R  Fetcht jedes sichere Remote einzeln; Working Trees bleiben unverändert.\n\n"
+        "I  Repo-, Remote- und Branch-Details. T prüft das gewählte Remote.\n"
+        "   X entfernt es nach Warnung: Tracking-Refs und Reflogs sind danach endgültig weg.\n\n"
+        "A  Zeigt jede geänderte Datei und ihren Diff, ohne das Repo zu verändern.\n"
+        "   Verwerfen oder aus der Vormerkung nehmen bleibt eine Terminal-Aktion.\n\n"
+        "S  Alle Stashes nach Dateien ansehen; Pfeile klappen auf/zu.\n"
+        "   A wendet an, P poppt, D löscht; * wechselt einzeln/alle. J ⏎ bestätigt.\n"
+        "   Apply/Pop beginnt sauber; alle laufen ältester zuerst bis zum ersten Fehler.\n"
+        "   Währenddessen das Repo nicht in anderen Programmen ändern.",
+    },
     # Repo-Info
     "repo_info_title": {"en": "Repository info · {rel}", "de": "Repo-Info · {rel}"},
     "info_path": {"en": "Path", "de": "Pfad"},
@@ -958,35 +1392,30 @@ TR = {
     "info_head": {"en": "HEAD", "de": "HEAD"},
     "info_last_commit": {"en": "Last commit", "de": "Letzter Commit"},
     "info_history": {"en": "History", "de": "Historie"},
-    "info_history_value": {
-        "en": "{n} commit(s) · {kind}",
-        "de": "{n} Commit(s) · {kind}"},
+    "info_history_value": {"en": "{n} commit(s) · {kind}", "de": "{n} Commit(s) · {kind}"},
     "info_full_clone": {"en": "full clone", "de": "vollständiger Clone"},
     "info_shallow_clone": {"en": "shallow clone", "de": "flacher Clone"},
     "info_no_commits": {"en": "(no commits)", "de": "(keine Commits)"},
     "info_upstream": {"en": "Upstream", "de": "Upstream"},
-    "info_delta": {"en": "{a} ahead / {b} behind",
-                   "de": "{a} voraus / {b} zurück"},
+    "info_delta": {"en": "{a} ahead / {b} behind", "de": "{a} voraus / {b} zurück"},
     "info_worktree": {"en": "Working tree", "de": "Arbeitsbaum"},
     "info_clean": {"en": "clean", "de": "sauber"},
     "info_changes": {
         "en": "M:{m} · D:{d} · U:{u} · conflicts:{c}",
-        "de": "M:{m} · D:{d} · U:{u} · Konflikte:{c}"},
+        "de": "M:{m} · D:{d} · U:{u} · Konflikte:{c}",
+    },
     "info_stashes": {"en": "Stashes", "de": "Stashes"},
     "info_tags": {"en": "Tags at HEAD", "de": "Tags an HEAD"},
     "info_remotes": {"en": "Remotes", "de": "Remotes"},
     "info_sync": {"en": "sync", "de": "Sync"},
     "info_github": {"en": "GitHub", "de": "GitHub"},
-    "info_unsafe_remote": {
-        "en": "fetch/push targets differ",
-        "de": "Fetch-/Push-Ziele weichen ab"},
+    "info_unsafe_remote": {"en": "fetch/push targets differ", "de": "Fetch-/Push-Ziele weichen ab"},
     "info_fetch_url": {"en": "fetch", "de": "Fetch"},
     "info_push_url": {"en": "push", "de": "Push"},
     "info_fetch_push_url": {"en": "fetch+push", "de": "Fetch+Push"},
     "info_web_url": {"en": "web", "de": "Web"},
     "info_branch_label": {"en": "branch {b}", "de": "Branch {b}"},
-    "info_branch_missing_value": {"en": "not on this remote",
-                                  "de": "nicht auf diesem Remote"},
+    "info_branch_missing_value": {"en": "not on this remote", "de": "nicht auf diesem Remote"},
     "info_last_error": {"en": "Last error", "de": "Letzter Fehler"},
     "info_git_said": {"en": "Git said", "de": "Git sagte"},
     # Branch-Abschnitt der Info-Seite
@@ -997,126 +1426,179 @@ TR = {
     "info_branch_commit": {"en": "commit", "de": "Commit"},
     "info_remote_error": {
         "en": "Remote details unavailable: {e}",
-        "de": "Remote-Details nicht verfügbar: {e}"},
+        "de": "Remote-Details nicht verfügbar: {e}",
+    },
     "info_fetch_failed": {"en": "last fetch failed", "de": "letzter Fetch fehlgeschlagen"},
     # Info-Ansicht: Navigation und Remote-Aktionen
     "info_footer_nav": {
         "en": " ↑/↓ or Tab select remote/branch · PgUp/PgDn scroll · Q/Esc close",
-        "de": " ↑/↓ oder Tab Remote/Branch wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen"},
+        "de": " ↑/↓ oder Tab Remote/Branch wählen · Bild↑/Bild↓ scrollen · Q/Esc schließen",
+    },
     "info_footer_actions": {
         "en": " T test selected remote (read-only) · X remove remote (no undo)",
-        "de": " T gewähltes Remote prüfen (rein lesend) · X Remote entfernen (kein Rückgängig)"},
+        "de": " T gewähltes Remote prüfen (rein lesend) · X Remote entfernen (kein Rückgängig)",
+    },
     "info_footer_actions_branch": {
         "en": " Branch details are read-only · X removes remotes only",
-        "de": " Branch-Details sind rein lesend · X entfernt nur Remotes"},
-    "info_no_remotes": {"en": "This repository has no remote.",
-                        "de": "Dieses Repo hat kein Remote."},
-    "info_check_remote_only": {"en": "T tests remotes; a branch is local anyway.",
-                               "de": "T prüft Remotes; ein Branch ist ohnehin lokal."},
+        "de": " Branch-Details sind rein lesend · X entfernt nur Remotes",
+    },
+    "info_no_remotes": {
+        "en": "This repository has no remote.",
+        "de": "Dieses Repo hat kein Remote.",
+    },
+    "info_check_remote_only": {
+        "en": "T tests remotes; a branch is local anyway.",
+        "de": "T prüft Remotes; ein Branch ist ohnehin lokal.",
+    },
     "info_nothing_selected": {"en": "Nothing selected.", "de": "Nichts ausgewählt."},
     "info_remove_remote_only": {
         "en": "X removes remotes only; deleting a branch remains a terminal task.",
-        "de": "X entfernt nur Remotes; einen Branch löschen bleibt eine Terminal-Aufgabe."},
+        "de": "X entfernt nur Remotes; einen Branch löschen bleibt eine Terminal-Aufgabe.",
+    },
     # Remote entfernen (X). Die Texte mit Zeilenumbruch werden im Dialog per
     # splitlines() zu einzelnen Pager-Zeilen.
     "remove_title": {"en": "Remove remote · {rel} · {r}", "de": "Remote entfernen · {rel} · {r}"},
     "remove_what_happens": {"en": "What this does:", "de": "Was dabei passiert:"},
     "remove_effect_config": {
-        "en": "· the [remote \"{r}\"] section disappears from .git/config",
-        "de": "· der Abschnitt [remote \"{r}\"] verschwindet aus .git/config"},
+        "en": '· the [remote "{r}"] section disappears from .git/config',
+        "de": '· der Abschnitt [remote "{r}"] verschwindet aus .git/config',
+    },
     "remove_effect_refs": {
         "en": "· {n} remote-tracking branch(es) refs/remotes/{r}/* are deleted, together with their reflogs",
-        "de": "· {n} Remote-Tracking-Branch(es) refs/remotes/{r}/* werden gelöscht, samt ihren Reflogs"},
+        "de": "· {n} Remote-Tracking-Branch(es) refs/remotes/{r}/* werden gelöscht, samt ihren Reflogs",
+    },
     "remove_effect_upstream": {
         "en": "· local branch(es) tracking {r} lose that upstream: {b}",
-        "de": "· lokale Branch(es) mit Upstream auf {r} verlieren diese Verknüpfung: {b}"},
+        "de": "· lokale Branch(es) mit Upstream auf {r} verlieren diese Verknüpfung: {b}",
+    },
     "remove_effect_safe": {
         "en": "· commits, files, local branches and stashes stay untouched — nothing is sent",
-        "de": "· Commits, Dateien, lokale Branches und Stashes bleiben unberührt — nichts wird gesendet"},
+        "de": "· Commits, Dateien, lokale Branches und Stashes bleiben unberührt — nichts wird gesendet",
+    },
     "remove_effect_server": {
         "en": "· nothing changes on the server; this is purely local",
-        "de": "· auf dem Server ändert sich nichts; das ist rein lokal"},
+        "de": "· auf dem Server ändert sich nichts; das ist rein lokal",
+    },
     "remove_orphans": {
         "en": "{n} commit(s) on those tracking branches exist in no local branch, tag or other remote.\n"
-              "After removal only Git's garbage collector still knows them.",
+        "After removal only Git's garbage collector still knows them.",
         "de": "{n} Commit(s) dieser Tracking-Branches stehen in keinem lokalen Branch, Tag oder anderen Remote.\n"
-              "Nach dem Entfernen kennt sie nur noch Gits Müllsammler."},
+        "Nach dem Entfernen kennt sie nur noch Gits Müllsammler.",
+    },
     "remove_no_orphans": {
         "en": "Every commit on those tracking branches is also reachable from a local branch, tag or another remote.",
-        "de": "Jeder Commit dieser Tracking-Branches ist auch über einen lokalen Branch, Tag oder ein anderes Remote erreichbar."},
+        "de": "Jeder Commit dieser Tracking-Branches ist auch über einen lokalen Branch, Tag oder ein anderes Remote erreichbar.",
+    },
     "remove_irreversible": {
         "en": "WARNING: this cannot be undone. gmf cannot restore the deleted tracking refs or their reflogs.\n"
-              "`git remote add` only re-creates the address; the refs come back only if the server still has them.",
+        "`git remote add` only re-creates the address; the refs come back only if the server still has them.",
         "de": "ACHTUNG: Das lässt sich nicht rückgängig machen. gmf kann die gelöschten Tracking-Refs und ihre Reflogs nicht wiederherstellen.\n"
-              "`git remote add` legt nur die Adresse neu an; die Refs kommen nur zurück, wenn der Server sie noch hat."},
+        "`git remote add` legt nur die Adresse neu an; die Refs kommen nur zurück, wenn der Server sie noch hat.",
+    },
     "remove_sync_warning": {
         "en": "Careful: {r} is the sync remote of this repository — P stops working here afterwards.",
-        "de": "Achtung: {r} ist der Sync-Remote dieses Repos — P funktioniert hier danach nicht mehr."},
+        "de": "Achtung: {r} ist der Sync-Remote dieses Repos — P funktioniert hier danach nicht mehr.",
+    },
     "remove_command": {"en": "Command:", "de": "Befehl:"},
     "remove_confirm": {
         "en": "Remove remote {r} for good? Y ⏎ = yes, anything else cancels: ",
-        "de": "Remote {r} endgültig entfernen? J ⏎ = ja, sonst Abbruch: "},
-    "remove_done": {"en": "Removed remote {r}; this cannot be undone.",
-                    "de": "Remote {r} entfernt; das lässt sich nicht rückgängig machen."},
-    "remove_failed": {"en": "Removing {r} failed (Git exit code {code}).",
-                      "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code})."},
+        "de": "Remote {r} endgültig entfernen? J ⏎ = ja, sonst Abbruch: ",
+    },
+    "remove_done": {
+        "en": "Removed remote {r}; this cannot be undone.",
+        "de": "Remote {r} entfernt; das lässt sich nicht rückgängig machen.",
+    },
+    "remove_failed": {
+        "en": "Removing {r} failed (Git exit code {code}).",
+        "de": "Entfernen von {r} fehlgeschlagen (Git-Exit-Code {code}).",
+    },
     "remove_cancelled": {"en": "Nothing was removed.", "de": "Es wurde nichts entfernt."},
     "remove_changed": {
         "en": "The remote or its tracking refs changed after the preview — nothing was removed.",
-        "de": "Remote oder Tracking-Refs haben sich nach der Vorschau geändert — nichts wurde entfernt."},
+        "de": "Remote oder Tracking-Refs haben sich nach der Vorschau geändert — nichts wurde entfernt.",
+    },
     # Remote prüfen (T)
     "check_running": {"en": "Testing {r} …", "de": "Prüfe {r} …"},
-    "check_ok": {"en": "{r} exists and answers ({n} branch(es) there).",
-                 "de": "{r} existiert und antwortet ({n} Branch(es) dort)."},
-    "check_empty": {"en": "{r} answers but has no branches yet (empty repository).",
-                    "de": "{r} antwortet, hat aber noch keine Branches (leeres Repo)."},
+    "check_ok": {
+        "en": "{r} exists and answers ({n} branch(es) there).",
+        "de": "{r} existiert und antwortet ({n} Branch(es) dort).",
+    },
+    "check_empty": {
+        "en": "{r} answers but has no branches yet (empty repository).",
+        "de": "{r} antwortet, hat aber noch keine Branches (leeres Repo).",
+    },
     "check_gone": {
         "en": "{r}: reachable, but no repository there (or no access).",
-        "de": "{r}: erreichbar, aber dort kein Repo (oder kein Zugriff)."},
-    "check_auth": {"en": "{r}: server wants a login (credential helper or SSH key missing).",
-                   "de": "{r}: Server verlangt einen Login (Credential-Helper/SSH-Key fehlt)."},
+        "de": "{r}: erreichbar, aber dort kein Repo (oder kein Zugriff).",
+    },
+    "check_auth": {
+        "en": "{r}: server wants a login (credential helper or SSH key missing).",
+        "de": "{r}: Server verlangt einen Login (Credential-Helper/SSH-Key fehlt).",
+    },
     "check_nokeychain": {
-        "en": ("{r}: not measurable from this session — the credential helper reads the "
-               "login keychain, which only the GUI session can open. The login itself is "
-               "fine; check it with the GUI session of that machine."),
-        "de": ("{r}: aus dieser Sitzung nicht messbar — der Credential-Helper liest den "
-               "Login-Schlüsselbund, und den öffnet nur die GUI-Sitzung. Der Login selbst "
-               "ist in Ordnung; prüfen in der GUI-Sitzung des Rechners.")},
+        "en": (
+            "{r}: not measurable from this session — the credential helper reads the "
+            "login keychain, which only the GUI session can open. The login itself is "
+            "fine; check it with the GUI session of that machine."
+        ),
+        "de": (
+            "{r}: aus dieser Sitzung nicht messbar — der Credential-Helper liest den "
+            "Login-Schlüsselbund, und den öffnet nur die GUI-Sitzung. Der Login selbst "
+            "ist in Ordnung; prüfen in der GUI-Sitzung des Rechners."
+        ),
+    },
     "check_hostkey": {
         "en": "{r}: host key unknown or changed — connect once in a terminal.",
-        "de": "{r}: Hostschlüssel unbekannt/geändert — einmal im Terminal verbinden."},
-    "check_dns": {"en": "{r}: host name does not resolve (no network or DNS).",
-                  "de": "{r}: Hostname nicht auflösbar (kein Netz oder DNS)."},
+        "de": "{r}: Hostschlüssel unbekannt/geändert — einmal im Terminal verbinden.",
+    },
+    "check_dns": {
+        "en": "{r}: host name does not resolve (no network or DNS).",
+        "de": "{r}: Hostname nicht auflösbar (kein Netz oder DNS).",
+    },
     "check_unreachable": {
         "en": "{r}: no connection — offline, firewall, or server down.",
-        "de": "{r}: keine Verbindung — offline, Firewall oder Server aus."},
+        "de": "{r}: keine Verbindung — offline, Firewall oder Server aus.",
+    },
     "check_server": {
         "en": "{r}: server error there — their problem, not your repository.",
-        "de": "{r}: Serverfehler dort — deren Problem, nicht dein Repo."},
-    "check_timeout": {"en": "{r}: no answer within {s}s — network or server too slow.",
-                      "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam."},
+        "de": "{r}: Serverfehler dort — deren Problem, nicht dein Repo.",
+    },
+    "check_timeout": {
+        "en": "{r}: no answer within {s}s — network or server too slow.",
+        "de": "{r}: keine Antwort in {s}s — Netz oder Server zu langsam.",
+    },
     "check_unsafe_transport": {
-        "en": ("{r}: transfer blocked — this repository's own config sets {k}. That "
-               "can send the transfer somewhere other than the checked address; "
-               "move it to your global Git config."),
-        "de": ("{r}: Übertragung gesperrt — die Config dieses Repos setzt {k}. Damit "
-               "kann die Übertragung woanders landen als bei der geprüften Adresse; "
-               "gehört in die globale Git-Config.")},
+        "en": (
+            "{r}: transfer blocked — this repository's own config sets {k}. That "
+            "can send the transfer somewhere other than the checked address; "
+            "move it to your global Git config."
+        ),
+        "de": (
+            "{r}: Übertragung gesperrt — die Config dieses Repos setzt {k}. Damit "
+            "kann die Übertragung woanders landen als bei der geprüften Adresse; "
+            "gehört in die globale Git-Config."
+        ),
+    },
     "check_detached": {
         "en": "{r}: no branch is checked out (detached HEAD) — there is nothing to fetch for it.",
-        "de": "{r}: kein Branch ausgecheckt (detached HEAD) — dafür gibt es nichts zu holen."},
+        "de": "{r}: kein Branch ausgecheckt (detached HEAD) — dafür gibt es nichts zu holen.",
+    },
     "check_unsafe_refspec": {
         "en": "{r}: fetch blocked — its refspec can change refs outside refs/remotes/{r}/.",
-        "de": "{r}: Fetch gesperrt — seine Refspec kann Refs außerhalb refs/remotes/{r}/ ändern."},
+        "de": "{r}: Fetch gesperrt — seine Refspec kann Refs außerhalb refs/remotes/{r}/ ändern.",
+    },
     "check_unsafe_url": {
         "en": "{r}: check blocked — its fetch address is ambiguous, secret-bearing, or uses an external remote helper.",
-        "de": "{r}: Prüfung gesperrt — die Fetch-Adresse ist mehrdeutig, enthält Zugangsdaten oder nutzt einen externen Remote-Helper."},
+        "de": "{r}: Prüfung gesperrt — die Fetch-Adresse ist mehrdeutig, enthält Zugangsdaten oder nutzt einen externen Remote-Helper.",
+    },
     "check_changed": {
         "en": "{r}: remote configuration changed during fetch — the result is not trusted; tracking refs may already have changed.",
-        "de": "{r}: Remote-Konfiguration änderte sich während des Fetchs — dem Ergebnis wird nicht vertraut; Tracking-Refs können bereits geändert sein."},
+        "de": "{r}: Remote-Konfiguration änderte sich während des Fetchs — dem Ergebnis wird nicht vertraut; Tracking-Refs können bereits geändert sein.",
+    },
     "check_outcome_unknown": {
         "en": "{r}: fetch outcome unknown — tracking refs may already have changed; refresh before retrying.",
-        "de": "{r}: Fetch-Ausgang unklar — Tracking-Refs können bereits geändert sein; vor dem Wiederholen neu einlesen."},
+        "de": "{r}: Fetch-Ausgang unklar — Tracking-Refs können bereits geändert sein; vor dem Wiederholen neu einlesen.",
+    },
     "check_unknown": {"en": "{r}: unclear result — {e}", "de": "{r}: unklares Ergebnis — {e}"},
     # Stichworte für die Repo-Zeile (der ganze Satz steht auf der Info-Seite)
     "short_gone": {"en": "repository gone", "de": "Repo weg"},
@@ -1128,38 +1610,47 @@ TR = {
     "short_server": {"en": "server error", "de": "Serverfehler"},
     "short_timeout": {"en": "no answer", "de": "keine Antwort"},
     "short_unsafe_refspec": {"en": "unsafe fetch refspec", "de": "unsichere Fetch-Refspec"},
-    "short_unsafe_transport": {"en": "repo config controls the transport",
-                               "de": "Repo-Config bestimmt den Weg"},
+    "short_unsafe_transport": {
+        "en": "repo config controls the transport",
+        "de": "Repo-Config bestimmt den Weg",
+    },
     "short_unsafe_url": {"en": "unsafe remote address", "de": "unsichere Remote-Adresse"},
     "short_changed": {"en": "remote changed", "de": "Remote geändert"},
-    "short_outcome_unknown": {"en": "fetch outcome unknown",
-                              "de": "Fetch-Ausgang unklar"},
+    "short_outcome_unknown": {"en": "fetch outcome unknown", "de": "Fetch-Ausgang unklar"},
     "short_unknown": {"en": "fetch failed", "de": "Fetch fehlgeschlagen"},
     # Befehlsprotokoll
-    "cmdlog_title": {"en": "Commands this session ran",
-                     "de": "In dieser Sitzung ausgeführte Befehle"},
+    "cmdlog_title": {
+        "en": "Commands this session ran",
+        "de": "In dieser Sitzung ausgeführte Befehle",
+    },
     "cmdlog_cancelled": {"en": "not run — cancelled", "de": "nicht ausgeführt — abgebrochen"},
     "cmdlog_empty": {
         "en": "(none yet — actions like C, P, G and R are listed here)",
-        "de": "(noch keine — Aktionen wie C, P, G und R stehen hier)"},
+        "de": "(noch keine — Aktionen wie C, P, G und R stehen hier)",
+    },
     "cmdlog_hint": {
         "en": "Every line is a real Git command; you can run it in a terminal yourself.",
-        "de": "Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar."},
+        "de": "Jede Zeile ist ein echter Git-Befehl; genauso im Terminal ausführbar.",
+    },
     # main
     "not_a_dir": {"en": "Not a directory: {p}", "de": "Kein Ordner: {p}"},
     "git_timeout": {"en": "git timeout", "de": "git-Timeout"},
     "action_timeout": {
         "en": "git {cmd} took longer than {s}s and was cancelled "
-              "(slow pre-commit hook or slow network?).",
+        "(slow pre-commit hook or slow network?).",
         "de": "git {cmd} brauchte länger als {s}s und wurde abgebrochen "
-              "(langsamer pre-commit-Hook oder langsames Netz?)."},
+        "(langsamer pre-commit-Hook oder langsames Netz?).",
+    },
     "transfer_timeout": {
         "en": "git {cmd} took longer than {s}s; the outcome is unknown. Remote or "
-              "tracking refs may have changed — fetch/check before retrying.",
+        "tracking refs may have changed — fetch/check before retrying.",
         "de": "git {cmd} brauchte länger als {s}s; der Ausgang ist unklar. Remote- "
-              "oder Tracking-Refs können geändert sein — vor dem Wiederholen fetchen/prüfen."},
-    "demo_built": {"en": "Demo sandbox: {p}\n(fake repos; delete the folder when done)",
-                   "de": "Demo-Sandbox: {p}\n(Fake-Repos; Ordner danach löschen)"},
+        "oder Tracking-Refs können geändert sein — vor dem Wiederholen fetchen/prüfen.",
+    },
+    "demo_built": {
+        "en": "Demo sandbox: {p}\n(fake repos; delete the folder when done)",
+        "de": "Demo-Sandbox: {p}\n(Fake-Repos; Ordner danach löschen)",
+    },
 }
 
 
@@ -1189,8 +1680,9 @@ def resolve_lang(cfg: dict, override: str | None = None) -> str:
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-def load_config() -> dict:
-    """Config laden; fehlt sie, mit Defaults anlegen (selbsterklärender Start).
+
+def load_config(*, create: bool = True) -> dict:
+    """Config laden und beim ersten regulären Start mit Defaults anlegen.
 
     Form und Werte werden geprüft; editierbare Einstellungen teilen ihre
     Regeln mit der Oberfläche. Ungültige Einträge fallen einzeln auf Defaults
@@ -1199,33 +1691,31 @@ def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # tiefe Kopie
 
     def warn(text: str) -> None:
-        print(f"Warning: {CONFIG_PATH}: {text} — using the default.",
-              file=sys.stderr)
+        print(f"Warning: {CONFIG_PATH}: {text} — using the default.", file=sys.stderr)
 
     loaded: dict = {}
     if CONFIG_PATH.exists():
         try:
             parsed = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeError, OSError) as exc:
-            print(f"Warning: cannot read {CONFIG_PATH} ({exc}) — using defaults.",
-                  file=sys.stderr)
+            print(f"Warning: cannot read {CONFIG_PATH} ({exc}) — using defaults.", file=sys.stderr)
         else:
             if isinstance(parsed, dict):
                 loaded = parsed
             else:
                 warn("not a JSON object")
-    else:
+    elif create:
         # Die Erstanlage ist ein Komfort, keine Voraussetzung. Ein read-only
         # $HOME oder eine Datei an der Stelle von ~/.config beendete gmf sonst
         # mit einem Traceback — bei `--diff` auf der befragten Gegenseite, wo
         # der lokale Lauf nur "keine Ausgabe" sieht (Review-Fund 2026-09-10).
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_PATH.write_text(
-                json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n")
+            CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n")
         except OSError as exc:
-            print(f"Warning: cannot create {CONFIG_PATH} ({exc}) "
-                  "— using defaults.", file=sys.stderr)
+            print(
+                f"Warning: cannot create {CONFIG_PATH} ({exc}) — using defaults.", file=sys.stderr
+            )
     for key, value in loaded.items():
         default = DEFAULT_CONFIG.get(key)
         # Ein Default `None` heisst "kein fester Typ", nicht "jeder Typ".
@@ -1245,8 +1735,7 @@ def load_config() -> dict:
                 shape_ok = isinstance(value, type(default))
                 wanted = type(default).__name__
             if not shape_ok:
-                warn(f'entry "{key}" is a {type(value).__name__}, '
-                     f"not a {wanted}")
+                warn(f'entry "{key}" is a {type(value).__name__}, not a {wanted}')
                 continue
             setting = next((s for s in EDITABLE_SETTINGS if s.key == key), None)
             if setting is not None:
@@ -1287,8 +1776,9 @@ def load_config() -> dict:
 
 class Setting(NamedTuple):
     """Eine editierbare Einstellung samt Prüfregel."""
+
     key: str
-    kind: str                     # "choice" | "number" | "names"
+    kind: str  # "choice" | "number" | "names"
     minimum: int = 0
     maximum: int = 0
     choices: tuple = ()
@@ -1312,8 +1802,7 @@ _NUMBER_RE = re.compile(r"[0-9]+\Z")
 def validate_setting(setting: Setting, value) -> tuple:
     """Gemeinsame Werteprüfung für Datei und Oberfläche."""
     if setting.kind == "choice":
-        low = "auto" if value is None else (
-            value.casefold() if isinstance(value, str) else "")
+        low = "auto" if value is None else (value.casefold() if isinstance(value, str) else "")
         if low not in setting.choices:
             return None, t("set_err_choice", opts=" / ".join(setting.choices))
         return (None if low == "auto" else low), None
@@ -1398,8 +1887,9 @@ def save_config(cfg: dict, path: Path) -> None:
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     try:
         serialized = json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
-        tmp.write_text(serialized.encode("utf-8", "backslashreplace").decode("utf-8"),
-                       encoding="utf-8")
+        tmp.write_text(
+            serialized.encode("utf-8", "backslashreplace").decode("utf-8"), encoding="utf-8"
+        )
         os.replace(tmp, path)
     finally:
         # Nach `os.replace` gibt es tmp nicht mehr; das hier räumt den Fehlerweg.
@@ -1411,30 +1901,31 @@ def save_config(cfg: dict, path: Path) -> None:
 # Git-Datensammlung (reine Logik, testbar)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RepoStatus:
     path: Path
-    rel: str                      # Pfad relativ zum Scan-Start (Anzeigename)
+    rel: str  # Pfad relativ zum Scan-Start (Anzeigename)
     branch: str = "?"
     # Volle OID aus demselben Scan wie `branch`; None bedeutet belegten unborn
     # Branch, der leere String nur einen von Tests/Altaufrufern unbekannten Stand.
     head_oid: str | None = ""
-    operation: str = ""          # merge | rebase | cherry-pick | revert | sequencer | bisect
-    remote: str | None = None     # Name des erkannten Sync-Remotes (z.B. origin)
-    remote_state: str = "ok"      # ok | no-remote | no-branch | detached | error
+    operation: str = ""  # merge | rebase | cherry-pick | revert | sequencer | bisect
+    remote: str | None = None  # Name des erkannten Sync-Remotes (z.B. origin)
+    remote_state: str = "ok"  # ok | no-remote | no-branch | detached | error
     ahead: int = 0
     behind: int = 0
     # Zusatz-Info: Stand gegenüber dem *konfigurierten Upstream*, falls das ein
     # ANDERER Remote als der Sync-Remote ist (typisch: github). So werden Commits
     # sichtbar, die zwar auf dem Sync-Remote, aber nie z.B. zu GitHub gepusht wurden.
-    upstream: str | None = None   # z.B. "github/main"
+    upstream: str | None = None  # z.B. "github/main"
     upstream_ahead: int = 0
     upstream_behind: int = 0
     remotes: list = field(default_factory=list)  # RemoteStatus, GitHub immer zuletzt
     modified: int = 0
     deleted: int = 0
     untracked: int = 0
-    conflicts: int = 0            # ungemergte Dateien (z.B. nach stash apply)
+    conflicts: int = 0  # ungemergte Dateien (z.B. nach stash apply)
     files: list[ChangedFile] = field(default_factory=list)
     stashes: list = field(default_factory=list)  # ["stash@{0} WIP ...", ...]
     error: str = ""
@@ -1461,8 +1952,10 @@ class RepoStatus:
 
     @property
     def branch_review_count(self) -> int:
-        return sum(not branch.is_head and branch.coverage in ("uncovered", "unknown")
-                   for branch in self.branches)
+        return sum(
+            not branch.is_head and branch.coverage in ("uncovered", "unknown")
+            for branch in self.branches
+        )
 
     @property
     def submodule_review_count(self) -> int:
@@ -1474,15 +1967,28 @@ class RepoStatus:
 
     @property
     def sync_clean(self) -> bool:
-        local_ok = (not (self.error and not self.fetch_error) and not self.branches_error
-                    and not self.operation and not self.dirty and not self.stashes)
+        local_ok = (
+            not (self.error and not self.fetch_error)
+            and not self.branches_error
+            and not self.operation
+            and not self.dirty
+            and not self.stashes
+        )
         sync = next((remote for remote in self.remotes if remote.is_sync), None)
         if sync is not None:
-            return (local_ok and sync.branch_exists and not sync.fetch_failed
-                    and (publication_content_current(sync)
-                         or (sync.ahead == 0 and sync.behind == 0)))
-        return (local_ok and not self.error and self.ahead == 0
-                and self.behind == 0 and self.remote_state == "ok")
+            return (
+                local_ok
+                and sync.branch_exists
+                and not sync.fetch_failed
+                and (publication_content_current(sync) or (sync.ahead == 0 and sync.behind == 0))
+            )
+        return (
+            local_ok
+            and not self.error
+            and self.ahead == 0
+            and self.behind == 0
+            and self.remote_state == "ok"
+        )
 
     @property
     def publication_pending(self) -> bool:
@@ -1490,9 +1996,13 @@ class RepoStatus:
 
     @property
     def clean_and_synced(self) -> bool:
-        return (self.sync_clean and not self.branch_review_count
-                and not self.submodule_review_count and not self.publication_pending
-                and not repo_matches_view(self, "access"))
+        return (
+            self.sync_clean
+            and not self.branch_review_count
+            and not self.submodule_review_count
+            and not self.publication_pending
+            and not repo_matches_view(self, "access")
+        )
 
     def severity(self) -> int:
         """Sortierschlüssel: Problematisches nach oben."""
@@ -1500,8 +2010,12 @@ class RepoStatus:
             return 0
         if self.operation or self.dirty or self.stashes or self.submodule_review_count:
             return 1
-        if (sync_action_delta(self, "ahead") or sync_action_delta(self, "behind")
-                or self.branch_review_count or self.publication_pending):
+        if (
+            sync_action_delta(self, "ahead")
+            or sync_action_delta(self, "behind")
+            or self.branch_review_count
+            or self.publication_pending
+        ):
             return 2
         if self.remote_state != "ok":
             return 3
@@ -1547,7 +2061,9 @@ class SubmoduleInfo:
 
     @property
     def content_dirty(self) -> bool:
-        return bool(self.modified or self.deleted or self.untracked or self.conflicts or self.operation)
+        return bool(
+            self.modified or self.deleted or self.untracked or self.conflicts or self.operation
+        )
 
 
 @dataclass
@@ -1597,11 +2113,27 @@ class RemoteStatus:
         return " ".join(text for text, _ in remote_badge_parts(self))
 
 
+TransferReason = Literal[
+    "ready",
+    "dirty",
+    "detached",
+    "inspect-failed",
+    "remote-unsafe",
+    "unsafe-transport",
+    "missing-branch",
+    "divergent",
+    "behind",
+    "nothing-push",
+    "nothing-pull",
+    "operation-in-progress",
+]
+
+
 @dataclass
 class TransferCheck:
     """Deterministischer Preflight für genau einen Branch und einen Remote."""
 
-    reason: str
+    reason: TransferReason
     ahead: int = 0
     behind: int = 0
     remote_ref: str = ""
@@ -1630,10 +2162,22 @@ class TransferCheck:
         return self.reason == "ready"
 
     def approval_signature(self) -> tuple:
-        return (self.branch, self.head_oid, self.index_oid, self.worktree_fingerprint,
-                self.fetch_fingerprint, self.push_fingerprint, self.transfer_url,
-                self.remote_name, self.remote_config_signature, self.target_oid,
-                tuple(self.commits), tuple(self.files), self.ahead, self.behind)
+        return (
+            self.branch,
+            self.head_oid,
+            self.index_oid,
+            self.worktree_fingerprint,
+            self.fetch_fingerprint,
+            self.push_fingerprint,
+            self.transfer_url,
+            self.remote_name,
+            self.remote_config_signature,
+            self.target_oid,
+            tuple(self.commits),
+            tuple(self.files),
+            self.ahead,
+            self.behind,
+        )
 
 
 @dataclass
@@ -1645,14 +2189,14 @@ class BranchInfo:
     upstream: str = ""
     ahead: int = 0
     behind: int = 0
-    upstream_gone: bool = False   # Upstream war da, ist auf dem Remote aber weg
+    upstream_gone: bool = False  # Upstream war da, ist auf dem Remote aber weg
     oid: str = ""
     date: str = ""
     subject: str = ""
-    merged: bool = False          # vollständig in HEAD enthalten
+    merged: bool = False  # vollständig in HEAD enthalten
     upstream_remote: str = ""
     upstream_ref: str = ""
-    coverage: str = ""            # covered | uncovered | unknown; leer = nicht geprüft
+    coverage: str = ""  # covered | uncovered | unknown; leer = nicht geprüft
     uncovered_commits: int | None = None
 
 
@@ -1698,23 +2242,31 @@ class RemoteConfig:
 
     @property
     def transfer_safe(self) -> bool:
-        return (not self.fetch_invalid_reason and not self.push_invalid_reason
-                and len(self.fetch_targets) == 1 and len(self.push_targets) == 1
-                and self.fetch_targets[0] == self.push_targets[0])
+        return (
+            not self.fetch_invalid_reason
+            and not self.push_invalid_reason
+            and len(self.fetch_targets) == 1
+            and len(self.push_targets) == 1
+            and self.fetch_targets[0] == self.push_targets[0]
+        )
 
 
 def _valid_refspec_pattern(value: str) -> bool:
     """Git-Ref-Grammatik mit optional genau einem Refspec-Stern prüfen."""
-    if (not value.startswith("refs/") or value.endswith("/")
-            or value.endswith(".") or "//" in value or ".." in value
-            or "@{" in value or value.count("*") > 1):
+    if (
+        not value.startswith("refs/")
+        or value.endswith("/")
+        or value.endswith(".")
+        or "//" in value
+        or ".." in value
+        or "@{" in value
+        or value.count("*") > 1
+    ):
         return False
-    if any(ord(char) < 32 or ord(char) == 127
-           or char in " ~^:?[\\" for char in value):
+    if any(ord(char) < 32 or ord(char) == 127 or char in " ~^:?[\\" for char in value):
         return False
     for component in value.split("/"):
-        if (not component or component.startswith(".")
-                or component.lower().endswith(".lock")):
+        if not component or component.startswith(".") or component.lower().endswith(".lock"):
             return False
     return True
 
@@ -1742,8 +2294,7 @@ def fetch_refspecs_safe(remote: RemoteConfig) -> bool:
         if spec != raw:
             return False
         if spec.startswith("^"):
-            if (spec.startswith("^+") or ":" in spec
-                    or not _valid_refspec_pattern(spec[1:])):
+            if spec.startswith("^+") or ":" in spec or not _valid_refspec_pattern(spec[1:]):
                 return False
             continue
         spec = spec.removeprefix("+")
@@ -1754,10 +2305,12 @@ def fetch_refspecs_safe(remote: RemoteConfig) -> bool:
         if spec.count(":") != 1:
             return False
         source, destination = spec.split(":", 1)
-        if (not _valid_refspec_pattern(source)
-                or not _valid_refspec_pattern(destination)
-                or source.count("*") != destination.count("*")
-                or not destination.startswith(prefix)):
+        if (
+            not _valid_refspec_pattern(source)
+            or not _valid_refspec_pattern(destination)
+            or source.count("*") != destination.count("*")
+            or not destination.startswith(prefix)
+        ):
             return False
         tracking_update = True
     return tracking_update
@@ -1768,8 +2321,7 @@ def _ref_pattern_matches(pattern: str, ref: str) -> bool:
     if "*" not in pattern:
         return pattern == ref
     before, after = pattern.split("*", 1)
-    return ref.startswith(before) and ref.endswith(after) \
-        and len(ref) >= len(before) + len(after)
+    return ref.startswith(before) and ref.endswith(after) and len(ref) >= len(before) + len(after)
 
 
 def fetch_maps_branch_exactly(remote: RemoteConfig, branch: str) -> bool:
@@ -1800,9 +2352,9 @@ def fetch_maps_branch_exactly(remote: RemoteConfig, branch: str) -> bool:
             continue
         if "*" in destination:
             before, after = destination.split("*", 1)
-            middle = expected_destination[len(before):]
+            middle = expected_destination[len(before) :]
             if after:
-                middle = middle[:-len(after)]
+                middle = middle[: -len(after)]
             source = source.replace("*", middle)
         sources.add(source)
     if any(_ref_pattern_matches(pattern, expected_source) for pattern in negatives):
@@ -1826,7 +2378,13 @@ def _argv_safe_remote_url(url: str) -> bool:
     parsed = urllib.parse.urlsplit(raw)
     if parsed.scheme:
         return parsed.scheme.lower() in {
-            "http", "https", "ssh", "git", "file", "git+ssh", "ssh+git",
+            "http",
+            "https",
+            "ssh",
+            "git",
+            "file",
+            "git+ssh",
+            "ssh+git",
         }
     # Kein Schema: lokaler Pfad oder die von Git eingebaute SCP-SSH-Syntax.
     return True
@@ -1834,22 +2392,22 @@ def _argv_safe_remote_url(url: str) -> bool:
 
 def remote_fetch_url(remote: RemoteConfig) -> str | None:
     """Die tatsächlich verwendete, normalisierte Fetch-Adresse oder None."""
-    if (remote.fetch_invalid_reason or not remote.fetch_urls
-            or not remote.fetch_targets):
+    if remote.fetch_invalid_reason or not remote.fetch_urls or not remote.fetch_targets:
         return None
-    return (remote.fetch_targets[0].repo_id
-            if remote.fetch_targets[0].is_local
-            else remote.fetch_urls[0])
+    return (
+        remote.fetch_targets[0].repo_id
+        if remote.fetch_targets[0].is_local
+        else remote.fetch_urls[0]
+    )
 
 
 def remote_push_url(remote: RemoteConfig) -> str | None:
     """Die eindeutig verwendbare, normalisierte Push-Adresse oder None."""
-    if (remote.push_invalid_reason or len(remote.push_urls) != 1
-            or len(remote.push_targets) != 1):
+    if remote.push_invalid_reason or len(remote.push_urls) != 1 or len(remote.push_targets) != 1:
         return None
-    return (remote.push_targets[0].repo_id
-            if remote.push_targets[0].is_local
-            else remote.push_urls[0])
+    return (
+        remote.push_targets[0].repo_id if remote.push_targets[0].is_local else remote.push_urls[0]
+    )
 
 
 def remote_fetch_url_safe(remote: RemoteConfig) -> bool:
@@ -1871,7 +2429,14 @@ def safe_update_ref_args(*args: str) -> tuple[str, ...]:
 
 
 class _PinnedRemoteURL(str):
-    """Str-Markierung: `run_git` bindet genau diese URL gegen Rewrite-Regeln."""
+    """Ein Einmal-Alias für eine bereits von Git umgeschriebene Remote-URL.
+
+    Der Alias verhindert, dass eine weitere Regel das freigegebene Ziel erneut
+    umschreibt. `run_git()` übergibt Schlüssel und Wert getrennt, damit ein `=`
+    in der URL erhalten bleibt.
+    """
+
+    remote_url: str
 
     def __new__(cls, remote_url: str):
         alias = "gmf-pin-" + uuid.uuid4().hex + "://approved"
@@ -1880,23 +2445,9 @@ class _PinnedRemoteURL(str):
         return value
 
 
-def _pinned_url_config(url: str) -> tuple[tuple[str, ...], str]:
-    """Eine einmalige, nicht weiter umschreibbare URL-Bindung erzeugen.
-
-    `remote get-url` liefert bereits eine umgeschriebene Adresse. Übergäbe gmf
-    sie danach nackt erneut an Git, könnte eine zweite Regel diese Adresse noch
-    einmal auf ein anderes Ziel umleiten. Stattdessen sieht Git nur einen
-    zufälligen Einmal-Alias; die pro Prozess gesetzte Regel bildet genau diesen
-    Alias auf die freigegebene URL ab. Fremde Rewrite-Regeln kennen den Alias
-    nicht. `run_git()` übergibt Schlüssel und Werte getrennt über
-    `GIT_CONFIG_KEY/VALUE`, damit ein `=` in der URL nicht versehentlich
-    Schlüssel und Wert trennt.
-    """
-    return (), _PinnedRemoteURL(url)
-
-
-def approved_fetch_args(remote: RemoteConfig, branch: str,
-                        source_oid: str) -> tuple[str, ...] | None:
+def approved_fetch_args(
+    remote: RemoteConfig, branch: str, source_oid: str
+) -> tuple[str, ...] | None:
     """Nur das freigegebene Branch-Objekt holen, ohne einen lokalen Ref zu setzen.
 
     Git Fetch dereferenziert Ziel-Symrefs. Deshalb bekommt der Netzaufruf
@@ -1906,17 +2457,28 @@ def approved_fetch_args(remote: RemoteConfig, branch: str,
     if not remote.fetch_urls or not remote.fetch_targets:
         return None
     fetch_url = remote_fetch_url(remote)
-    if (not fetch_refspecs_safe(remote)
-            or fetch_url is None or not _argv_safe_remote_url(fetch_url)
-            or not fetch_maps_branch_exactly(remote, branch)
-            or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid)):
+    if (
+        not fetch_refspecs_safe(remote)
+        or fetch_url is None
+        or not _argv_safe_remote_url(fetch_url)
+        or not fetch_maps_branch_exactly(remote, branch)
+        or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid)
+    ):
         return None
-    pin_config, pinned_url = _pinned_url_config(fetch_url)
+    pinned_url = _PinnedRemoteURL(fetch_url)
     return (
-        *pin_config, *NO_GIT_HOOKS_ARGS,
-        "fetch", "--no-tags", "--no-prune-tags", "--no-recurse-submodules",
-        "--no-write-fetch-head", "--quiet", "--jobs=1", "--refmap=", "--",
-        pinned_url, source_oid,
+        *NO_GIT_HOOKS_ARGS,
+        "fetch",
+        "--no-tags",
+        "--no-prune-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--quiet",
+        "--jobs=1",
+        "--refmap=",
+        "--",
+        pinned_url,
+        source_oid,
     )
 
 
@@ -1967,12 +2529,12 @@ def repo_transport_override(repo: Path, timeout: int) -> str | None:
     Wahrheitswert ablehnt —, gilt das als nicht belegbar und damit als
     Ablehnungsgrund.
     """
-    def read(pattern: str, as_bool: bool) -> list | None:
+
+    def read(pattern: str, as_bool: bool) -> list[str] | None:
         args = ["config", "--includes", "--show-scope", "-z", "--get-regexp"]
-        if as_bool:
-            args.append("--type=bool")
+        args.append("--type=bool" if as_bool else "--name-only")
         result = run_git(repo, *args, "--", pattern, timeout=timeout)
-        if result.returncode == 1:      # in diesem Bereich nicht gesetzt
+        if result.returncode == 1:  # in diesem Bereich nicht gesetzt
             return []
         if result.returncode != 0:
             return None
@@ -1983,27 +2545,30 @@ def repo_transport_override(repo: Path, timeout: int) -> str | None:
         for scope, record in zip(records[0:-1:2], records[1:-1:2]):
             if scope not in {"system", "global", "local", "worktree", "command"}:
                 return None
-            key, _, value = record.partition("\n")
-            if not key or (as_bool and value not in {"true", "false"}):
+            key, _, value = record.partition("\n") if as_bool else (record, "", "")
+            if not re.fullmatch(pattern, key) or (as_bool and value not in {"true", "false"}):
                 return None
             if scope not in {"system", "global"}:
-                entries.append((key, value) if as_bool else key)
+                entries.append(value if as_bool else key)
         return entries
 
+    proxy_pattern = "|".join(
+        pattern for pattern, _, as_bool in TRANSPORT_CONFIG_SETTINGS if not as_bool
+    )
+    proxy_keys = read(proxy_pattern, False)
     for pattern, shown, as_bool in TRANSPORT_CONFIG_SETTINGS:
-        extra = read(pattern, as_bool)
-        if extra is None:
-            return shown
-        if not as_bool:
-            if extra:
+        if as_bool:
+            values = read(pattern, True)
+            if values is None or "false" in values:
                 return shown
-        elif any(value == "false" for _, value in extra):
+        elif proxy_keys is None or any(re.fullmatch(pattern, key) for key in proxy_keys):
             return shown
     return None
 
 
-def fetch_remote_block_reason(repo: Path, remote: RemoteConfig, branch: str,
-                              timeout: int) -> tuple[str, str] | None:
+def fetch_remote_block_reason(
+    repo: Path, remote: RemoteConfig, branch: str, timeout: int
+) -> tuple[str, str] | None:
     """Den belegten Sicherheitsgrund nennen, bevor irgendein Netzaufruf läuft.
 
     Liefert `(Grund, Beleg)`: Der Beleg nennt die schuldige Einstellung, wo es
@@ -2021,9 +2586,12 @@ def fetch_remote_block_reason(repo: Path, remote: RemoteConfig, branch: str,
         # KEINE unsichere Refspec: Wer beides zusammenwirft, beschuldigt eine
         # voellig gewoehnliche Konfiguration (Review-Fund 2026-09-03).
         return "detached", ""
-    if (not fetch_refspecs_safe(remote)
-            or not fetch_maps_branch_exactly(remote, branch)
-            or not remote.fetch_urls or not remote.fetch_targets):
+    if (
+        not fetch_refspecs_safe(remote)
+        or not fetch_maps_branch_exactly(remote, branch)
+        or not remote.fetch_urls
+        or not remote.fetch_targets
+    ):
         return "unsafe_refspec", ""
     fetch_url = remote_fetch_url(remote)
     if fetch_url is None or not _argv_safe_remote_url(fetch_url):
@@ -2031,68 +2599,100 @@ def fetch_remote_block_reason(repo: Path, remote: RemoteConfig, branch: str,
     return None
 
 
-def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
-                        timeout: int) -> subprocess.CompletedProcess:
+@contextlib.contextmanager
+def _tracking_ref_transaction(timeout: int) -> Iterator[int]:
+    """Eine begonnene lokale Ref-Änderung auch bei Scan-Abbruch abschließen."""
+    scope: GitCallScope | None = getattr(_GIT_CONTEXT, "scope", None)
+    if scope is None:
+        yield timeout
+        return
+    with scope.lock:
+        if scope.cancelled.is_set():
+            raise GitCancelled("scan cancelled before tracking update")
+        _GIT_CONTEXT.scope = None
+    try:
+        # Nur lokale Config-Leser und Ref-CAS ohne Hooks laufen hier weiter.
+        yield min(timeout, 3)
+    finally:
+        _GIT_CONTEXT.scope = scope
+
+
+def fetch_remote_safely(
+    repo: Path, remote: RemoteConfig, branch: str, timeout: int
+) -> subprocess.CompletedProcess:
     """Einen Branch holen und seinen Tracking-Ref ohne Symref-Dereferenz setzen."""
-    def update_tracking(*args: str) -> subprocess.CompletedProcess:
+
+    def update_tracking(*args: str, limit: int) -> subprocess.CompletedProcess:
         try:
-            return run_git_logged(repo, *args, timeout=timeout)
+            return run_git_logged(repo, *args, timeout=limit)
         except subprocess.TimeoutExpired as exc:
             # Die Netzseite kann bereits erfolgreich gewesen und der lokale Ref
             # trotz Timeout schon geändert sein. Für die UI bleibt das deshalb
             # ein unklarer Fetch-Ausgang, kein sicher abgebrochenes update-ref.
             raise FetchTrackingTimeout(
-                ["git", "-C", str(repo), "fetch"], exc.timeout,
-                output=exc.output, stderr=exc.stderr) from None
+                ["git", "-C", str(repo), "fetch"], exc.timeout, output=exc.output, stderr=exc.stderr
+            ) from None
 
-    def config_matches() -> bool:
-        current = read_remote_config_or_none(
-            repo, timeout_config(timeout), remote.name)
+    def config_matches(limit: int) -> bool:
+        current = read_remote_config_or_none(repo, timeout_config(limit), remote.name)
         if current is None:
             return False
-        return (tuple(current.fetch_urls), tuple(current.push_urls),
-                tuple(current.settings), current.fetch_invalid_reason,
-                current.push_invalid_reason) == (
-                    tuple(remote.fetch_urls), tuple(remote.push_urls),
-                    tuple(remote.settings), remote.fetch_invalid_reason,
-                    remote.push_invalid_reason)
+        return (
+            tuple(current.fetch_urls),
+            tuple(current.push_urls),
+            tuple(current.settings),
+            current.fetch_invalid_reason,
+            current.push_invalid_reason,
+        ) == (
+            tuple(remote.fetch_urls),
+            tuple(remote.push_urls),
+            tuple(remote.settings),
+            remote.fetch_invalid_reason,
+            remote.push_invalid_reason,
+        )
 
-    def roll_back_tracking_change(source_oid: str | None, old_oid: str,
-                                  old_existed: bool
-                                  ) -> subprocess.CompletedProcess:
+    def record_tracking(
+        source_oid: str | None, old_oid: str, old_existed: bool
+    ) -> subprocess.CompletedProcess:
+        if not config_matches(timeout):
+            raise RemoteConfigChangedError(remote.name)
         if source_oid is None:
-            # Unsere Löschung wiederherstellen, aber nur solange kein anderer
-            # Prozess inzwischen einen neuen Ref angelegt hat.
-            return update_tracking(*safe_update_ref_args(
-                "--no-deref", destination, old_oid, "0" * len(old_oid)))
-        if old_existed:
-            return update_tracking(*safe_update_ref_args(
-                "--no-deref", destination, old_oid, source_oid))
-        return update_tracking(*safe_update_ref_args(
-            "--no-deref", "-d", destination, source_oid))
+            change = ("-d", destination, old_oid)
+            undo = (destination, old_oid, "0" * len(old_oid))
+        else:
+            change = (destination, source_oid, old_oid)
+            undo = (
+                (destination, old_oid, source_oid)
+                if old_existed
+                else ("-d", destination, source_oid)
+            )
+        with _tracking_ref_transaction(timeout) as limit:
+            updated = update_tracking(*safe_update_ref_args("--no-deref", *change), limit=limit)
+            if updated.returncode != 0 or config_matches(limit):
+                return updated
+            rolled_back = update_tracking(*safe_update_ref_args("--no-deref", *undo), limit=limit)
+            if rolled_back.returncode != 0:
+                raise OSError("fetch tracking rollback outcome is unknown")
+            raise RemoteConfigChangedError(remote.name)
 
     blocked = fetch_remote_block_reason(repo, remote, branch, timeout)
     if blocked is not None:
-        return subprocess.CompletedProcess(
-            ["git", "fetch"], 128, "", blocked[0])
+        return subprocess.CompletedProcess(["git", "fetch"], 128, "", blocked[0])
     fetch_url = remote_fetch_url(remote)
     if fetch_url is None:
-        return subprocess.CompletedProcess(
-            ["git", "fetch"], 128, "", "unsafe_url")
+        return subprocess.CompletedProcess(["git", "fetch"], 128, "", "unsafe_url")
 
     source_ref = f"refs/heads/{branch}"
     destination = f"refs/remotes/{remote.name}/{branch}"
-    pin_config, pinned_url = _pinned_url_config(fetch_url)
-    advertised = run_git(
-        repo, *pin_config, "ls-remote", "--refs", "--", pinned_url,
-        source_ref, timeout=timeout)
+    pinned_url = _PinnedRemoteURL(fetch_url)
+    advertised = run_git(repo, "ls-remote", "--refs", "--", pinned_url, source_ref, timeout=timeout)
     if advertised.returncode != 0:
         return advertised
-    rows = [line.split("\t", 1) for line in advertised.stdout.splitlines()
-            if line.strip()]
+    rows = [line.split("\t", 1) for line in advertised.stdout.splitlines() if line.strip()]
     if any(len(row) != 2 for row in rows):
         return subprocess.CompletedProcess(
-            advertised.args, 128, advertised.stdout, "ambiguous remote branch")
+            advertised.args, 128, advertised.stdout, "ambiguous remote branch"
+        )
     # Das zweite Argument von `ls-remote` ist KEIN Ref-Name, sondern ein Muster,
     # das auf das ENDE eines Refs passt — ab dem Anfang oder ab einem
     # Schraegstrich. `refs/heads/main` trifft deshalb auch `refs/tags/refs/heads/main`
@@ -2106,59 +2706,41 @@ def fetch_remote_safely(repo: Path, remote: RemoteConfig, branch: str,
     matches = [row for row in rows if row[1] == source_ref]
     if len(matches) > 1:
         return subprocess.CompletedProcess(
-            advertised.args, 128, advertised.stdout, "ambiguous remote branch")
+            advertised.args, 128, advertised.stdout, "ambiguous remote branch"
+        )
     source_oid = matches[0][0] if matches else None
-    if source_oid is not None and not re.fullmatch(
-            r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid):
+    if source_oid is not None and not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", source_oid):
         return subprocess.CompletedProcess(
-            advertised.args, 128, advertised.stdout, "invalid remote object ID")
+            advertised.args, 128, advertised.stdout, "invalid remote object ID"
+        )
 
     old = run_git(
-        repo, "rev-parse", "--verify", "-q", destination, timeout=timeout,
-        env=TRANSFER_OBJECT_ENV)
+        repo, "rev-parse", "--verify", "-q", destination, timeout=timeout, env=TRANSFER_OBJECT_ENV
+    )
     if old.returncode not in (0, 1):
         return old
-    old_oid = (old.stdout.strip() if old.returncode == 0
-               else "0" * (len(source_oid) if source_oid else 40))
+    old_oid = (
+        old.stdout.strip() if old.returncode == 0 else "0" * (len(source_oid) if source_oid else 40)
+    )
     if source_oid is None:
         if old.returncode == 1:
             return subprocess.CompletedProcess(advertised.args, 0, "", "")
-        if not config_matches():
-            raise RemoteConfigChangedError(remote.name)
-        updated = update_tracking(*safe_update_ref_args(
-            "--no-deref", "-d", destination, old_oid))
-        if updated.returncode != 0 or config_matches():
-            return updated
-        rolled_back = roll_back_tracking_change(None, old_oid, True)
-        if rolled_back.returncode != 0:
-            raise OSError("fetch tracking rollback outcome is unknown")
-        raise RemoteConfigChangedError(remote.name)
+        return record_tracking(None, old_oid, True)
 
     args = approved_fetch_args(remote, branch, source_oid)
     if args is None:
-        return subprocess.CompletedProcess(
-            ["git", "fetch"], 128, "", "unsafe fetch configuration")
-    fetched = run_git_logged(repo, *args, timeout=timeout,
-                             env=TRANSFER_OBJECT_ENV)
+        return subprocess.CompletedProcess(["git", "fetch"], 128, "", "unsafe fetch configuration")
+    fetched = run_git_logged(repo, *args, timeout=timeout, env=TRANSFER_OBJECT_ENV)
     if fetched.returncode != 0:
         return fetched
     present = run_git(
-        repo, "cat-file", "-e", source_oid + "^{commit}", timeout=timeout,
-        env=TRANSFER_OBJECT_ENV)
+        repo, "cat-file", "-e", source_oid + "^{commit}", timeout=timeout, env=TRANSFER_OBJECT_ENV
+    )
     if present.returncode != 0:
         return subprocess.CompletedProcess(
-            present.args, 128, present.stdout, "fetched object is unavailable")
-    if not config_matches():
-        raise RemoteConfigChangedError(remote.name)
-    updated = update_tracking(*safe_update_ref_args(
-        "--no-deref", destination, source_oid, old_oid))
-    if updated.returncode != 0 or config_matches():
-        return updated
-    rolled_back = roll_back_tracking_change(
-        source_oid, old_oid, old.returncode == 0)
-    if rolled_back.returncode != 0:
-        raise OSError("fetch tracking rollback outcome is unknown")
-    raise RemoteConfigChangedError(remote.name)
+            present.args, 128, present.stdout, "fetched object is unavailable"
+        )
+    return record_tracking(source_oid, old_oid, old.returncode == 0)
 
 
 # Zwei-Buchstaben-Codes, die einen ungemergten Zustand (Merge-Konflikt) bedeuten.
@@ -2223,8 +2805,12 @@ def committable_against_head(entry: ChangedFile, module: SubmoduleInfo | None = 
 
 
 def module_content_only(module: SubmoduleInfo) -> bool:
-    return (not module.error and module.initialized and module.content_dirty
-            and module.head_oid == module.index_oid == module.checked_out_oid)
+    return (
+        not module.error
+        and module.initialized
+        and module.content_dirty
+        and module.head_oid == module.index_oid == module.checked_out_oid
+    )
 
 
 def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]:
@@ -2302,7 +2888,7 @@ def parse_porcelain(output: str) -> tuple[int, int, int, int, list[ChangedFile]]
 # Vorschlaege, die ohnehin ALLE Dateien enthalten, fallen weg — dafuer gibt es
 # schon "alle". Doppelte Teilmengen erscheinen nur einmal.
 
-COMMIT_GROUP_MIN = 2            # kleiner ist keine Gruppe, sondern eine Datei
+COMMIT_GROUP_MIN = 2  # kleiner ist keine Gruppe, sondern eine Datei
 
 
 class CommitGroup(NamedTuple):
@@ -2313,6 +2899,7 @@ class CommitGroup(NamedTuple):
     hineingezogen wurde — dann beschreibt `kind`/`key` die Menge nicht mehr
     vollstaendig, und die Beschriftung muss das sagen.
     """
+
     kind: str
     key: str
     paths: tuple
@@ -2327,8 +2914,7 @@ def _expand_rename_groups(paths: set, files: list) -> set:
     hat), muss die andere mitnehmen — sonst schluege der Commit fehl oder
     hinterliesse eine halbe Umbenennung.
     """
-    groups = {f.rename_group for f in files
-              if f.rename_group and f.path in paths}
+    groups = {f.rename_group for f in files if f.rename_group and f.path in paths}
     if not groups:
         return paths
     return paths | {f.path for f in files if f.rename_group in groups}
@@ -2354,14 +2940,14 @@ def commit_groups(files: list) -> list[CommitGroup]:
     folders: dict = {}
     for f in files:
         head, sep, _ = f.path.partition("/")
-        if sep:                      # Dateien direkt in der Wurzel haben keinen
+        if sep:  # Dateien direkt in der Wurzel haben keinen
             folders.setdefault(head, set()).add(f.path)
     buckets += [("dir", name, paths) for name, paths in folders.items()]
 
     endings: dict = {}
     for f in files:
         ext = os.path.splitext(f.path.rsplit("/", 1)[-1])[1].lower()
-        if ext:                      # ".gitignore" ist ein Name, keine Endung
+        if ext:  # ".gitignore" ist ein Name, keine Endung
             endings.setdefault(ext, set()).add(f.path)
     if len(endings) > 1:
         buckets += [("ext", ext, paths) for ext, paths in endings.items()]
@@ -2375,8 +2961,7 @@ def commit_groups(files: list) -> list[CommitGroup]:
         if frozenset(complete) in seen:
             continue
         seen.append(frozenset(complete))
-        out.append(CommitGroup(kind, key, tuple(sorted(complete)),
-                               complete != paths))
+        out.append(CommitGroup(kind, key, tuple(sorted(complete)), complete != paths))
     # Erst die drei Sichten in ihrer Reihenfolge (Art der Aenderung, Ordner,
     # Endung), innerhalb einer Sicht die groessten Vorschlaege zuerst — sie
     # sparen die meisten Tastendruecke. Bei gleicher Groesse entscheidet der
@@ -2402,6 +2987,34 @@ class CommitOutcomeUnknownError(RuntimeError):
     """HEAD kann bewegt sein; Erfolg oder sicherer Rollback ist nicht belegt."""
 
 
+@dataclass(frozen=True)
+class CommitResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    committed_head: str | None = None
+    approved_head: str | None = None
+    approved_ref: str | None = None
+
+
+class CommitTimeoutError(subprocess.TimeoutExpired):
+    """Der Timeout trat im Commit-Aufruf ein; dessen Ausgang bleibt zu prüfen."""
+
+    def __init__(
+        self,
+        timeout: subprocess.TimeoutExpired,
+        approved_tree: str,
+        approved_head: str | None,
+        approved_ref: str,
+        reflog_action: str,
+    ):
+        super().__init__(timeout.cmd, timeout.timeout, timeout.output, timeout.stderr)
+        self.approved_tree = approved_tree
+        self.approved_head = approved_head
+        self.approved_ref = approved_ref
+        self.reflog_action = reflog_action
+
+
 class RemoteConfigChangedError(RuntimeError):
     """Ein Fetch wurde wegen geänderter Remote-Konfiguration zurückgenommen."""
 
@@ -2415,8 +3028,14 @@ def _path_signature(path: Path) -> tuple | None:
         info = path.lstat()
     except FileNotFoundError:
         return None
-    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_mode,
-            info.st_size, info.st_mtime_ns)
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+    )
 
 
 _SIGNATURE_UNSET = object()
@@ -2435,16 +3054,19 @@ def _real_index_signature(repo: Path, timeout: int) -> tuple | None:
 
 
 def has_unmerged_entries(repo: Path, timeout: int) -> bool:
-    diff = _required_git(repo, "diff", "--name-only", "--diff-filter=U", "-z",
-                         timeout=timeout)
+    diff = _required_git(repo, "diff", "--name-only", "--diff-filter=U", "-z", timeout=timeout)
     index = _required_git(repo, "ls-files", "-u", "-z", timeout=timeout)
     return bool(diff.stdout or index.stdout)
 
 
 OPERATION_MARKERS = (
-    ("rebase-merge", "rebase"), ("rebase-apply", "rebase"),
-    ("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"),
-    ("REVERT_HEAD", "revert"), ("sequencer", "sequencer"), ("BISECT_LOG", "bisect"),
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("MERGE_HEAD", "merge"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    ("sequencer", "sequencer"),
+    ("BISECT_LOG", "bisect"),
 )
 
 
@@ -2456,8 +3078,9 @@ def repository_operation(repo: Path, timeout: int) -> str:
     Rebase hat Vorrang vor seinen vorübergehenden Cherry-Pick-Markern.
     """
     git_dir = _git_path(repo, "HEAD", timeout).parent
-    return next((operation for marker, operation in OPERATION_MARKERS
-                 if (git_dir / marker).exists()), "")
+    return next(
+        (operation for marker, operation in OPERATION_MARKERS if (git_dir / marker).exists()), ""
+    )
 
 
 def operation_label(operation: str) -> str:
@@ -2469,11 +3092,16 @@ def repository_operation_in_progress(repo: Path, timeout: int) -> bool:
     return bool(repository_operation(repo, timeout))
 
 
-def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
-                    commit_timeout: int | None = None, *,
-                    expected_head=_SIGNATURE_UNSET,
-                    expected_ref=_SIGNATURE_UNSET
-                    ) -> subprocess.CompletedProcess:
+def commit_selected(
+    repo: Path,
+    paths: list[str],
+    message: str,
+    timeout: int,
+    commit_timeout: int | None = None,
+    *,
+    expected_head=_SIGNATURE_UNSET,
+    expected_ref=_SIGNATURE_UNSET,
+) -> CommitResult:
     """Commit exactly paths through a temporary index; preserve the user's index bytes.
 
     `timeout` gilt für die schnellen Vorbereitungsschritte (Index lesen, Baum
@@ -2491,10 +3119,9 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
     head_ref_before = current_symbolic_head_ref(repo, timeout)
     if head_ref_before is None:
         raise CommitSafetyError("detached HEAD")
-    if ((expected_head is not _SIGNATURE_UNSET
-         and head_before != expected_head)
-            or (expected_ref is not _SIGNATURE_UNSET
-                and head_ref_before != expected_ref)):
+    if (expected_head is not _SIGNATURE_UNSET and head_before != expected_head) or (
+        expected_ref is not _SIGNATURE_UNSET and head_ref_before != expected_ref
+    ):
         raise CommitSafetyError("HEAD changed after UI approval")
     approved = set(paths)
     with tempfile.TemporaryDirectory(prefix="gmf-index-") as temp:
@@ -2507,14 +3134,16 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         if head_before is None:
             # Frisches Repo ohne ersten Commit: HEAD existiert noch nicht, der
             # temporäre Index startet leer statt vom HEAD-Baum.
-            _required_git(repo, *NO_GIT_HOOKS_ARGS, "read-tree", "--empty",
-                          timeout=timeout, env=env)
+            _required_git(
+                repo, *NO_GIT_HOOKS_ARGS, "read-tree", "--empty", timeout=timeout, env=env
+            )
         else:
             # Nicht den beweglichen Namen HEAD erneut lesen: Ein kurzzeitiger
             # Checkout könnte sonst fremde, nicht freigegebene Baum-Einträge in
             # den temporären Index bringen und vor dem späten Guard zurückwechseln.
-            _required_git(repo, *NO_GIT_HOOKS_ARGS, "read-tree", head_before,
-                          timeout=timeout, env=env)
+            _required_git(
+                repo, *NO_GIT_HOOKS_ARGS, "read-tree", head_before, timeout=timeout, env=env
+            )
         # Interna des temporären Index werden NICHT protokolliert: ein kopiertes
         # `git add`/`git commit` liefe im Terminal gegen den ECHTEN Index (dem
         # Protokoll fehlt das entscheidende GIT_INDEX_FILE) und könnte dort
@@ -2522,7 +3151,7 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         # terminal-äquivalente Befehl `git commit -m … -- <pfade>` protokolliert.
         staged = _stage_approved(repo, paths, timeout, env)
         if staged.returncode != 0:
-            return staged
+            return CommitResult(staged.returncode, staged.stdout, staged.stderr)
         # --no-renames: die Freigabeprüfung vergleicht ROHE Pfade. Gits
         # Rename-Erkennung würde Ziel+Quelle eines Renames zu EINEM Eintrag
         # zusammenfassen und die approvte Quell-Löschung scheinbar verschwinden
@@ -2536,9 +3165,18 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         # Checkout. Ohne ersten Commit gibt es keine OID; dort vergleicht Git
         # von sich aus gegen den leeren Baum.
         base = () if head_before is None else (head_before,)
-        names = _required_git(repo, "diff", "--cached", "--no-renames",
-                              "--name-only", "-z", *base, "--",
-                              timeout=timeout, env=env)
+        names = _required_git(
+            repo,
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            *base,
+            "--",
+            timeout=timeout,
+            env=env,
+        )
         actual = {path for path in names.stdout.split("\0") if path}
         # Die Zusage lautet: NICHTS committen, was nicht freigegeben ist. Sie
         # verlangt eine Teilmenge, keine Gleichheit. Ein freigegebener Pfad, der
@@ -2555,8 +3193,7 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
             # Kein einziger freigegebener Pfad trägt etwas bei. `git commit`
             # scheiterte hier mit seiner eigenen, in dieser Lage irreführenden
             # Meldung ("nothing to commit, working tree clean").
-            raise CommitSafetyError(
-                "the selected paths change nothing against HEAD")
+            raise CommitSafetyError("the selected paths change nothing against HEAD")
         tree_before = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if has_unmerged_entries(repo, timeout):
             raise CommitSafetyError("merge conflicts appeared before commit")
@@ -2569,145 +3206,173 @@ def commit_selected(repo: Path, paths: list[str], message: str, timeout: int,
         tree_after = _required_git(repo, "write-tree", timeout=timeout, env=env).stdout.strip()
         if tree_after != tree_before:
             raise CommitSafetyError("approved files changed during commit preparation")
-        # Der echte Index-Lock verhindert ab hier, dass Merge, Cherry-pick,
-        # Revert oder Checkout ihre gemeinsame Sequenz NACH der Markerprüfung
-        # beginnen. `git commit` arbeitet mit dem separaten GIT_INDEX_FILE und
-        # braucht deshalb ausschließlich dessen eigenen Index-Lock. HEAD kann
-        # Git selbst nur aktualisieren, wenn wir HEAD.lock noch nicht halten;
-        # die Branch-Identität wird direkt vor und nach dem Commit geprüft.
-        guard_paths = (
-            Path(str(_git_path(repo, "index", timeout)) + ".lock"),
-        )
-        guards: list[tuple[Path, int | None, tuple[int, int]]] = []
-        commit_started = False
-        committed_head = None
-        try:
-            for guard_path in guard_paths:
-                fd, identity = _acquire_git_lock(guard_path)
-                guards.append((guard_path, fd, identity))
+        with _commit_index_guard(repo, timeout) as guards:
             if has_unmerged_entries(repo, timeout):
                 raise CommitSafetyError("merge conflicts appeared before commit")
             if repository_operation_in_progress(repo, timeout):
-                raise CommitSafetyError(
-                    "a merge or sequencer operation appeared before commit")
+                raise CommitSafetyError("a merge or sequencer operation appeared before commit")
             if _real_index_signature(repo, timeout) != real_before:
                 raise CommitSafetyError("Git index changed during approval")
             if current_head(repo, timeout) != head_before:
                 raise CommitSafetyError("HEAD changed during commit preparation")
             if current_symbolic_head_ref(repo, timeout) != head_ref_before:
                 raise CommitSafetyError("HEAD branch changed during commit preparation")
-            literal_paths = tuple(":(literal)" + path for path in paths)
-            logged_args = ("commit", "-m", message, "--", *literal_paths)
-            reflog_action = "gmf-" + uuid.uuid4().hex
-            commit_env = {
-                **RAW_OBJECT_ENV,
-                "GIT_INDEX_FILE": index_path,
-                "GIT_REFLOG_ACTION": reflog_action,
-            }
+            return _execute_approved_commit(
+                repo,
+                paths,
+                message,
+                timeout,
+                commit_timeout,
+                index_path,
+                head_before,
+                head_ref_before,
+                tree_after,
+                real_before,
+                guards,
+            )
+
+
+IndexGuard = tuple[Path, Optional[int], tuple[int, int]]
+
+
+@contextlib.contextmanager
+def _commit_index_guard(repo: Path, timeout: int) -> Iterator[list[IndexGuard]]:
+    """Index-Lock über Prüfung, Commit mit temporärem Index und Übernahme halten."""
+    # Merge und Checkout brauchen index.lock. Der Commit arbeitet mit einem
+    # separaten Index; HEAD und Branch werden erst zur Indexübernahme gesperrt.
+    lock_path = Path(str(_git_path(repo, "index", timeout)) + ".lock")
+    fd, identity = _acquire_git_lock(lock_path)
+    guards: list[IndexGuard] = [(lock_path, fd, identity)]
+    try:
+        yield guards
+    finally:
+        pending_exception = sys.exc_info()[0] is not None
+        cleanup_error = None
+        for owned_path, owned_fd, owned_identity in reversed(guards):
             try:
-                commit_started = True
-                result = run_git(
-                    repo, "-c", "core.logAllRefUpdates=true",
-                    "commit", "-m", message, env=commit_env,
-                    timeout=timeout if commit_timeout is None else commit_timeout)
-            except subprocess.TimeoutExpired as exc:
-                log_command(repo, logged_args, returncode=None)
-                # Diese Attribute markieren ausschließlich einen Timeout IM
-                # eigentlichen Commit-Aufruf. Frühere Timeouts besitzen sie
-                # nicht und dürfen im TUI-Pfad keinen Commit vortäuschen.
-                exc.approved_tree = tree_after
-                exc.approved_head = head_before
-                exc.approved_ref = head_ref_before
-                exc.reflog_action = reflog_action
-                raise
+                _release_owned_git_lock(owned_path, owned_fd, owned_identity)
             except OSError as exc:
-                # Popen kann bereits gestartet sein und communicate() erst nach
-                # einem wirksamen Commit scheitern. Ohne verlässlichen Exit-Code
-                # darf die UI niemals zu einem Wiederholungsversuch einladen.
-                log_command(repo, logged_args, returncode=None)
-                raise CommitOutcomeUnknownError(str(exc)) from exc
-            log_command(repo, logged_args, result.returncode)
-            if result.returncode != 0:
-                try:
-                    reflog_matches = _commit_reflog_matches(
-                        repo, reflog_action, timeout)
-                    moved = (current_head(repo, timeout) != head_before
-                             or current_symbolic_head_ref(repo, timeout)
-                             != head_ref_before)
-                except (subprocess.TimeoutExpired, GitReadError,
-                        CommitSafetyError, OSError) as exc:
-                    raise CommitOutcomeUnknownError(str(exc)) from exc
-                if reflog_matches or moved:
-                    # Ein Hook kann selbst einen Commit schreiben und danach
-                    # den äußeren Commit mit Exit != 0 scheitern lassen. Er kann
-                    # HEAD sogar zurückstellen; der zufällige Reflog-Marker
-                    # belegt die zwischenzeitliche Branch-Mutation trotzdem.
-                    raise CommitOutcomeUnknownError(
-                        "repository changed although git commit reported failure")
-            try:
-                committed_head = None
-                if result.returncode == 0:
-                    try:
-                        committed_head, committed_ref = _commit_reflog_proof(
-                            repo, reflog_action, timeout)
-                    except CommitSafetyError as exc:
-                        # Ohne Reflog-Nachweis kennen wir die eigene Commit-OID
-                        # nicht sicher. Git hat dennoch bereits Erfolg gemeldet.
-                        raise CommitOutcomeUnknownError(str(exc)) from exc
-                    committed_head = _verify_hooks_kept_approved_tree(
-                        repo, head_before, tree_after, timeout, head_ref_before,
-                        committed_head, committed_ref)
-                try:
-                    real_after = _real_index_signature(repo, timeout)
-                except (CommitSafetyError, GitReadError, OSError,
-                        subprocess.TimeoutExpired) as exc:
-                    if result.returncode == 0:
-                        raise CommitAdoptionError(committed_head, exc) from exc
-                    raise
-                if real_after != real_before:
-                    error = CommitSafetyError(
-                        "Git changed the real index unexpectedly")
-                    if result.returncode == 0:
-                        raise CommitAdoptionError(committed_head, error)
-                    raise error
-                if result.returncode == 0:
-                    try:
-                        adopt_commit_in_real_index(
-                            repo, paths, committed_head, head_ref_before,
-                            real_before, timeout, _held_guards=guards)
-                    except (CommitSafetyError, GitReadError, OSError,
-                            subprocess.TimeoutExpired) as exc:
-                        raise CommitAdoptionError(committed_head, exc) from exc
-                    # Der Aufrufer braucht die ungekürzte neue OID für einen
-                    # sicheren Rückgängig-Befehl beim Erst-Commit.
-                    result.committed_head = committed_head
-                    result.approved_head = head_before
-                    result.approved_ref = head_ref_before
-                return result
-            except (subprocess.TimeoutExpired, GitReadError, OSError) as exc:
-                if result.returncode == 0:
-                    raise CommitOutcomeUnknownError(str(exc)) from exc
-                raise
-        finally:
-            pending_exception = sys.exc_info()[0] is not None
-            cleanup_error = None
-            for guard_path, fd, identity in reversed(guards):
-                try:
-                    _release_owned_git_lock(guard_path, fd, identity)
-                except OSError as exc:
-                    cleanup_error = cleanup_error or exc
-            if cleanup_error is not None and not pending_exception:
-                if commit_started:
-                    # Der Commit kann bereits existieren; selbst ein Fehler
-                    # beim bloßen Schließen/Löschen des Guards darf daraus nie
-                    # die irreführende Aussage "Commit failed" machen.
-                    raise CommitOutcomeUnknownError(
-                        str(cleanup_error)) from cleanup_error
-                raise CommitSafetyError(str(cleanup_error)) from cleanup_error
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and not pending_exception:
+            # Der Block hat einen Commit versucht. Ein Aufräumfehler beweist
+            # keinen sicheren Fehlschlag des Commits.
+            raise CommitOutcomeUnknownError(str(cleanup_error)) from cleanup_error
 
 
-def _stage_approved(repo: Path, paths: list[str], timeout: int,
-                    env: dict) -> subprocess.CompletedProcess:
+def _execute_approved_commit(
+    repo: Path,
+    paths: list[str],
+    message: str,
+    timeout: int,
+    commit_timeout: int | None,
+    index_path: str,
+    approved_head: str | None,
+    approved_ref: str,
+    approved_tree: str,
+    real_before: tuple | None,
+    guards: list[IndexGuard],
+) -> CommitResult:
+    logged_args = ("commit", "-m", message, "--", *(":(literal)" + path for path in paths))
+    reflog_action = "gmf-" + uuid.uuid4().hex
+    commit_env = {
+        **RAW_OBJECT_ENV,
+        "GIT_INDEX_FILE": index_path,
+        "GIT_REFLOG_ACTION": reflog_action,
+    }
+    try:
+        result = run_git(
+            repo,
+            "-c",
+            "core.logAllRefUpdates=true",
+            "commit",
+            "-m",
+            message,
+            env=commit_env,
+            timeout=timeout if commit_timeout is None else commit_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log_command(repo, logged_args, returncode=None)
+        raise CommitTimeoutError(
+            exc, approved_tree, approved_head, approved_ref, reflog_action
+        ) from exc
+    except OSError as exc:
+        # Die Kommunikation kann erst nach einem bereits wirksamen Commit scheitern.
+        log_command(repo, logged_args, returncode=None)
+        raise CommitOutcomeUnknownError(str(exc)) from exc
+    log_command(repo, logged_args, result.returncode)
+    if result.returncode != 0:
+        _verify_failed_commit(
+            repo, reflog_action, approved_head, approved_ref, real_before, timeout
+        )
+        return CommitResult(result.returncode, result.stdout, result.stderr)
+
+    try:
+        try:
+            committed_head, committed_ref = _commit_reflog_proof(repo, reflog_action, timeout)
+        except CommitSafetyError as exc:
+            raise CommitOutcomeUnknownError(str(exc)) from exc
+        committed_head = _verify_hooks_kept_approved_tree(
+            repo,
+            approved_head,
+            approved_tree,
+            timeout,
+            approved_ref,
+            committed_head,
+            committed_ref,
+        )
+    except (subprocess.TimeoutExpired, GitReadError, OSError) as exc:
+        raise CommitOutcomeUnknownError(str(exc)) from exc
+
+    try:
+        if _real_index_signature(repo, timeout) != real_before:
+            raise CommitSafetyError("Git changed the real index unexpectedly")
+        adopt_commit_in_real_index(
+            repo,
+            paths,
+            committed_head,
+            approved_ref,
+            real_before,
+            timeout,
+            _held_guards=guards,
+        )
+    except (CommitSafetyError, GitReadError, OSError, subprocess.TimeoutExpired) as exc:
+        raise CommitAdoptionError(committed_head, exc) from exc
+    return CommitResult(
+        result.returncode,
+        result.stdout,
+        result.stderr,
+        committed_head,
+        approved_head,
+        approved_ref,
+    )
+
+
+def _verify_failed_commit(
+    repo: Path,
+    reflog_action: str,
+    approved_head: str | None,
+    approved_ref: str,
+    real_before: tuple | None,
+    timeout: int,
+) -> None:
+    try:
+        reflog_matches = _commit_reflog_matches(repo, reflog_action, timeout)
+        moved = (
+            current_head(repo, timeout) != approved_head
+            or current_symbolic_head_ref(repo, timeout) != approved_ref
+        )
+    except (subprocess.TimeoutExpired, GitReadError, CommitSafetyError, OSError) as exc:
+        raise CommitOutcomeUnknownError(str(exc)) from exc
+    # Ein Hook kann den Branch selbst ändern, bevor er den äußeren Commit abbricht.
+    if reflog_matches or moved:
+        raise CommitOutcomeUnknownError("repository changed although git commit reported failure")
+    if _real_index_signature(repo, timeout) != real_before:
+        raise CommitSafetyError("Git changed the real index unexpectedly")
+
+
+def _stage_approved(
+    repo: Path, paths: list[str], timeout: int, env: dict
+) -> subprocess.CompletedProcess:
     """Freigegebene Pfade in den temporären Index stagen — auch Löschungen.
 
     `git add` kann eine Löschung nur stagen, solange der Pfad noch im Index
@@ -2726,26 +3391,40 @@ def _stage_approved(repo: Path, paths: list[str], timeout: int,
         (present if os.path.lexists(repo / path) else missing).append(path)
     result = subprocess.CompletedProcess(["git", "add"], 0, "", "")
     if present:
-        result = run_git(repo, *NO_GIT_HOOKS_ARGS, "add", "--", *present,
-                         timeout=timeout, env=env)
+        result = run_git(repo, *NO_GIT_HOOKS_ARGS, "add", "--", *present, timeout=timeout, env=env)
         if result.returncode != 0:
             return result
     if missing:
         result = run_git(
-            repo, *NO_GIT_HOOKS_ARGS, "rm", "--cached", "-q",
-            "--ignore-unmatch", "--", *missing, timeout=timeout, env=env)
+            repo,
+            *NO_GIT_HOOKS_ARGS,
+            "rm",
+            "--cached",
+            "-q",
+            "--ignore-unmatch",
+            "--",
+            *missing,
+            timeout=timeout,
+            env=env,
+        )
         if result.returncode != 0:
             return result
     return result
 
 
-def _commit_reflog_matches(repo: Path, action: str,
-                           timeout: int) -> list[tuple[str, str]]:
+def _commit_reflog_matches(repo: Path, action: str, timeout: int) -> list[tuple[str, str]]:
     """Alle Branch-Reflog-Einträge des zufälligen Commit-Markers lesen."""
     result = _required_git(
-        repo, "reflog", "show", "--all", "--format=%H%x00%gD%x00%gs",
-        "--fixed-strings", f"--grep-reflog={action}", timeout=timeout,
-        env=RAW_OBJECT_ENV)
+        repo,
+        "reflog",
+        "show",
+        "--all",
+        "--format=%H%x00%gD%x00%gs",
+        "--fixed-strings",
+        f"--grep-reflog={action}",
+        timeout=timeout,
+        env=RAW_OBJECT_ENV,
+    )
     matches: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
         fields = line.split("\0", 2)
@@ -2758,26 +3437,32 @@ def _commit_reflog_matches(repo: Path, action: str,
     return matches
 
 
-def _commit_reflog_proof(repo: Path, action: str,
-                         timeout: int) -> tuple[str, str]:
+def _commit_reflog_proof(repo: Path, action: str, timeout: int) -> tuple[str, str]:
     """Die von diesem ``git commit`` geschriebene OID und Ref eindeutig lesen.
 
     Der zufällige ``GIT_REFLOG_ACTION`` steht nur für diesen Aufruf im Reflog.
     Dadurch bleibt ein späterer fremder Commit unterscheidbar, selbst wenn er
     den Branch noch vor unserer Nachprüfung weiterbewegt.
     """
-    matches = [(oid, ref) for oid, ref in _commit_reflog_matches(
-        repo, action, timeout) if ref.startswith("refs/heads/")]
+    matches = [
+        (oid, ref)
+        for oid, ref in _commit_reflog_matches(repo, action, timeout)
+        if ref.startswith("refs/heads/")
+    ]
     if len(matches) != 1:
-        raise CommitSafetyError(
-            "cannot identify the committed branch safely; check git log")
+        raise CommitSafetyError("cannot identify the committed branch safely; check git log")
     return matches[0]
 
 
-def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
-                                     approved_tree: str, timeout: int,
-                                     approved_ref: str, committed_head: str,
-                                     committed_ref: str) -> str:
+def _verify_hooks_kept_approved_tree(
+    repo: Path,
+    head_before: str | None,
+    approved_tree: str,
+    timeout: int,
+    approved_ref: str,
+    committed_head: str,
+    committed_ref: str,
+) -> str:
     """Nach dem Commit prüfen, dass kein Hook den freigegebenen Baum verändert hat.
 
     `git commit` erbt GIT_INDEX_FILE — ein pre-commit-Hook kann darüber mit
@@ -2791,21 +3476,18 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
     Commit steht — fremde Commits kann das nicht treffen.
     """
     raw_env = RAW_OBJECT_ENV
-    head_now = _required_git(repo, "rev-parse", "HEAD", timeout=timeout,
-                             env=raw_env).stdout.strip()
+    head_now = _required_git(repo, "rev-parse", "HEAD", timeout=timeout, env=raw_env).stdout.strip()
     actual_ref = current_symbolic_head_ref(repo, timeout)
     approved_now = run_git(
-        repo, "rev-parse", "--verify", "-q", approved_ref,
-        timeout=timeout, env=raw_env)
+        repo, "rev-parse", "--verify", "-q", approved_ref, timeout=timeout, env=raw_env
+    )
     approved_oid = approved_now.stdout.strip() if approved_now.returncode == 0 else None
 
     def rollback_commit_ref(restore_oid: str | None) -> subprocess.CompletedProcess:
         if restore_oid is None:
-            args = safe_update_ref_args(
-                "--no-deref", "-d", committed_ref, committed_head)
+            args = safe_update_ref_args("--no-deref", "-d", committed_ref, committed_head)
         else:
-            args = safe_update_ref_args(
-                "--no-deref", committed_ref, restore_oid, committed_head)
+            args = safe_update_ref_args("--no-deref", committed_ref, restore_oid, committed_head)
         return run_git_logged(repo, *args, timeout=timeout)
 
     actual_parents = commit_parents(repo, committed_head, timeout)
@@ -2816,45 +3498,48 @@ def _verify_hooks_kept_approved_tree(repo: Path, head_before: str | None,
         # gibt es keinen sicheren Rücksetzpunkt und wir mutieren gar nichts.
         if len(actual_parents) > 1:
             raise CommitOutcomeUnknownError(
-                "commit landed on another branch with ambiguous parents")
+                "commit landed on another branch with ambiguous parents"
+            )
         restore_oid = actual_parents[0] if actual_parents else None
         if rollback_commit_ref(restore_oid).returncode == 0:
-            raise CommitSafetyError(
-                "commit landed on another branch and was rolled back")
+            raise CommitSafetyError("commit landed on another branch and was rolled back")
         raise CommitOutcomeUnknownError(
-            "commit landed on another branch and could not be rolled back")
+            "commit landed on another branch and could not be rolled back"
+        )
     expected_parents = [] if head_before is None else [head_before]
     if actual_parents != expected_parents:
         if len(actual_parents) > 1:
             raise CommitOutcomeUnknownError(
-                "the commit has ambiguous parents and was not rolled back")
+                "the commit has ambiguous parents and was not rolled back"
+            )
         restore_oid = actual_parents[0] if actual_parents else None
         if rollback_commit_ref(restore_oid).returncode == 0:
-            raise CommitSafetyError(
-                "the commit has unexpected parents and was rolled back")
+            raise CommitSafetyError("the commit has unexpected parents and was rolled back")
         raise CommitOutcomeUnknownError(
-            "the commit has unexpected parents and could not be rolled back")
+            "the commit has unexpected parents and could not be rolled back"
+        )
     committed_tree = _required_git(
-        repo, "rev-parse", committed_head + "^{tree}", timeout=timeout,
-        env=raw_env).stdout.strip()
+        repo, "rev-parse", committed_head + "^{tree}", timeout=timeout, env=raw_env
+    ).stdout.strip()
     if committed_tree != approved_tree:
         if rollback_commit_ref(head_before).returncode == 0:
-            raise CommitSafetyError(
-                "a hook changed the approved files; the commit was rolled back")
+            raise CommitSafetyError("a hook changed the approved files; the commit was rolled back")
+        raise CommitOutcomeUnknownError("a hook changed the committed tree and rollback failed")
+    if actual_ref != approved_ref or approved_oid != committed_head or head_now != committed_head:
         raise CommitOutcomeUnknownError(
-            "a hook changed the committed tree and rollback failed")
-    if (actual_ref != approved_ref or approved_oid != committed_head
-            or head_now != committed_head):
-        raise CommitOutcomeUnknownError(
-            "HEAD branch changed after commit; commit remains on the approved branch")
+            "HEAD branch changed after commit; commit remains on the approved branch"
+        )
     return committed_head
 
 
-def finish_interrupted_commit(repo: Path, head_before: str | None,
-                              timeout: int,
-                              approved_tree: str | None = None,
-                              approved_ref: str | None = None,
-                              reflog_action: str | None = None) -> bool:
+def finish_interrupted_commit(
+    repo: Path,
+    head_before: str | None,
+    timeout: int,
+    approved_tree: str | None = None,
+    approved_ref: str | None = None,
+    reflog_action: str | None = None,
+) -> bool:
     """Nach einem Commit-Timeout klären, ob der Commit doch entstanden ist.
 
     `git commit` kann den Commit längst geschrieben haben und erst danach — etwa
@@ -2881,26 +3566,23 @@ def finish_interrupted_commit(repo: Path, head_before: str | None,
             # den Ausgangsstand zurückstellen und erst dann hängen. Der zufällige
             # Marker belegt diese Mutation, auch wenn HEAD unverändert aussieht.
             if _commit_reflog_matches(repo, reflog_action, timeout):
-                raise CommitSafetyError(
-                    "a hook commit exists on another branch; check git log")
+                raise CommitSafetyError("a hook commit exists on another branch; check git log")
         return False
-    if (approved_ref is not None
-            and current_symbolic_head_ref(repo, timeout) != approved_ref):
-        raise CommitSafetyError(
-            "HEAD branch changed during interrupted commit; check git log")
+    if approved_ref is not None and current_symbolic_head_ref(repo, timeout) != approved_ref:
+        raise CommitSafetyError("HEAD branch changed during interrupted commit; check git log")
     if approved_tree is not None:
         # Zuerst nur lesend pruefen. `_verify_hooks_kept_approved_tree()` kann
         # zurueckrollen und ist hier deshalb absichtlich tabu.
         expected_parents = [] if head_before is None else [head_before]
         if commit_parents(repo, head_after, timeout) != expected_parents:
-            raise CommitSafetyError(
-                "the new commit has unexpected parents; check git log")
+            raise CommitSafetyError("the new commit has unexpected parents; check git log")
         committed_tree = _required_git(
-            repo, "rev-parse", head_after + "^{tree}", timeout=timeout,
-            env=RAW_OBJECT_ENV).stdout.strip()
+            repo, "rev-parse", head_after + "^{tree}", timeout=timeout, env=RAW_OBJECT_ENV
+        ).stdout.strip()
         if committed_tree != approved_tree:
             raise CommitSafetyError(
-                "the new commit does not match the approved tree; check git log")
+                "the new commit does not match the approved tree; check git log"
+            )
         # Selbst Basis+Baum beweisen nach dem Timeout nicht, dass dieser Commit
         # von unserem inzwischen beendeten Prozess stammt. Deshalb keine
         # Indexmutation; der Status bleibt bis zur manuellen Pruefung ehrlich.
@@ -2936,8 +3618,7 @@ def _acquire_git_lock(path: Path) -> tuple[int, tuple[int, int]]:
     return fd, (info.st_dev, info.st_ino)
 
 
-def _release_owned_git_lock(path: Path, fd: int | None,
-                            identity: tuple[int, int]) -> None:
+def _release_owned_git_lock(path: Path, fd: int | None, identity: tuple[int, int]) -> None:
     """Nur die von diesem Prozess angelegte, noch identische Lockdatei lösen."""
     if fd is not None:
         os.close(fd)
@@ -2949,13 +3630,16 @@ def _release_owned_git_lock(path: Path, fd: int | None,
         path.unlink()
 
 
-def adopt_commit_in_real_index(repo: Path, paths: list[str],
-                               committed_head: str, approved_ref: str,
-                               expected_index_signature: tuple | None,
-                               timeout: int, *,
-                               _held_guards: list[tuple[
-                                   Path, int | None, tuple[int, int]
-                               ]] | None = None) -> None:
+def adopt_commit_in_real_index(
+    repo: Path,
+    paths: list[str],
+    committed_head: str,
+    approved_ref: str,
+    expected_index_signature: tuple | None,
+    timeout: int,
+    *,
+    _held_guards: list[IndexGuard] | None = None,
+) -> None:
     """Den echten Index für die committeten Pfade auf den verifizierten Commit ziehen.
 
     Ohne diesen Schritt bleibt der echte Index auf dem Stand von vor dem Commit
@@ -2977,8 +3661,11 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str],
     index = _git_path(repo, "index", timeout)
     head = _git_path(repo, "HEAD", timeout)
     branch = _git_path(repo, approved_ref, timeout)
-    lock_paths = (Path(str(index) + ".lock"), Path(str(head) + ".lock"),
-                  Path(str(branch) + ".lock"))
+    lock_paths: tuple[Path, ...] = (
+        Path(str(index) + ".lock"),
+        Path(str(head) + ".lock"),
+        Path(str(branch) + ".lock"),
+    )
     external_guards = _held_guards is not None
     held = _held_guards if _held_guards is not None else []
     temp_index: Path | None = None
@@ -2990,19 +3677,20 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str],
         else:
             lock_targets = lock_paths
         for lock_path in lock_targets:
-            fd, identity = _acquire_git_lock(lock_path)
-            held.append((lock_path, fd, identity))
+            acquired_fd, identity = _acquire_git_lock(lock_path)
+            held.append((lock_path, acquired_fd, identity))
         index_fd = held[0][1]
         if index_fd is None:  # ausschließlich für den Typprüfer
             raise CommitSafetyError("lost index lock")
         if _real_index_signature(repo, timeout) != expected_index_signature:
             raise CommitSafetyError("Git index changed before real-index adoption")
-        if (current_head(repo, timeout) != committed_head
-                or current_symbolic_head_ref(repo, timeout) != approved_ref):
+        if (
+            current_head(repo, timeout) != committed_head
+            or current_symbolic_head_ref(repo, timeout) != approved_ref
+        ):
             raise CommitSafetyError("HEAD changed before real-index adoption")
 
-        temp_fd, temp_name = tempfile.mkstemp(
-            prefix="gmf-adopt-index-", dir=index.parent)
+        temp_fd, temp_name = tempfile.mkstemp(prefix="gmf-adopt-index-", dir=index.parent)
         os.close(temp_fd)
         temp_index = Path(temp_name)
         if index.exists():
@@ -3010,23 +3698,36 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str],
         else:
             temp_index.unlink()
             empty = run_git(
-                repo, *NO_GIT_HOOKS_ARGS, "read-tree", "--empty",
+                repo,
+                *NO_GIT_HOOKS_ARGS,
+                "read-tree",
+                "--empty",
                 timeout=timeout,
-                env={**RAW_OBJECT_ENV, "GIT_INDEX_FILE": str(temp_index)})
+                env={**RAW_OBJECT_ENV, "GIT_INDEX_FILE": str(temp_index)},
+            )
             if empty.returncode != 0:
                 raise GitReadError("git read-tree failed (exit %d)" % empty.returncode)
         updated = run_git(
-            repo, *NO_GIT_HOOKS_ARGS, "reset", "-q", committed_head,
-            "--", *paths,
+            repo,
+            *NO_GIT_HOOKS_ARGS,
+            "reset",
+            "-q",
+            committed_head,
+            "--",
+            *paths,
             timeout=timeout,
-            env={**RAW_OBJECT_ENV,
-                 "GIT_INDEX_FILE": str(temp_index),
-                 "GIT_LITERAL_PATHSPECS": "1",
-                 })
+            env={
+                **RAW_OBJECT_ENV,
+                "GIT_INDEX_FILE": str(temp_index),
+                "GIT_LITERAL_PATHSPECS": "1",
+            },
+        )
         if updated.returncode != 0:
             raise GitReadError("git reset failed (exit %d)" % updated.returncode)
-        if (current_head(repo, timeout) != committed_head
-                or current_symbolic_head_ref(repo, timeout) != approved_ref):
+        if (
+            current_head(repo, timeout) != committed_head
+            or current_symbolic_head_ref(repo, timeout) != approved_ref
+        ):
             raise CommitSafetyError("HEAD changed during real-index adoption")
 
         content = temp_index.read_bytes()
@@ -3044,8 +3745,17 @@ def adopt_commit_in_real_index(repo: Path, paths: list[str],
         held[0] = (held[0][0], None, held[0][2])
         os.replace(lock_paths[0], index)
         log_command(
-            repo, (*NO_GIT_HOOKS_ARGS, "reset", "-q", committed_head, "--",
-                   *(":(literal)" + path for path in paths)), 0)
+            repo,
+            (
+                *NO_GIT_HOOKS_ARGS,
+                "reset",
+                "-q",
+                committed_head,
+                "--",
+                *(":(literal)" + path for path in paths),
+            ),
+            0,
+        )
     finally:
         if temp_index is not None:
             # Git legt neben JEDEN Index, den es schreibt, eine `.lock`-Datei.
@@ -3101,8 +3811,8 @@ def current_symbolic_head_ref(repo: Path, timeout: int) -> str | None:
 def commit_parents(repo: Path, oid: str, timeout: int) -> list[str]:
     """Alle Eltern einer Commit-OID lesen; ein Normalcommit hat genau einen."""
     result = _required_git(
-        repo, "rev-list", "--parents", "-n", "1", oid, "--", timeout=timeout,
-        env=RAW_OBJECT_ENV)
+        repo, "rev-list", "--parents", "-n", "1", oid, "--", timeout=timeout, env=RAW_OBJECT_ENV
+    )
     fields = result.stdout.split()
     if not fields or fields[0] != oid:
         raise GitReadError("git rev-list returned malformed parents")
@@ -3128,7 +3838,8 @@ class StashFile:
     untracked: bool = False
 
 
-class StashTarget(NamedTuple):
+@dataclass(frozen=True)
+class StashTarget:
     head_ref: str | None
     head_oid: str | None
     index: dict
@@ -3141,14 +3852,21 @@ class StashTarget(NamedTuple):
 
 
 def read_stashes(repo: Path, timeout: int) -> list[StashEntry]:
-    result = _required_git(repo, "stash", "list", "-z", "--format=%H%x00%gd%x00%gs",
-                           timeout=timeout, env=RAW_OBJECT_ENV)
+    result = _required_git(
+        repo,
+        "stash",
+        "list",
+        "-z",
+        "--format=%H%x00%gd%x00%gs",
+        timeout=timeout,
+        env=RAW_OBJECT_ENV,
+    )
     fields = result.stdout.split("\0")
     if fields.pop() != "" or len(fields) % 3:
         raise GitReadError("invalid stash list")
     entries = []
     for i in range(0, len(fields), 3):
-        oid, selector, subject = fields[i:i + 3]
+        oid, selector, subject = fields[i : i + 3]
         if not is_object_id(oid) or selector != f"stash@{{{i // 3}}}":
             raise GitReadError("invalid stash identity")
         entries.append(StashEntry(oid, selector, subject))
@@ -3163,15 +3881,32 @@ def stash_files(repo: Path, oid: str, timeout: int) -> list[StashFile]:
     if len(parents) not in (2, 3):
         raise GitReadError("invalid stash parents")
     files: dict[str, dict] = {}
-    layers = [("working", (parents[0], oid)), ("staged", (parents[0], parents[1]))]
+    layers: list[tuple[str, tuple[str, ...]]] = [
+        ("working", (parents[0], oid)),
+        ("staged", (parents[0], parents[1])),
+    ]
     if len(parents) == 3:
         layers.append(("untracked", (parents[2],)))
     for layer, revisions in layers:
         result = _required_git(
-            repo, "diff-tree", "--root", "-r", "--no-commit-id", "--name-status", "-z",
-            "--no-renames", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color",
+            repo,
+            "diff-tree",
+            "--root",
+            "-r",
+            "--no-commit-id",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--no-relative",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
             "--ignore-submodules=none",
-            *revisions, "--", timeout=timeout, env=RAW_OBJECT_ENV)
+            *revisions,
+            "--",
+            timeout=timeout,
+            env=RAW_OBJECT_ENV,
+        )
         fields = result.stdout.split("\0")
         if fields.pop() != "" or len(fields) % 2:
             raise GitReadError("invalid stash file list")
@@ -3192,17 +3927,32 @@ def stash_file_diff(repo: Path, oid: str, item: StashFile, timeout: int) -> list
     lines = []
     previous = None
     for layer, revisions, present in (
-            ("stash_worktree", (parents[0], oid), item.working),
-            ("stash_index", (parents[0], parents[1]), item.staged),
-            ("stash_untracked", (parents[2],) if len(parents) == 3 else (), item.untracked)):
+        ("stash_worktree", (parents[0], oid), item.working),
+        ("stash_index", (parents[0], parents[1]), item.staged),
+        ("stash_untracked", (parents[2],) if len(parents) == 3 else (), item.untracked),
+    ):
         if not present:
             continue
         result = _required_git(
-            repo, "diff-tree", "--root", "-r", "--no-commit-id", "-p",
-            "--no-renames", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-color",
-            "--submodule=short", "--ignore-submodules=none",
-            *revisions, "--", item.path, timeout=timeout,
-            env={**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"})
+            repo,
+            "diff-tree",
+            "--root",
+            "-r",
+            "--no-commit-id",
+            "-p",
+            "--no-renames",
+            "--no-relative",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--submodule=short",
+            "--ignore-submodules=none",
+            *revisions,
+            "--",
+            item.path,
+            timeout=timeout,
+            env={**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"},
+        )
         if layer == "stash_index" and result.stdout == previous:
             continue
         previous = result.stdout
@@ -3213,15 +3963,15 @@ def stash_file_diff(repo: Path, oid: str, item: StashFile, timeout: int) -> list
 def stash_target(repo: Path, timeout: int, *, clean: bool) -> StashTarget:
     identity = (current_symbolic_head_ref(repo, timeout), current_head(repo, timeout))
     operation = repository_operation(repo, timeout)
-    status = _required_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                           timeout=timeout).stdout
+    status = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout).stdout
     if operation or (clean and status):
         raise GitReadError(t("stash_clean"))
     index = read_index_entries(repo, timeout)
     if any(entry[2] for bucket in index.values() for entry in bucket):
         raise GitReadError(t("stash_clean"))
-    paths = tuple((item.path, _path_signature(repo / item.path))
-                  for item in parse_porcelain(status)[4])
+    paths = tuple(
+        (item.path, _path_signature(repo / item.path)) for item in parse_porcelain(status)[4]
+    )
     if identity != (current_symbolic_head_ref(repo, timeout), current_head(repo, timeout)):
         raise GitReadError(t("stash_guard"))
     return StashTarget(*identity, index, status, paths)
@@ -3229,21 +3979,39 @@ def stash_target(repo: Path, timeout: int, *, clean: bool) -> StashTarget:
 
 def safe_stash_args(action: str, target: str) -> tuple[str, ...]:
     if action == "apply" and is_object_id(target):
-        return (*NO_GIT_HOOKS_ARGS, "-c", "submodule.recurse=false", "stash", "apply", "--index", target)
+        return (
+            *NO_GIT_HOOKS_ARGS,
+            "-c",
+            "submodule.recurse=false",
+            "stash",
+            "apply",
+            "--index",
+            target,
+        )
     if action == "drop" and re.fullmatch(r"stash@\{[0-9]+\}", target):
         return (*NO_GIT_HOOKS_ARGS, "stash", "drop", target)
     raise ValueError("invalid stash action target")
 
 
-def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashEntry],
-                     action: str, timeout: int, target: StashTarget | None) -> tuple[int, str]:
+def run_stash_action(
+    repo: Path,
+    snapshot: list[StashEntry],
+    chosen: list[StashEntry],
+    action: str,
+    timeout: int,
+    target: StashTarget | None,
+) -> tuple[int, str]:
     """OID-gebunden anwenden; vor jeder Löschung die gesamte Nummerierung prüfen.
 
     Git bietet keine atomare Bindung an fremde Checkouts oder Reflog-Schreiber.
     Pop ist deshalb Apply plus separat geprüfte Löschung, niemals ein blindes Pop.
     """
-    if (action not in ("apply", "pop", "drop") or not chosen
-            or len(set(chosen)) != len(chosen) or any(e not in snapshot for e in chosen)):
+    if (
+        action not in ("apply", "pop", "drop")
+        or not chosen
+        or len(set(chosen)) != len(chosen)
+        or any(e not in snapshot for e in chosen)
+    ):
         raise ValueError("invalid stash action")
     remaining = list(snapshot)
     completed = 0
@@ -3252,12 +4020,15 @@ def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashE
 
     def unchanged() -> bool:
         return read_stashes(repo, timeout) == [
-            StashEntry(e.oid, f"stash@{{{i}}}", e.subject) for i, e in enumerate(remaining)]
+            StashEntry(e.oid, f"stash@{{{i}}}", e.subject) for i, e in enumerate(remaining)
+        ]
 
     try:
         if not unchanged():
             return 0, t("stash_guard")
-        if action != "drop" and (target is None or stash_target(repo, timeout, clean=True) != target):
+        if action != "drop" and (
+            target is None or stash_target(repo, timeout, clean=True) != target
+        ):
             return 0, t("stash_guard")
         for entry in chosen:
             applied = False
@@ -3271,11 +4042,18 @@ def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashE
                 # zurücksetzen. Nie einen zweiten Stash auf diesen Index anwenden.
                 if completed and target.index != initial_index:
                     return completed, t("stash_batch_staged")
-                result = run_git_logged(repo, *safe_stash_args("apply", entry.oid), timeout=timeout,
-                                        env=TRANSFER_OBJECT_ENV)
+                result = run_git_logged(
+                    repo,
+                    *safe_stash_args("apply", entry.oid),
+                    timeout=timeout,
+                    env=TRANSFER_OBJECT_ENV,
+                )
                 if result.returncode:
-                    reason = ("stash_index_failed" if "Index was not unstashed" in result.stderr
-                              else "stash_apply_failed")
+                    reason = (
+                        "stash_index_failed"
+                        if "Index was not unstashed" in result.stderr
+                        else "stash_apply_failed"
+                    )
                     return completed, t(reason) + " " + terminal_text(last_error_line(result))
                 applied = True
                 updated_target = stash_target(repo, timeout, clean=False)
@@ -3288,8 +4066,12 @@ def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashE
                 if applied and stash_target(repo, timeout, clean=False) != target:
                     return completed, t("stash_applied_kept")
                 index = remaining.index(entry)
-                result = run_git_logged(repo, *safe_stash_args("drop", f"stash@{{{index}}}"),
-                                        timeout=timeout, env=RAW_OBJECT_ENV)
+                result = run_git_logged(
+                    repo,
+                    *safe_stash_args("drop", f"stash@{{{index}}}"),
+                    timeout=timeout,
+                    env=RAW_OBJECT_ENV,
+                )
                 if result.returncode:
                     return completed, t("stash_applied_kept" if applied else "stash_guard")
                 remaining.pop(index)
@@ -3305,32 +4087,55 @@ def run_stash_action(repo: Path, snapshot: list[StashEntry], chosen: list[StashE
     return completed, ""
 
 
-def print_stashes(repo: Path, *, as_json: bool) -> int:
+def print_stashes(
+    repo: Path, *, as_json: bool, timeout: int = DEFAULT_CONFIG["git_timeout"]
+) -> int:
     """Dateigruppiertes, rein lesendes Gegenstück der Stash-Ansicht."""
     try:
         repo = repo.expanduser().resolve()
-        entries = read_stashes(repo, 10)
+        entries = read_stashes(repo, timeout)
         stashes = []
         for entry in entries:
             files = []
-            for item in stash_files(repo, entry.oid, 10):
-                files.append({"path": display_git_path(item.path), "path_key": snapshot_path_key(item.path),
-                              "working": item.working, "staged": item.staged,
-                              "untracked": item.untracked,
-                              "diff": [json_text(line) for line in stash_file_diff(repo, entry.oid, item, 10)]})
-            stashes.append({"oid": entry.oid, "selector": entry.selector,
-                            "subject": json_text(entry.subject), "files": files})
-        payload = {"kind": "stashes", "schema_version": JSON_SCHEMA_VERSION, "version": __version__, "root": json_text(repo), "stashes": stashes}
+            for item in stash_files(repo, entry.oid, timeout):
+                files.append(
+                    {
+                        "path": display_git_path(item.path),
+                        "path_key": snapshot_path_key(item.path),
+                        "working": item.working,
+                        "staged": item.staged,
+                        "untracked": item.untracked,
+                        "diff": [
+                            json_text(line)
+                            for line in stash_file_diff(repo, entry.oid, item, timeout)
+                        ],
+                    }
+                )
+            stashes.append(
+                {
+                    "oid": entry.oid,
+                    "selector": entry.selector,
+                    "subject": json_text(entry.subject),
+                    "files": files,
+                }
+            )
+        payload = {
+            "kind": "stashes",
+            "schema_version": JSON_SCHEMA_VERSION,
+            "version": __version__,
+            "root": json_text(repo),
+            "stashes": stashes,
+        }
         if as_json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             if not stashes:
                 print(t("no_stash"))
-            for entry in stashes:
-                print(f"{entry['selector']} {entry['subject']}")
-                for item in entry["files"]:
-                    print("  " + item["path"])
-                    for line in item["diff"]:
+            for stash in stashes:
+                print(f"{stash['selector']} {stash['subject']}")
+                for preview in stash["files"]:
+                    print("  " + preview["path"])
+                    for line in preview["diff"]:
                         print("    " + line)
         return 0
     except (GitReadError, OSError, subprocess.TimeoutExpired) as exc:
@@ -3346,8 +4151,8 @@ def print_stashes(repo: Path, *, as_json: bool) -> int:
 # nur noch Strg-C. Mit diesen Variablen scheitert der Aufruf stattdessen sofort mit
 # einer Fehlermeldung, die wir lesen und anzeigen können.
 NONINTERACTIVE_GIT_ENV = {
-    "GIT_TERMINAL_PROMPT": "0",     # keine Login-Frage auf dem Terminal
-    "GIT_ASKPASS": "",              # kein Askpass-Programm/-Dialog
+    "GIT_TERMINAL_PROMPT": "0",  # keine Login-Frage auf dem Terminal
+    "GIT_ASKPASS": "",  # kein Askpass-Programm/-Dialog
     "SSH_ASKPASS": "",
     "SSH_ASKPASS_REQUIRE": "never",  # OpenSSH: auch keinen GUI-Dialog aufmachen
     # Hält `git status`, `git stash show` und `git ls-files` davon ab, nebenbei
@@ -3355,7 +4160,7 @@ NONINTERACTIVE_GIT_ENV = {
     # Stat-Cache (die gespeicherten Zeitstempel) trotzdem auf. Die Einträge
     # selbst — Modus, Objekt-ID, Stufe, Pfad — bleiben in allen Fällen gleich.
     "GIT_OPTIONAL_LOCKS": "0",
-    "LC_ALL": "C",                  # Meldungen bleiben stabil englisch (s.u.)
+    "LC_ALL": "C",  # Meldungen bleiben stabil englisch (s.u.)
 }
 
 # Diese Variablen schlagen `git -C <repo>` und koennen einen Aufruf auf Refs,
@@ -3363,13 +4168,21 @@ NONINTERACTIVE_GIT_ENV = {
 # aufrufenden Shell werden sie deshalb nie geerbt. Nur GIT_INDEX_FILE darf ein
 # interner Aufrufer kontrolliert fuer den temporaeren Commit-Index setzen.
 REPOSITORY_GIT_ENV = {
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_QUARANTINE_PATH", "GIT_PREFIX", "GIT_NAMESPACE",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
     # Diese Variablen schreiben zwar nicht in ein anderes Repo, deuten aber
     # seinen Commit-Graph um. Ein geerbtes Graft/Shallow-File darf eine echte
     # Divergenz niemals als Fast-forward erscheinen lassen.
-    "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
 }
 
 # Diese Variablen bestimmen, WELCHES Programm die SSH-Verbindung aufbaut. Ein
@@ -3410,25 +4223,9 @@ RAW_OBJECT_ENV = {
     "GIT_SHALLOW_FILE": os.devnull,
 }
 
-# Wie RAW_OBJECT_ENV, aber OHNE die leere Shallow-Datei — für den gesamten
-# Übertragungsweg (Preflight, Fetch, Push, Tracking-CAS).
-#
-# Ein flacher Klon (`git clone --depth`) hat seine Graph-Grenze zu Recht, und
-# `.git/shallow` ist genau die Datei, in der sie steht. Blindgestellt lief
-# `rev-list --left-right --count <head>...<target>` über die Grenze hinaus in
-# fehlende Eltern-Objekte, endete mit Exit 128, und `inspect_transfer()` meldete
-# `inspect-failed`: In einem flachen Klon funktionierten P und G deshalb NIE,
-# ohne dass die Meldung einen Grund nannte (Review-Fund 2026-09-10). Beim Fetch
-# war es schlimmer als kosmetisch — ohne die Datei handelt Git die
-# Shallow-Grenze mit der Gegenseite gar nicht erst aus.
-#
-# Der bewusst in Kauf genommene Preis (Entscheidung Daniel, 2026-09-10): Eine
-# repo-lokale `.git/shallow` begrenzt jetzt auch die Vorschau „was wird
-# veröffentlicht". In einem echten flachen Klon ist das richtig — dort endet
-# die Historie wirklich dort. In einem vollständigen Klon könnte eine von Hand
-# hineingelegte Datei die Liste der ausgehenden Commits kürzer aussehen lassen,
-# als der Push überträgt. Die Replace-Sperre und die leere Graft-Datei bleiben,
-# weil beide keinen gewöhnlichen Repo-Zustand beschreiben.
+# Flache Klone brauchen ihre echte .git/shallow beim Lesen und Übertragen.
+# Eine manuell gekürzte Historie kann auch die Vorschau verkürzen. Ersetzungen
+# und Grafts bleiben für diesen Pfad ausgeschaltet.
 TRANSFER_OBJECT_ENV = {
     **NO_REPLACE_ENV,
     "GIT_GRAFT_FILE": os.devnull,
@@ -3443,27 +4240,77 @@ TRANSFER_OBJECT_ENV = {
 # "der Hostschlüssel ist unbekannt" (einmal bestätigen — kein fehlender Login!).
 REMOTE_CHECK_CAUSES = (
     # (Ergebnis, Marker in der englischen Git-/SSH-Meldung)
-    ("dns", ("could not resolve host", "could not resolve hostname",
-             "name or service not known", "nodename nor servname",
-             "temporary failure in name resolution", "no address associated")),
-    ("unreachable", ("connection refused", "connection timed out",
-                     "no route to host", "network is unreachable",
-                     "operation timed out", "connection closed by remote host",
-                     "connection reset by peer", "couldn't connect to server",
-                     "failed to connect to")),
-    ("server", ("the requested url returned error: 5", "http code = 5",
-                "error: 502", "error: 503", "internal server error",
-                "service unavailable", "bad gateway")),
-    ("hostkey", ("host key verification failed", "no matching host key",
-                 "remote host identification has changed",
-                 "no ed25519 host key is known", "no rsa host key is known")),
-    ("auth", ("terminal prompts disabled", "could not read username",
-              "could not read password", "authentication failed",
-              "invalid username or password", "permission denied (publickey",
-              "no supported authentication methods")),
-    ("gone", ("repository not found", "not found", "does not appear to be a git repository",
-              "does not exist", "access denied", "the requested url returned error: 404",
-              "no such file or directory")),
+    (
+        "dns",
+        (
+            "could not resolve host",
+            "could not resolve hostname",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+            "no address associated",
+        ),
+    ),
+    (
+        "unreachable",
+        (
+            "connection refused",
+            "connection timed out",
+            "no route to host",
+            "network is unreachable",
+            "operation timed out",
+            "connection closed by remote host",
+            "connection reset by peer",
+            "couldn't connect to server",
+            "failed to connect to",
+        ),
+    ),
+    (
+        "server",
+        (
+            "the requested url returned error: 5",
+            "http code = 5",
+            "error: 502",
+            "error: 503",
+            "internal server error",
+            "service unavailable",
+            "bad gateway",
+        ),
+    ),
+    (
+        "hostkey",
+        (
+            "host key verification failed",
+            "no matching host key",
+            "remote host identification has changed",
+            "no ed25519 host key is known",
+            "no rsa host key is known",
+        ),
+    ),
+    (
+        "auth",
+        (
+            "terminal prompts disabled",
+            "could not read username",
+            "could not read password",
+            "authentication failed",
+            "invalid username or password",
+            "permission denied (publickey",
+            "no supported authentication methods",
+        ),
+    ),
+    (
+        "gone",
+        (
+            "repository not found",
+            "not found",
+            "does not appear to be a git repository",
+            "does not exist",
+            "access denied",
+            "the requested url returned error: 404",
+            "no such file or directory",
+        ),
+    ),
 )
 
 # Die Teilmenge der "auth"-Marker, die den Weg ueber einen Credential-Helper
@@ -3474,8 +4321,10 @@ REMOTE_CHECK_CAUSES = (
 # zu entschuldigen behauptete, der Login sei in Ordnung, und schickte die
 # Fehlersuche in die falsche Richtung.
 CREDENTIAL_HELPER_MARKERS = (
-    "terminal prompts disabled", "could not read username",
-    "could not read password", "authentication failed",
+    "terminal prompts disabled",
+    "could not read username",
+    "could not read password",
+    "authentication failed",
     "invalid username or password",
 )
 
@@ -3508,8 +4357,9 @@ def keychain_session() -> bool:
             _KEYCHAIN_SESSION = True
         else:
             try:
-                out = subprocess.run(["launchctl", "managername"],
-                                     capture_output=True, text=True, timeout=5)
+                out = subprocess.run(
+                    ["launchctl", "managername"], capture_output=True, text=True, timeout=5
+                )
                 # Nur eine erfolgreiche Abfrage ist auswertbar. Bei jedem anderen
                 # Exit-Code ist stdout meist leer — das ergäbe "nicht Aqua" und
                 # damit dauerhaft (der Wert wird gemerkt) die Ausrede
@@ -3525,8 +4375,9 @@ def keychain_session() -> bool:
     return _KEYCHAIN_SESSION
 
 
-def classify_remote_check(result: subprocess.CompletedProcess, *,
-                          keychain_helper: bool = False) -> str:
+def classify_remote_check(
+    result: subprocess.CompletedProcess, *, keychain_helper: bool = False
+) -> str:
     """Warum ist der Zugriff auf das Remote gescheitert?
 
     Liefert "dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
@@ -3543,15 +4394,20 @@ def classify_remote_check(result: subprocess.CompletedProcess, *,
     text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
     for cause, markers in REMOTE_CHECK_CAUSES:
         if any(marker in text for marker in markers):
-            if (cause == "auth" and keychain_helper and not keychain_session()
-                    and any(m in text for m in CREDENTIAL_HELPER_MARKERS)):
+            if (
+                cause == "auth"
+                and keychain_helper
+                and not keychain_session()
+                and any(m in text for m in CREDENTIAL_HELPER_MARKERS)
+            ):
                 return "nokeychain"
             return cause
     return "unknown"
 
 
-def credentials_missing(result: subprocess.CompletedProcess, *,
-                        keychain_helper: bool = False) -> bool:
+def credentials_missing(
+    result: subprocess.CompletedProcess, *, keychain_helper: bool = False
+) -> bool:
     """Fehlen wirklich Zugangsdaten? (Ein unbekannter Hostschlüssel ist etwas anderes.)
 
     Bei "nokeychain" bewusst False: Dort fehlen keine Zugangsdaten, sie sind nur
@@ -3560,8 +4416,9 @@ def credentials_missing(result: subprocess.CompletedProcess, *,
     return classify_remote_check(result, keychain_helper=keychain_helper) == "auth"
 
 
-def remote_uses_keychain_helper(repo: Path, name: str, timeout: int, *,
-                                for_push: bool = False) -> bool:
+def remote_uses_keychain_helper(
+    repo: Path, name: str, timeout: int, *, for_push: bool = False
+) -> bool:
     """Positiv belegen, dass dieses Remote einen Keychain-Helper verwendet.
 
     Eine Nicht-Aqua-Sitzung allein beweist keine Schlüsselbundursache. Erst der
@@ -3585,13 +4442,12 @@ def remote_uses_keychain_helper(repo: Path, name: str, timeout: int, *,
             parsed = urllib.parse.urlsplit(url)
         except ValueError:
             continue
-        if (parsed.scheme.lower() not in ("http", "https")
-                or display_remote_url(url) != url):
+        if parsed.scheme.lower() not in ("http", "https") or display_remote_url(url) != url:
             continue
         try:
             result = run_git(
-                repo, "config", "--get-urlmatch", "credential.helper", url,
-                timeout=timeout)
+                repo, "config", "--get-urlmatch", "credential.helper", url, timeout=timeout
+            )
         except (subprocess.TimeoutExpired, OSError):
             # Diese Abfrage ist nur eine nachgelagerte Diagnose. Ihr eigener
             # Fehler darf die eigentliche Fetch-/Push-Meldung nicht verdecken.
@@ -3609,15 +4465,15 @@ def remote_uses_keychain_helper(repo: Path, name: str, timeout: int, *,
                 continue
             if not shell_helper and words == ["osxkeychain"]:
                 return True
-            if (len(words) == 3
-                    and words[1:3] == ["auth", "git-credential"]):
+            if len(words) == 3 and words[1:3] == ["auth", "git-credential"]:
                 executable = Path(words[0])
-                if (shell_helper and words[0] == "gh"
-                        and shutil.which("gh") is not None):
+                if shell_helper and words[0] == "gh" and shutil.which("gh") is not None:
                     return True
-                if (executable.is_absolute()
-                        and executable.name == "gh"
-                        and os.access(executable, os.X_OK)):
+                if (
+                    executable.is_absolute()
+                    and executable.name == "gh"
+                    and os.access(executable, os.X_OK)
+                ):
                     return True
     return False
 
@@ -3651,6 +4507,7 @@ def redact_remote_error(line: str) -> str:
     Info-Seite und über error_long auch in --json; deshalb wird schon an der
     Eingangsgrenze redigiert, nicht erst bei der Anzeige.
     """
+
     def redact_userinfo(match: re.Match) -> str:
         scheme_prefix, userinfo = match.groups()
         scheme = scheme_prefix[:-3].lower()
@@ -3676,9 +4533,9 @@ def last_error_line(result: subprocess.CompletedProcess) -> str:
     # `hint:` ist Gits Ratgeberzeile, nie die Ursache — und sie steht oft ZULETZT
     # (etwa nach einem abgelehnten Push). Als Beleg genommen verdraengte sie die
     # eigentliche Fehlermeldung. Dank LC_ALL=C ist das Praefix stabil englisch.
-    detailed = [line for line in lines
-                if "could not fetch" not in line
-                and not line.startswith("hint:")]
+    detailed = [
+        line for line in lines if "could not fetch" not in line and not line.startswith("hint:")
+    ]
     return redact_remote_error((detailed or lines or [""])[-1])
 
 
@@ -3692,19 +4549,21 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     """
     try:
         remote = read_remote_configs(repo, timeout_config(timeout)).get(name)
-        if (remote is None or remote.fetch_invalid_reason
-                or len(remote.fetch_urls) != 1 or not remote.fetch_targets):
+        if (
+            remote is None
+            or remote.fetch_invalid_reason
+            or len(remote.fetch_urls) != 1
+            or not remote.fetch_targets
+        ):
             return "unsafe_url", 0, ""
         fetch_url = remote_fetch_url(remote)
-        if not _argv_safe_remote_url(fetch_url):
+        if fetch_url is None or not _argv_safe_remote_url(fetch_url):
             return "unsafe_url", 0, ""
         override = repo_transport_override(repo, timeout)
         if override is not None:
             return "unsafe_transport", 0, override
-        pin_config, pinned_url = _pinned_url_config(fetch_url)
-        r = run_git_logged(
-            repo, *pin_config, "ls-remote", "--heads", "--", pinned_url,
-            timeout=timeout)
+        pinned_url = _PinnedRemoteURL(fetch_url)
+        r = run_git_logged(repo, "ls-remote", "--heads", "--", pinned_url, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout", 0, ""
     except (GitReadError, OSError, ValueError, RuntimeError) as exc:
@@ -3712,9 +4571,11 @@ def check_remote(repo: Path, name: str, timeout: int) -> tuple[str, int, str]:
     if r.returncode == 0:
         refs = [line for line in r.stdout.splitlines() if line.strip()]
         return ("ok" if refs else "empty"), len(refs), ""
-    return classify_remote_check(
-        r, keychain_helper=remote_uses_keychain_helper(repo, name, timeout)
-    ), 0, last_error_line(r)[:160]
+    return (
+        classify_remote_check(r, keychain_helper=remote_uses_keychain_helper(repo, name, timeout)),
+        0,
+        last_error_line(r)[:160],
+    )
 
 
 def remote_failure_short(name: str, outcome: str) -> str:
@@ -3728,8 +4589,7 @@ def remote_failure_short(name: str, outcome: str) -> str:
     return f"{name}: {t(key)}" if key in TR else f"{name}: {outcome}"
 
 
-def remote_check_message(name: str, outcome: str, refs: int, detail: str,
-                         timeout: int) -> str:
+def remote_check_message(name: str, outcome: str, refs: int, detail: str, timeout: int) -> str:
     """Prüfergebnis als fertiger, erklärender Satz für die Meldungszeile."""
     if outcome == "ok":
         return t("check_ok", r=name, n=refs)
@@ -3738,9 +4598,11 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
     if outcome == "timeout":
         return t("check_timeout", r=name, s=timeout)
     if outcome == "unsafe_transport":
-        return t("check_unsafe_transport", r=name,
-                 k=detail or " / ".join(
-                     shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
+        return t(
+            "check_unsafe_transport",
+            r=name,
+            k=detail or " / ".join(shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS),
+        )
     if outcome == "detached":
         return t("check_detached", r=name)
     if outcome == "unsafe_refspec":
@@ -3751,8 +4613,7 @@ def remote_check_message(name: str, outcome: str, refs: int, detail: str,
         return t("check_changed", r=name)
     if outcome == "outcome_unknown":
         return t("check_outcome_unknown", r=name)
-    if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "nokeychain",
-                   "gone"):
+    if outcome in ("dns", "unreachable", "server", "hostkey", "auth", "nokeychain", "gone"):
         return t("check_" + outcome, r=name)
     return t("check_unknown", r=name, e=detail or outcome)
 
@@ -3762,16 +4623,21 @@ def summarize_fetch_failures(st: RepoStatus) -> None:
     failed = [remote for remote in st.remotes if remote.fetch_failed]
     if not failed:
         return
-    st.error = "; ".join(remote_failure_short(
-        remote.name, remote.fetch_outcome or "unknown") for remote in failed)
+    st.error = "; ".join(
+        remote_failure_short(remote.name, remote.fetch_outcome or "unknown") for remote in failed
+    )
     st.error_long = " ".join(
-        remote.fetch_error_long or remote_check_message(
-            remote.name, remote.fetch_outcome or "unknown", 0,
-            remote.fetch_error_detail, 0)
-        for remote in failed)
+        remote.fetch_error_long
+        or remote_check_message(
+            remote.name, remote.fetch_outcome or "unknown", 0, remote.fetch_error_detail, 0
+        )
+        for remote in failed
+    )
     st.error_detail = " | ".join(
         f"{remote.name}: {remote.fetch_error_detail}"
-        for remote in failed if remote.fetch_error_detail)
+        for remote in failed
+        if remote.fetch_error_detail
+    )
     st.remote_state = "error"
     st.fetch_error = True
 
@@ -3780,57 +4646,33 @@ class GitCancelled(RuntimeError):
     """Der Aufruf wurde abgebrochen, bevor er starten konnte."""
 
 
-# Beim Beenden waehrend eines Hintergrund-Scans muss Schluss sein: laufende
-# Git-Aufrufe werden getoetet, neue gar nicht erst gestartet. Ohne das liefen
-# Git und das davon gestartete ssh nach dem Ende der Oberflaeche weiter — genau
-# die verwaisten Prozesse, die dieses Programm sonst ueberall vermeidet.
-_CANCEL = threading.Event()
-_LIVE_PROCESSES: set = set()
-# Dieselbe Sperre schuetzt Start UND Abbruch. Nur so kann zwischen der Pruefung
-# des Abbruchs und dem Popen kein Prozess entstehen, den der Abbruch nicht mehr
-# sieht. Sie serialisiert nur fork/exec (Bruchteile einer Millisekunde), nicht
-# das Warten auf Git.
-_LIVE_LOCK = threading.Lock()
 _GIT_CONTEXT = threading.local()
 
 
 class GitCallScope:
     """Abbruchgrenze eines Scans; unabhängige Vordergrundaktionen bleiben aktiv."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.cancelled = threading.Event()
-        self.processes: set = set()
+        self.processes: set[subprocess.Popen[bytes]] = set()
+        self.lock = threading.Lock()
 
     def cancel(self) -> None:
-        with _LIVE_LOCK:
+        with self.lock:
             self.cancelled.set()
             live = list(self.processes)
         for proc in live:
             _kill_process_group(proc)
 
-    def call(self, function, *args):
+    def call(self, function, *args, **kwargs):
         previous = getattr(_GIT_CONTEXT, "scope", None)
         _GIT_CONTEXT.scope = self
         try:
             if self.cancelled.is_set():
                 raise GitCancelled("scan cancelled")
-            return function(*args)
+            return function(*args, **kwargs)
         finally:
             _GIT_CONTEXT.scope = previous
-
-
-def cancel_git_calls() -> None:
-    """Laufende Git-Aufrufe beenden und weitere verhindern."""
-    with _LIVE_LOCK:
-        _CANCEL.set()
-        live = list(_LIVE_PROCESSES)
-    for proc in live:
-        _kill_process_group(proc)
-
-
-def resume_git_calls() -> None:
-    """Die Sperre wieder aufheben (nach einem abgebrochenen Lauf)."""
-    _CANCEL.clear()
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
@@ -3864,8 +4706,7 @@ def _decode_process_output(output: bytes | str | None) -> str:
     return output if isinstance(output, str) else (output or b"").decode("utf-8", "surrogateescape")
 
 
-def _stop_and_collect_process_group(
-        proc: subprocess.Popen) -> tuple[str, str]:
+def _stop_and_collect_process_group(proc: subprocess.Popen) -> tuple[str, str]:
     """Eine eigene Prozessgruppe beenden und höchstens fünf Sekunden einsammeln."""
     _kill_process_group(proc)
     try:
@@ -3877,9 +4718,9 @@ def _stop_and_collect_process_group(
         return "", ""
 
 
-def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
-                       env: dict[str, str] | None = None
-                       ) -> subprocess.CompletedProcess:
+def _run_process_group(
+    cmd: list[str], *, stdin, timeout: int | None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     """Einen Prozess mit eigener, bei Timeout vollständig beendeter Gruppe starten.
 
     Der einzige Lebenslauf für Kindprozesse dieses Programms: `run_git()` baut
@@ -3893,29 +4734,30 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
     der ssh-agent funktioniert davon unberührt weiter.
     """
     scope = getattr(_GIT_CONTEXT, "scope", None)
-    with _LIVE_LOCK:
-        # Nach einem Abbruch gar nicht erst starten: Ein Fetch, der jetzt noch
-        # losliefe, haenge bis zu seinem eigenen Timeout und hielte das Beenden
-        # der Oberflaeche genauso lange auf.
-        if _CANCEL.is_set() or (scope is not None and scope.cancelled.is_set()):
+    lock = scope.lock if scope is not None else contextlib.nullcontext()
+    with lock:
+        # Abbruch und Registrierung teilen den Lock. Sonst könnte ein Prozess
+        # zwischen der Abbruchprüfung und der Registrierung starten.
+        if scope is not None and scope.cancelled.is_set():
             raise GitCancelled(" ".join(str(part) for part in cmd[:3]))
         proc = subprocess.Popen(
-            cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=False,
             env=env,
             start_new_session=True,
         )
-        _LIVE_PROCESSES.add(proc)
         if scope is not None:
             scope.processes.add(proc)
     with proc:
         try:
-            out, err = proc.communicate(timeout=timeout)
-            out, err = _decode_process_output(out), _decode_process_output(err)
-        except subprocess.TimeoutExpired:
+            raw_out, raw_err = proc.communicate(timeout=timeout)
+            out, err = _decode_process_output(raw_out), _decode_process_output(raw_err)
+        except subprocess.TimeoutExpired as exc:
             out, err = _stop_and_collect_process_group(proc)
-            raise subprocess.TimeoutExpired(
-                cmd, timeout, output=out, stderr=err) from None
+            raise subprocess.TimeoutExpired(cmd, exc.timeout, output=out, stderr=err) from None
         except BaseException:
             # Absichtlich BaseException statt Exception: Strg-C
             # (`KeyboardInterrupt`) und `SystemExit` erben nicht von Exception.
@@ -3927,17 +4769,15 @@ def _run_process_group(cmd: list[str], *, stdin, timeout: int | None,
             _stop_and_collect_process_group(proc)
             raise
         finally:
-            with _LIVE_LOCK:
-                _LIVE_PROCESSES.discard(proc)
-                if scope is not None:
+            if scope is not None:
+                with scope.lock:
                     scope.processes.discard(proc)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def _pinned_remote_url(args: tuple | list) -> tuple[str, str] | None:
     """Die einzige URL-Bindung dieses Aufrufs als (URL, Alias) — sonst None."""
-    pins = {(arg.remote_url, str(arg)) for arg in args
-            if isinstance(arg, _PinnedRemoteURL)}
+    pins = {(arg.remote_url, str(arg)) for arg in args if isinstance(arg, _PinnedRemoteURL)}
     if not pins:
         return None
     if len(pins) != 1:
@@ -3962,7 +4802,7 @@ def _git_config_entries(args: tuple | list) -> list[tuple[str, str]]:
         # Graph liest, acht Zeilen Veralterungshinweis auf stderr — auch bei
         # jedem Fetch und jedem Push. Diese Zeilen erklaeren nichts, stehen aber
         # mit im Beleg, aus dem gmf die Ursache eines gescheiterten Zugriffs
-        # nennt (Daniel, 2026-09-10). Der Schalter steht bewusst hier und nicht
+        # nennt. Der Schalter steht bewusst hier und nicht
         # nur im ausgefuehrten Aufruf: Protokoll und Ausfuehrung nennen
         # dieselbe Ersatzkonfiguration, genau wie `core.fsmonitor` daneben.
         ("advice.graftFileDeprecated", "false"),
@@ -3970,16 +4810,18 @@ def _git_config_entries(args: tuple | list) -> list[tuple[str, str]]:
     pin = _pinned_remote_url(args)
     if pin is not None:
         remote_url, alias = pin
-        entries.extend((
-            (f"url.{remote_url}.insteadOf", alias),
-            (f"url.{remote_url}.pushInsteadOf", alias),
-            # Die gepinnte URL bindet die Adresse, nicht den Weg dorthin. Ein
-            # `core.sshCommand` aus der Repo-Konfiguration könnte Host und Pfad
-            # ignorieren und die Verbindung woanders aufbauen; siehe
-            # TRANSPORT_GIT_ENV. Deshalb gilt für gebundene Transfers das
-            # gewöhnliche `ssh`.
-            ("core.sshCommand", "ssh"),
-        ))
+        entries.extend(
+            (
+                (f"url.{remote_url}.insteadOf", alias),
+                (f"url.{remote_url}.pushInsteadOf", alias),
+                # Die gepinnte URL bindet die Adresse, nicht den Weg dorthin. Ein
+                # `core.sshCommand` aus der Repo-Konfiguration könnte Host und Pfad
+                # ignorieren und die Verbindung woanders aufbauen; siehe
+                # TRANSPORT_GIT_ENV. Deshalb gilt für gebundene Transfers das
+                # gewöhnliche `ssh`.
+                ("core.sshCommand", "ssh"),
+            )
+        )
     return entries
 
 
@@ -3996,19 +4838,24 @@ def _git_config_env(entries: list[tuple[str, str]]) -> dict[str, str]:
     return env
 
 
-def run_git(repo: Path, *args: str, timeout: int = 10,
-            env: dict | None = None) -> subprocess.CompletedProcess:
+def run_git(
+    repo: Path, *args: str, timeout: int = 10, env: dict | None = None
+) -> subprocess.CompletedProcess:
     cmd = ["git", "-C", str(repo), *args]
     child_env = dict(os.environ)
     for key in list(child_env):
-        if (key == "GIT_CONFIG_PARAMETERS" or key == "GIT_CONFIG_COUNT"
-                or re.fullmatch(r"GIT_CONFIG_(?:KEY|VALUE)_\d+", key)):
+        if (
+            key == "GIT_CONFIG_PARAMETERS"
+            or key == "GIT_CONFIG_COUNT"
+            or re.fullmatch(r"GIT_CONFIG_(?:KEY|VALUE)_\d+", key)
+        ):
             child_env.pop(key, None)
     for key in REPOSITORY_GIT_ENV:
         child_env.pop(key, None)
     if env:
-        child_env.update({key: value for key, value in env.items()
-                          if key not in REPOSITORY_GIT_ENV})
+        child_env.update(
+            {key: value for key, value in env.items() if key not in REPOSITORY_GIT_ENV}
+        )
         if "GIT_INDEX_FILE" in env:
             child_env["GIT_INDEX_FILE"] = env["GIT_INDEX_FILE"]
         if env.get("GIT_GRAFT_FILE") == os.devnull:
@@ -4024,8 +4871,7 @@ def run_git(repo: Path, *args: str, timeout: int = 10,
             child_env.pop(key, None)
     child_env.update(_git_config_env(config_entries))
     child_env.update(NONINTERACTIVE_GIT_ENV)
-    return _run_process_group(cmd, stdin=subprocess.DEVNULL, timeout=timeout,
-                              env=child_env)
+    return _run_process_group(cmd, stdin=subprocess.DEVNULL, timeout=timeout, env=child_env)
 
 
 # Protokoll der Befehle, die diese Sitzung bewusst abgesetzt hat (Reihenfolge = Verlauf).
@@ -4038,10 +4884,10 @@ COMMAND_LOG_MAX = 200
 
 def format_git_command(args: tuple[str, ...] | list[str]) -> str:
     """Den Befehl so schreiben, wie man ihn im Repo-Ordner selbst eintippen würde."""
+
     def visible_quote(value) -> str:
         value = str(value)
-        return (shlex.quote(value) if terminal_text(value) == value
-                else zsh_quote(value))
+        return shlex.quote(value) if terminal_text(value) == value else zsh_quote(value)
 
     prefix = ""
     if _pinned_remote_url(args) is not None:
@@ -4051,15 +4897,14 @@ def format_git_command(args: tuple[str, ...] | list[str]) -> str:
         # geerbten SSH-Wrapper-Variablen (TRANSPORT_GIT_ENV), und ohne dieselbe
         # Angabe liefe der kopierte Befehl über einen anderen Transportweg.
         prefix = " ".join(
-            f"{key}={visible_quote(value)}" for key, value
-            in _git_config_env(_git_config_entries(args)).items())
-        prefix += " env " + " ".join(
-            f"-u {key}" for key in sorted(TRANSPORT_GIT_ENV)) + " "
+            f"{key}={visible_quote(value)}"
+            for key, value in _git_config_env(_git_config_entries(args)).items()
+        )
+        prefix += " env " + " ".join(f"-u {key}" for key in sorted(TRANSPORT_GIT_ENV)) + " "
     return prefix + "git " + " ".join(visible_quote(a) for a in args)
 
 
-def commit_undo_command(head_before: str | None, head_after: str,
-                        head_ref: str) -> str:
+def commit_undo_command(head_before: str | None, head_after: str, head_ref: str) -> str:
     """Passenden Rückgängig-Befehl für einen gerade erzeugten Commit liefern.
 
     Beide Seiten sind an volle OIDs gebunden, zusätzlich steht der freigegebene
@@ -4068,16 +4913,13 @@ def commit_undo_command(head_before: str | None, head_after: str,
     bleiben erhalten, also wie bei einem weichen Reset.
     """
     if head_before is None:
-        return format_git_command(
-            safe_update_ref_args(
-                "--no-deref", "-d", head_ref, head_after))
-    return format_git_command(
-        safe_update_ref_args(
-            "--no-deref", head_ref, head_before, head_after))
+        return format_git_command(safe_update_ref_args("--no-deref", "-d", head_ref, head_after))
+    return format_git_command(safe_update_ref_args("--no-deref", head_ref, head_before, head_after))
 
 
-def log_command(repo: Path, args: tuple[str, ...] | list[str],
-                returncode: int | None = None) -> str:
+def log_command(
+    repo: Path, args: tuple[str, ...] | list[str], returncode: int | None = None
+) -> str:
     """Einen abgesetzten Git-Befehl protokollieren und die Protokollzeile liefern."""
     mark = "…" if returncode is None else ("✔" if returncode == 0 else "✘")
     line = f"{mark} {repo.name}: {format_git_command(args)}"
@@ -4100,8 +4942,9 @@ def log_cancelled(repo: Path, args: tuple[str, ...] | list[str]) -> str:
     return line
 
 
-def run_git_logged(repo: Path, *args: str, timeout: int = 10,
-                   env: dict | None = None) -> subprocess.CompletedProcess:
+def run_git_logged(
+    repo: Path, *args: str, timeout: int = 10, env: dict | None = None
+) -> subprocess.CompletedProcess:
     """Wie run_git, protokolliert den Aufruf aber für die Befehlsansicht (H)."""
     try:
         r = run_git(repo, *args, timeout=timeout, env=env)
@@ -4125,8 +4968,15 @@ def timeout_message(exc: subprocess.TimeoutExpired) -> str:
     # verwendet etwa zwei `-c <key=value>`-Paare vor `fetch`/`push`; die Meldung
     # soll trotzdem den verständlichen Unterbefehl nennen.
     index = 3
-    takes_value = {"-c", "--config-env", "-C", "--git-dir", "--work-tree",
-                   "--namespace", "--super-prefix"}
+    takes_value = {
+        "-c",
+        "--config-env",
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+    }
     while index < len(cmd):
         token = cmd[index]
         if token in takes_value:
@@ -4144,8 +4994,9 @@ class GitReadError(RuntimeError):
     pass
 
 
-def _required_git(repo: Path, *args: str, timeout: int = 10,
-                  env: dict | None = None) -> subprocess.CompletedProcess:
+def _required_git(
+    repo: Path, *args: str, timeout: int = 10, env: dict | None = None
+) -> subprocess.CompletedProcess:
     r = run_git(repo, *args, timeout=timeout, env=env)
     if r.returncode != 0:
         raise GitReadError("git %s failed (exit %d)" % (args[0], r.returncode))
@@ -4185,6 +5036,7 @@ def _canonical_network_path(path: str) -> str:
     codierter Punkt bleibt codiert, damit `%2e%2e` niemals durch `normpath()`
     zum Elternsegment einer anderen Remote-Adresse wird.
     """
+
     def replace(match: re.Match) -> str:
         value = int(match.group(1), 16)
         char = chr(value)
@@ -4205,7 +5057,7 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     path = raw
     user = ""
     scheme = ""
-    home_relative = False   # Pfad wird im Home-Verzeichnis des SSH-Benutzers aufgelöst
+    home_relative = False  # Pfad wird im Home-Verzeichnis des SSH-Benutzers aufgelöst
     if "://" not in raw and ":" in raw and not raw.startswith(("/", "./", "../", "~")):
         hostpart, rest = raw.split(":", 1)
         if "/" not in hostpart:
@@ -4259,17 +5111,19 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
             repo_id = repo_id[:-4]
         # Auch "~"-Pfade (ssh://host/~/repo, host:~/repo) hängen am Benutzer.
         home_relative = home_relative or (
-            scheme in {"scp", "ssh", "git+ssh", "ssh+git"}
-            and repo_id.startswith("/~"))
+            scheme in {"scp", "ssh", "git+ssh", "ssh+git"} and repo_id.startswith("/~")
+        )
         # Der Standardport gehört nicht in die Identität: `ssh://host/x` und
         # `ssh://host:22/x` sind dasselbe Repo. Verglichen wird das
         # kleingeschriebene Schema, nicht der Rohtext — sonst galt `SSH://…:22`
         # als anderes Ziel als `ssh://…`, und eine gewöhnliche Konfiguration
         # war ohne Not blockiert. `git+ssh`/`ssh+git` sprechen ebenfalls SSH.
-        default_port = ((scheme in {"ssh", "git+ssh", "ssh+git"} and port == 22)
-                        or (scheme == "https" and port == 443)
-                        or (scheme == "http" and port == 80)
-                        or (scheme == "git" and port == 9418))
+        default_port = (
+            (scheme in {"ssh", "git+ssh", "ssh+git"} and port == 22)
+            or (scheme == "https" and port == 443)
+            or (scheme == "http" and port == 80)
+            or (scheme == "git" and port == 9418)
+        )
         # Der Benutzername bleibt aus der Anzeige (repo_id) heraus, gehört bei
         # benutzerabhängigen Pfaden aber in die Identität: sonst gälten zwei
         # verschiedene Home-Verzeichnisse als dasselbe Ziel — und ein
@@ -4277,44 +5131,62 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
         qualifier = f"~{user}" if home_relative else ""
         canonical = json.dumps(
             ["network", host, None if default_port else port, qualifier, repo_id],
-            separators=(",", ":"))
+            separators=(",", ":"),
+        )
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
     return RemoteTarget(host, repo_id, fingerprint, is_local)
 
 
-def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
-    """Read every effective fetch/push target; any Git read error is fatal."""
+def read_remote_configs(
+    repo: Path, cfg: dict, *, name: str | None = None
+) -> dict[str, RemoteConfig]:
+    """Read effective fetch/push targets, optionally for one named remote."""
     t_ = cfg["git_timeout"]
-    names_r = _required_git(repo, "remote", timeout=t_)
+    if name is None:
+        names_r = _required_git(repo, "remote", timeout=t_)
+        names = [line for line in names_r.stdout.split("\n") if line]
+        if not names:
+            return {}
+        pattern = r"^remote\."
+    else:
+        names = [name]
+        pattern = r"^remote\.%s\.[a-z][a-z0-9-]*$" % re.escape(name)
+
+    raw = _required_git(repo, "config", "--null", "--get-regexp", pattern, timeout=t_).stdout
+    if not raw.endswith("\0"):
+        raise GitReadError("git config returned malformed remote settings")
+    settings_by_name: dict[str, list[tuple[str, str]]] = {}
+    for record in raw[:-1].split("\0"):
+        key, separator, value = record.partition("\n")
+        # Der Unterabschnitt ist case-sensitiv und kann selbst Punkte enthalten.
+        section, _, setting = key.rpartition(".")
+        if section.startswith("remote."):
+            settings = settings_by_name.setdefault(section[len("remote.") :], [])
+            if separator:
+                settings.append((setting, value))
+
     result = {}
-    for name in [line for line in names_r.stdout.split("\n") if line]:
-        raw_r = _required_git(
-            repo, "config", "--null", "--get-regexp",
-            r"^remote\.%s\." % re.escape(name), timeout=t_)
-        prefix = f"remote.{name}."
-        settings = []
-        for record in raw_r.stdout.split("\0"):
-            key, separator, value = record.partition("\n")
-            if separator and key.lower().startswith(prefix.lower()):
-                settings.append((key[len(prefix):], value))
-        fetch_r = _required_git(repo, "remote", "get-url", "--all", "--", name,
-                                timeout=t_)
-        push_r = _required_git(repo, "remote", "get-url", "--push", "--all", "--", name,
-                               timeout=t_)
+    for remote_name in names:
+        # Ohne Config-Eintrag kann get-url auf eine ältere Datei in
+        # $GIT_DIR/remotes zurückfallen, die git remote nicht inventarisiert.
+        if remote_name not in settings_by_name:
+            raise GitReadError("remote configuration missing")
+        fetch_r = _required_git(repo, "remote", "get-url", "--all", "--", remote_name, timeout=t_)
+        push_r = _required_git(
+            repo, "remote", "get-url", "--push", "--all", "--", remote_name, timeout=t_
+        )
         fetch_urls = [line for line in fetch_r.stdout.splitlines() if line]
         push_urls = [line for line in push_r.stdout.splitlines() if line]
         if not fetch_urls or not push_urls:
             raise GitReadError("remote target is empty")
         try:
-            fetch_targets = [canonical_remote_target(url, repo)
-                             for url in fetch_urls]
+            fetch_targets = [canonical_remote_target(url, repo) for url in fetch_urls]
             fetch_invalid_reason = ""
         except (ValueError, RuntimeError, OSError):
             fetch_targets = []
             fetch_invalid_reason = "unsafe_url"
         try:
-            push_targets = [canonical_remote_target(url, repo)
-                            for url in push_urls]
+            push_targets = [canonical_remote_target(url, repo) for url in push_urls]
             push_invalid_reason = ""
         except (ValueError, RuntimeError, OSError):
             push_targets = []
@@ -4322,9 +5194,15 @@ def read_remote_configs(repo: Path, cfg: dict) -> dict[str, RemoteConfig]:
         # Eine kaputte Seite sperrt nur die Richtung dieses Remotes. Andere
         # Remotes — und ein sicherer Fetch bei kaputter Push-URL — bleiben
         # funktionsfähig; Roh-URLs gelangen dabei nie in UI oder JSON.
-        result[name] = RemoteConfig(
-            name, fetch_urls, push_urls, fetch_targets, push_targets, settings,
-            fetch_invalid_reason, push_invalid_reason,
+        result[remote_name] = RemoteConfig(
+            remote_name,
+            fetch_urls,
+            push_urls,
+            fetch_targets,
+            push_targets,
+            settings_by_name[remote_name],
+            fetch_invalid_reason,
+            push_invalid_reason,
         )
     return result
 
@@ -4338,8 +5216,7 @@ def timeout_config(timeout: int) -> dict:
     return {**DEFAULT_CONFIG, "git_timeout": timeout}
 
 
-def read_remote_config_or_none(repo: Path, cfg: dict,
-                               name: str) -> RemoteConfig | None:
+def read_remote_config_or_none(repo: Path, cfg: dict, name: str) -> RemoteConfig | None:
     """Ein einzelnes Remote lesen; jeder Lesefehler gilt als nicht belegbar.
 
     Die Aufrufer treffen damit Sicherheitsentscheidungen: Ist die Config noch
@@ -4350,14 +5227,14 @@ def read_remote_config_or_none(repo: Path, cfg: dict,
     auseinanderläuft.
     """
     try:
-        return read_remote_configs(repo, cfg).get(name)
-    except (subprocess.TimeoutExpired, GitReadError, OSError,
-            ValueError, RuntimeError):
+        return read_remote_configs(repo, cfg, name=name).get(name)
+    except (subprocess.TimeoutExpired, GitReadError, OSError, ValueError, RuntimeError):
         return None
 
 
-def detect_sync_remote(repo: Path, cfg: dict,
-                       configs: dict[str, RemoteConfig] | None = None) -> str | None:
+def detect_sync_remote(
+    repo: Path, cfg: dict, configs: dict[str, RemoteConfig] | None = None
+) -> str | None:
     """Sync remote by configured name, then by exact normalized hostname."""
     configs = configs if configs is not None else read_remote_configs(repo, cfg)
     for name in cfg["sync_remote_names"]:
@@ -4367,8 +5244,10 @@ def detect_sync_remote(repo: Path, cfg: dict,
     # versehentlich leerer Eintrag in der Config träfe sonst jedes von ihnen.
     wanted = {host for host in map(_normal_host, cfg["sync_remote_hosts"]) if host}
     for name, remote in configs.items():
-        if any(not target.is_local and target.host in wanted
-               for target in remote.fetch_targets + remote.push_targets):
+        if any(
+            not target.is_local and target.host in wanted
+            for target in remote.fetch_targets + remote.push_targets
+        ):
             return name
     return None
 
@@ -4378,8 +5257,7 @@ def is_github_url(url: str) -> bool:
     return canonical_remote_target(url).is_github
 
 
-def endpoint_fingerprints(urls: list[str],
-                          targets: list[RemoteTarget]) -> list[str]:
+def endpoint_fingerprints(urls: list[str], targets: list[RemoteTarget]) -> list[str]:
     """Vergleichbare Ziel-Fingerabdrücke — auch für nicht auswertbare URLs.
 
     Scheitert `canonical_remote_target()`, gibt es kein kanonisches Ziel und
@@ -4393,8 +5271,10 @@ def endpoint_fingerprints(urls: list[str],
     """
     if len(targets) == len(urls):
         return [target.fingerprint for target in targets]
-    return ["invalid:" + hashlib.sha256(
-        url.encode("utf-8", "surrogateescape")).hexdigest()[:20] for url in urls]
+    return [
+        "invalid:" + hashlib.sha256(url.encode("utf-8", "surrogateescape")).hexdigest()[:20]
+        for url in urls
+    ]
 
 
 def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
@@ -4412,13 +5292,21 @@ def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
     So kostet der Normalfall — jedes Repo mit Commits — weiterhin genau einen
     Git-Aufruf.
     """
-    r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{ref}",
-                timeout=timeout, env=NO_REPLACE_ENV)
+    r = run_git(
+        repo,
+        "rev-list",
+        "--left-right",
+        "--count",
+        f"HEAD...{ref}",
+        timeout=timeout,
+        env=NO_REPLACE_ENV,
+    )
     if r.returncode != 0:
         if repo_has_head(repo, timeout):
             raise GitReadError("git rev-list failed (exit %d)" % r.returncode)
-        counted = _required_git(repo, "rev-list", "--count", ref, timeout=timeout,
-                                env=NO_REPLACE_ENV)
+        counted = _required_git(
+            repo, "rev-list", "--count", ref, timeout=timeout, env=NO_REPLACE_ENV
+        )
         return 0, int(counted.stdout.strip())
     values = r.stdout.split()
     if len(values) != 2:
@@ -4426,32 +5314,32 @@ def branch_delta(repo: Path, ref: str, timeout: int) -> tuple[int, int]:
     return int(values[0]), int(values[1])
 
 
-def remote_status_from_config(remote: RemoteConfig, sync_remote: str | None,
-                              branch: str) -> RemoteStatus:
+def remote_status_from_config(
+    remote: RemoteConfig, sync_remote: str | None, branch: str
+) -> RemoteStatus:
     name = remote.name
     targets = remote.fetch_targets + remote.push_targets
     public_classes = {target.is_github for target in targets}
-    fetch_fingerprints = endpoint_fingerprints(
-        remote.fetch_urls, remote.fetch_targets)
+    fetch_fingerprints = endpoint_fingerprints(remote.fetch_urls, remote.fetch_targets)
     state = RemoteStatus(
         name=name,
         public=True in public_classes,
         mixed_public=len(public_classes) > 1,
         is_sync=name == sync_remote,
-        fetch_fingerprint=(fetch_fingerprints[0]
-                           if len(fetch_fingerprints) == 1 else ""),
+        fetch_fingerprint=(fetch_fingerprints[0] if len(fetch_fingerprints) == 1 else ""),
         fetch_fingerprints=fetch_fingerprints,
-        push_fingerprints=endpoint_fingerprints(
-            remote.push_urls, remote.push_targets),
+        push_fingerprints=endpoint_fingerprints(remote.push_urls, remote.push_targets),
         target_mismatch=not remote.transfer_safe,
         multiple_pushurls=len(remote.push_targets) != 1,
         fetch_refspecs_safe=fetch_refspecs_safe(remote),
-        fetch_refspec_fingerprint=hashlib.sha256("\0".join(
-            value for key, value in remote.settings
-            if key.lower() == "fetch").encode(
-                "utf-8", "surrogateescape")).hexdigest()[:20],
-        branch_mapping_safe=(branch not in ("?", "(detached)")
-                             and fetch_maps_branch_exactly(remote, branch)),
+        fetch_refspec_fingerprint=hashlib.sha256(
+            "\0".join(value for key, value in remote.settings if key.lower() == "fetch").encode(
+                "utf-8", "surrogateescape"
+            )
+        ).hexdigest()[:20],
+        branch_mapping_safe=(
+            branch not in ("?", "(detached)") and fetch_maps_branch_exactly(remote, branch)
+        ),
         fetch_url_safe=remote_fetch_url_safe(remote),
         push_url_safe=remote_push_url_safe(remote),
     )
@@ -4463,44 +5351,61 @@ def valid_publication_excludes(value) -> bool:
         return False
     normalized = set()
     for target, paths in value.items():
-        if (not isinstance(target, str)
-                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target)
-                or target.casefold() in normalized
-                or not isinstance(paths, list)
-                or any(not valid_relative_git_path(path) for path in paths)):
+        if (
+            not isinstance(target, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target)
+            or target.casefold() in normalized
+            or not isinstance(paths, list)
+            or any(not valid_relative_git_path(path) for path in paths)
+        ):
             return False
         normalized.add(target.casefold())
     return True
 
 
-def compare_publication_content(repo: Path, head_oid: str, ref: str,
-                                remote: RemoteConfig, cfg: dict) -> tuple[bool, list[str]]:
+def compare_publication_content(
+    repo: Path, head_oid: str, ref: str, remote: RemoteConfig, cfg: dict
+) -> tuple[bool, list[str]]:
     rules = cfg.get("publication_excludes", {})
     if not valid_publication_excludes(rules):
         raise GitReadError("publication_excludes: " + t("publication_excludes_invalid"))
     if len(remote.fetch_targets) != 1 or not remote.fetch_targets[0].is_github:
         raise GitReadError(t("publication_target_ambiguous"))
     target = remote.fetch_targets[0].repo_id.lstrip("/").casefold()
-    paths = next((list(paths) for key, paths in rules.items()
-                  if key.casefold() == target), [])
+    paths: list[str] = next(
+        (list(excludes) for key, excludes in rules.items() if key.casefold() == target), []
+    )
     # Literale Ausschlüsse statt vom Repo steuerbarer Ignore-/Attributregeln.
     # Auch Dateimodi und Submodul-OIDs zählen als Inhalt; Textconv läuft nie.
     result = run_git(
-        repo, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
-        "--ignore-submodules=none", head_oid, ref, "--", ".",
+        repo,
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        head_oid,
+        ref,
+        "--",
+        ".",
         *(f":(top,exclude,literal){path}" for path in paths),
-        timeout=cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+        timeout=cfg["git_timeout"],
+        env=TRANSFER_OBJECT_ENV,
+    )
     if result.returncode not in (0, 1):
         raise GitReadError("git diff failed (exit %d)" % result.returncode)
     return result.returncode == 0, paths
 
 
-def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
-                            cfg: dict,
-                            configs: dict[str, RemoteConfig] | None = None,
-                            fetch_failures: dict[str, tuple[str, str, str]] | None = None,
-                            head_oid: str | None = ""
-                            ) -> list[RemoteStatus]:
+def collect_remote_statuses(
+    repo: Path,
+    branch: str,
+    sync_remote: str | None,
+    cfg: dict,
+    configs: dict[str, RemoteConfig] | None = None,
+    fetch_failures: dict[str, tuple[str, str, str]] | None = None,
+    head_oid: str | None = "",
+) -> list[RemoteStatus]:
     """Alle Remotes samt Branch-Delta lesen; öffentliche Remotes immer zuletzt.
 
     `fetch_failures` ordnet jedem gerade gescheiterten Remote Ursache, erklärenden
@@ -4517,22 +5422,26 @@ def collect_remote_statuses(repo: Path, branch: str, sync_remote: str | None,
         state.fetch_outcome, state.fetch_error_long, state.fetch_error_detail = failure
         if branch not in ("?", "(detached)"):
             ref = f"refs/remotes/{name}/{branch}"
-            r = run_git(repo, "show-ref", "--verify", "--quiet", ref,
-                        timeout=cfg["git_timeout"])
+            r = run_git(repo, "show-ref", "--verify", "--quiet", ref, timeout=cfg["git_timeout"])
             if r.returncode not in (0, 1):
                 raise GitReadError("git show-ref failed (exit %d)" % r.returncode)
             state.branch_exists = r.returncode == 0
             if state.branch_exists:
-                state.ahead, state.behind = branch_delta(
-                    repo, ref, cfg["git_timeout"])
+                state.ahead, state.behind = branch_delta(repo, ref, cfg["git_timeout"])
                 if state.public:
                     if head_oid == "":
                         head_oid = current_head(repo, cfg["git_timeout"])
                     if head_oid:
                         try:
-                            state.content_equal, state.content_excludes = compare_publication_content(
-                                repo, head_oid, ref, remote, cfg)
-                        except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+                            state.content_equal, state.content_excludes = (
+                                compare_publication_content(repo, head_oid, ref, remote, cfg)
+                            )
+                        except (
+                            GitReadError,
+                            OSError,
+                            ValueError,
+                            subprocess.SubprocessError,
+                        ) as exc:
                             state.content_error = str(exc)
         states.append(state)
     # Sync-Remote zuerst; GitHub unabhängig vom tatsächlichen Namen ganz rechts.
@@ -4553,26 +5462,32 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
     # `st.branch`; hier trifft sie nur die Anzeige, aber die Info-Seite nannte
     # denselben Branch dann oben `main` und im Block darunter `heads/main`
     # (Review-Fund 2026-09-10).
-    fields = ("%(HEAD)", "%(refname)", "%(upstream:short)", "%(upstream:track)",
-              "%(objectname)", "%(committerdate:short)", "%(contents:subject)",
-              "%(upstream:remotename)", "%(upstream)")
-    r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_,
-                env=NO_REPLACE_ENV)
+    fields = (
+        "%(HEAD)",
+        "%(refname)",
+        "%(upstream:short)",
+        "%(upstream:track)",
+        "%(objectname)",
+        "%(committerdate:short)",
+        "%(contents:subject)",
+        "%(upstream:remotename)",
+        "%(upstream)",
+    )
+    r = run_git(repo, "branch", "--format=" + "%00".join(fields), timeout=t_, env=NO_REPLACE_ENV)
     if r.returncode != 0:
         if strict:
             raise GitReadError("git branch failed (exit %d)" % r.returncode)
         return []
-    merged_r = run_git(repo, "branch", "--merged", "HEAD",
-                       "--format=%(refname)", timeout=t_,
-                       env=NO_REPLACE_ENV)
+    merged_r = run_git(
+        repo, "branch", "--merged", "HEAD", "--format=%(refname)", timeout=t_, env=NO_REPLACE_ENV
+    )
     if merged_r.returncode != 0 and strict and repo_has_head(repo, t_):
         raise GitReadError("git branch --merged failed (exit %d)" % merged_r.returncode)
 
     def branch_name(ref: str) -> str:
-        return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        return ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
 
-    merged = {branch_name(line)
-              for line in merged_r.stdout.split("\n") if line}
+    merged = {branch_name(line) for line in merged_r.stdout.split("\n") if line}
     branches = []
     for line in r.stdout.split("\n"):
         if not line.strip():
@@ -4592,14 +5507,22 @@ def read_branches(repo: Path, cfg: dict, *, strict: bool = False) -> list[Branch
         # "[gone]" oder leer.
         ahead = re.search(r"ahead (\d+)", track)
         behind = re.search(r"behind (\d+)", track)
-        branches.append(BranchInfo(
-            name=name, is_head=head.strip() == "*", upstream=upstream,
-            ahead=int(ahead.group(1)) if ahead else 0,
-            behind=int(behind.group(1)) if behind else 0,
-            upstream_gone="gone" in track,
-            oid=oid, date=date, subject=subject, merged=name in merged,
-            upstream_remote=upstream_remote, upstream_ref=upstream_ref,
-        ))
+        branches.append(
+            BranchInfo(
+                name=name,
+                is_head=head.strip() == "*",
+                upstream=upstream,
+                ahead=int(ahead.group(1)) if ahead else 0,
+                behind=int(behind.group(1)) if behind else 0,
+                upstream_gone="gone" in track,
+                oid=oid,
+                date=date,
+                subject=subject,
+                merged=name in merged,
+                upstream_remote=upstream_remote,
+                upstream_ref=upstream_ref,
+            )
+        )
     return branches
 
 
@@ -4614,10 +5537,15 @@ def is_object_id(value) -> bool:
 
 def read_ref_snapshot(repo: Path, timeout: int) -> dict[str, tuple[str, str]]:
     """Branch- und Remote-Refs samt direktem oder symbolischem Ziel festhalten."""
-    r = _required_git(repo, "for-each-ref",
-                      "--format=%(refname)%00%(objectname)%00%(symref)",
-                      "refs/heads", "refs/remotes", timeout=timeout,
-                      env=NO_REPLACE_ENV)
+    r = _required_git(
+        repo,
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(symref)",
+        "refs/heads",
+        "refs/remotes",
+        timeout=timeout,
+        env=NO_REPLACE_ENV,
+    )
     refs = {}
     for line in r.stdout.split("\n"):
         if not line:
@@ -4644,18 +5572,24 @@ def read_branch_inventory(repo: Path, cfg: dict) -> list[BranchInfo]:
     detached_oid = current_head(repo, timeout) if head_ref is None else None
     refs = read_ref_snapshot(repo, timeout)
     branches = read_branches(repo, cfg, strict=True)
-    expected = {name: oid for name, (oid, _) in refs.items()
-                if name.startswith("refs/heads/")}
+    expected = {name: oid for name, (oid, _) in refs.items() if name.startswith("refs/heads/")}
     if len(expected) != len(branches) or expected != {
-            "refs/heads/" + branch.name: branch.oid for branch in branches}:
+        "refs/heads/" + branch.name: branch.oid for branch in branches
+    }:
         raise GitReadError("local branches changed during inventory")
     expected_current = head_ref.removeprefix("refs/heads/") if head_ref in expected else None
     if next((b.name for b in branches if b.is_head), None) != expected_current:
         raise GitReadError("checked-out branch changed during inventory")
-    remote_oids = sorted({oid for name, (oid, symref) in refs.items()
-                          if name.startswith("refs/remotes/") and not symref})
-    shallow_value = _required_git(repo, "rev-parse", "--is-shallow-repository",
-                                  timeout=timeout).stdout.strip()
+    remote_oids = sorted(
+        {
+            oid
+            for name, (oid, symref) in refs.items()
+            if name.startswith("refs/remotes/") and not symref
+        }
+    )
+    shallow_value = _required_git(
+        repo, "rev-parse", "--is-shallow-repository", timeout=timeout
+    ).stdout.strip()
     if shallow_value not in ("true", "false"):
         raise GitReadError("git rev-parse returned malformed shallow state")
     shallow = shallow_value == "true"
@@ -4664,9 +5598,15 @@ def read_branch_inventory(repo: Path, cfg: dict) -> list[BranchInfo]:
     counts = {}
     for branch in branches:
         if branch.oid not in counts:
-            counted = _required_git(repo, "rev-list", "--count", branch.oid,
-                                    *(('--not', *remote_oids) if remote_oids else ()),
-                                    timeout=timeout, env=NO_REPLACE_ENV)
+            counted = _required_git(
+                repo,
+                "rev-list",
+                "--count",
+                branch.oid,
+                *(("--not", *remote_oids) if remote_oids else ()),
+                timeout=timeout,
+                env=NO_REPLACE_ENV,
+            )
             value = counted.stdout.strip()
             if not _NUMBER_RE.fullmatch(value):
                 raise GitReadError("git rev-list returned malformed branch coverage")
@@ -4676,8 +5616,9 @@ def read_branch_inventory(repo: Path, cfg: dict) -> list[BranchInfo]:
         branch.uncovered_commits = None if branch.coverage == "unknown" else count
     if read_ref_snapshot(repo, timeout) != refs:
         raise GitReadError("refs changed during branch inventory")
-    if (current_symbolic_head_ref(repo, timeout) != head_ref or
-            (head_ref is None and current_head(repo, timeout) != detached_oid)):
+    if current_symbolic_head_ref(repo, timeout) != head_ref or (
+        head_ref is None and current_head(repo, timeout) != detached_oid
+    ):
         raise GitReadError("HEAD changed during branch inventory")
     return branches
 
@@ -4694,8 +5635,7 @@ def repo_has_head(repo: Path, timeout: int) -> bool:
     Vor dem allerersten Commit existiert HEAD nur als Verweis ins Leere. Git
     kann dort weder etwas stashen noch auf einen früheren Stand zurückgehen.
     """
-    result = run_git(repo, "rev-parse", "--verify", "-q", "HEAD",
-                     timeout=timeout)
+    result = run_git(repo, "rev-parse", "--verify", "-q", "HEAD", timeout=timeout)
     if result.returncode == 0:
         return True
     if result.returncode == 1:  # belegter normaler Fall: unborn HEAD
@@ -4708,13 +5648,19 @@ def files_for_diff_mode(files: list[ChangedFile], mode: str) -> list[ChangedFile
         raise ValueError("unknown diff mode")
     if mode == "combined":
         return list(files)
-    return [entry for entry in files if entry.code == "C" or len(entry.xy) != 2
-            or (mode == "staged" and entry.xy[0] not in (" ", "?"))
-            or (mode == "unstaged" and (entry.code == "U" or entry.xy[1] not in (" ", "?")))]
+    return [
+        entry
+        for entry in files
+        if entry.code == "C"
+        or len(entry.xy) != 2
+        or (mode == "staged" and entry.xy[0] not in (" ", "?"))
+        or (mode == "unstaged" and (entry.code == "U" or entry.xy[1] not in (" ", "?")))
+    ]
 
 
-def file_diff(repo: Path, code: str, path: str, timeout: int,
-              mode: str = "combined") -> tuple[bool, str]:
+def file_diff(
+    repo: Path, code: str, path: str, timeout: int, mode: str = "combined"
+) -> tuple[bool, str]:
     """Gesamt: HEAD/Arbeitsbaum; staged: HEAD/Index; unstaged: Index/Arbeitsbaum.
 
     Unversionierte Dateien erscheinen außerhalb von staged gegen /dev/null.
@@ -4723,17 +5669,27 @@ def file_diff(repo: Path, code: str, path: str, timeout: int,
     """
     if mode not in DIFF_MODES:
         raise ValueError("unknown diff mode")
-    safe_diff = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--submodule=short",
-                 "--ignore-submodules=none")
+    safe_diff = (
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--submodule=short",
+        "--ignore-submodules=none",
+    )
     env = {**RAW_OBJECT_ENV, "GIT_LITERAL_PATHSPECS": "1"}
 
     def against_nothing() -> subprocess.CompletedProcess:
-        return run_git(repo, *safe_diff, "--no-index", "--", os.devnull, path,
-                       timeout=timeout, env=env)
+        return run_git(
+            repo, *safe_diff, "--no-index", "--", os.devnull, path, timeout=timeout, env=env
+        )
 
     if mode == "unstaged":
-        r = (against_nothing() if code == "U" else
-             run_git(repo, *safe_diff, "--", path, timeout=timeout, env=env))
+        r = (
+            against_nothing()
+            if code == "U"
+            else run_git(repo, *safe_diff, "--", path, timeout=timeout, env=env)
+        )
     elif mode == "combined" and code == "U":
         r = against_nothing()
     else:
@@ -4741,8 +5697,16 @@ def file_diff(repo: Path, code: str, path: str, timeout: int,
         if head is not None and not is_object_id(head):
             raise GitReadError("HEAD identity unknown during diff")
         if mode == "staged":
-            r = run_git(repo, *safe_diff, "--cached", *((head,) if head else ()),
-                        "--", path, timeout=timeout, env=env)
+            r = run_git(
+                repo,
+                *safe_diff,
+                "--cached",
+                *((head,) if head else ()),
+                "--",
+                path,
+                timeout=timeout,
+                env=env,
+            )
             if head is None and current_head(repo, timeout) is not None:
                 raise GitReadError("HEAD changed during unborn staged diff")
         elif head is not None:
@@ -4770,8 +5734,15 @@ def print_file_diff(root: str, path: str, mode: str, *, as_json: bool = False) -
         actual = _git_reported_path(repo, "--show-toplevel", timeout=timeout)
         if path_identity(actual) != path_identity(repo):
             raise ValueError(t("cli_file_diff_root"))
-        tracked = run_git(repo, "ls-files", "--error-unmatch", "--", path, timeout=timeout,
-                          env={"GIT_LITERAL_PATHSPECS": "1"})
+        tracked = run_git(
+            repo,
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            path,
+            timeout=timeout,
+            env={"GIT_LITERAL_PATHSPECS": "1"},
+        )
         if tracked.returncode not in (0, 1):
             raise GitReadError(last_error_line(tracked))
         ok, text = file_diff(repo, "U" if tracked.returncode == 1 else "M", path, timeout, mode)
@@ -4782,11 +5753,24 @@ def print_file_diff(root: str, path: str, mode: str, *, as_json: bool = False) -
     text = "\n".join(terminal_text(line) for line in text.split("\n"))
     error = terminal_text(redact_remote_error(error))
     if as_json:
-        print(json.dumps({"schema_version": JSON_SCHEMA_VERSION, "kind": "file_diff",
-                          "version": __version__, "root": terminal_text(repo),
-                          "path": json_text(path), "path_key": snapshot_path_key(path),
-                          "mode": mode, "ok": not bool(error),
-                          "diff": text, "error": error}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "schema_version": JSON_SCHEMA_VERSION,
+                    "kind": "file_diff",
+                    "version": __version__,
+                    "root": terminal_text(repo),
+                    "path": json_text(path),
+                    "path_key": snapshot_path_key(path),
+                    "mode": mode,
+                    "ok": not bool(error),
+                    "diff": text,
+                    "error": error,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     elif error:
         print(t("diff_failed", p=terminal_text(path), e=error), file=sys.stderr)
     elif text:
@@ -4806,17 +5790,16 @@ class RemoteRemovalFacts:
     """
 
     remote: RemoteConfig
-    tracking_refs: list[str]        # refs/remotes/<name>/… ohne die HEAD-Symref
+    tracking_refs: list[str]  # refs/remotes/<name>/… ohne die HEAD-Symref
     ref_snapshot: list[tuple[str, str, str]]
     # Auch Objekt-ID und Symref-Ziel gehoeren zur bestaetigten Vorschau. Nur
     # so faellt ein Fetch auf, der einen vorhandenen Namen auf einen anderen
     # Commit verschiebt, ohne die angezeigte Anzahl zu aendern.
-    tracking_branches: list[str]    # lokale Branches mit Upstream auf dieses Remote
-    orphan_commits: int             # Commits, die nur über diese Refs erreichbar sind
+    tracking_branches: list[str]  # lokale Branches mit Upstream auf dieses Remote
+    orphan_commits: int  # Commits, die nur über diese Refs erreichbar sind
 
 
-def remote_removal_facts(repo: Path, name: str,
-                         cfg: dict) -> RemoteRemovalFacts | None:
+def remote_removal_facts(repo: Path, name: str, cfg: dict) -> RemoteRemovalFacts | None:
     """Zusammentragen, was das Entfernen von Remote `name` lokal löschen würde.
 
     Liefert None, wenn es das Remote nicht (mehr) gibt. Jeder Lesefehler kommt
@@ -4832,15 +5815,14 @@ def remote_removal_facts(repo: Path, name: str,
     # geteilte Refs. Die bisherige Vorschau ist nur für getrennte Standardräume
     # belastbar; bei anderen Abbildungen darf sie keine Löschung freigeben.
     for configured in remotes.values():
-        fetch_specs = [value for key, value in configured.settings
-                       if key.lower() == "fetch"]
+        fetch_specs = [value for key, value in configured.settings if key.lower() == "fetch"]
         expected = f"+refs/heads/*:refs/remotes/{configured.name}/*"
         if fetch_specs != [expected]:
             raise GitReadError(t("remove_refspec_unsupported"))
     prefix = f"refs/remotes/{name}/"
     refs_r = _required_git(
-        repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)",
-                           prefix, timeout=t_)
+        repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", prefix, timeout=t_
+    )
     tracking_refs = []
     ref_snapshot = []
     for record in refs_r.stdout.split("\n"):
@@ -4862,11 +5844,18 @@ def remote_removal_facts(repo: Path, name: str,
     orphans = 0
     if tracking_refs:
         count_r = _required_git(
-            repo, "rev-list", "--count", f"--glob={prefix}*", "--not",
-            f"--exclude={prefix}*", "--all", timeout=t_, env=NO_REPLACE_ENV)
+            repo,
+            "rev-list",
+            "--count",
+            f"--glob={prefix}*",
+            "--not",
+            f"--exclude={prefix}*",
+            "--all",
+            timeout=t_,
+            env=NO_REPLACE_ENV,
+        )
         orphans = int(count_r.stdout.strip() or 0)
-    branches = [b.name for b in read_branches(repo, cfg, strict=True)
-                if b.upstream_remote == name]
+    branches = [b.name for b in read_branches(repo, cfg, strict=True) if b.upstream_remote == name]
     return RemoteRemovalFacts(remote, tracking_refs, ref_snapshot, branches, orphans)
 
 
@@ -4887,7 +5876,8 @@ def display_remote_url(url: str) -> str:
         parsed = urllib.parse.urlsplit(raw)
         if parsed.scheme.lower() == "file":
             clean = urllib.parse.urlunsplit(
-                (parsed.scheme, parsed.hostname or "", parsed.path, "", ""))
+                (parsed.scheme, parsed.hostname or "", parsed.path, "", "")
+            )
             return terminal_text(clean)
         hostname = parsed.hostname
         if not hostname:
@@ -4904,10 +5894,8 @@ def display_remote_url(url: str) -> str:
         # einzelne Userinfo-Feld ein Token sein und wird vollstaendig entfernt.
         user = ""
         if parsed.scheme.lower() in _SSH_URL_SCHEMES and parsed.username:
-            user = urllib.parse.quote(
-                urllib.parse.unquote(parsed.username), safe="") + "@"
-        clean = urllib.parse.urlunsplit(
-            (parsed.scheme, user + host, parsed.path, "", ""))
+            user = urllib.parse.quote(urllib.parse.unquote(parsed.username), safe="") + "@"
+        clean = urllib.parse.urlunsplit((parsed.scheme, user + host, parsed.path, "", ""))
         return terminal_text(clean)
     except (UnicodeError, ValueError):
         return terminal_text("(invalid remote target)")
@@ -4961,17 +5949,23 @@ class InfoView:
         return [name for name, _, _ in self.remote_blocks]
 
 
-def aligned_rows(rows: list[tuple[str, str]], indent: str = "",
-                 width: int | None = None) -> list[str]:
+def aligned_rows(
+    rows: list[tuple[str, str]], indent: str = "", width: int | None = None
+) -> list[str]:
     """Label/Wert-Zeilen so setzen, dass alle Werte in derselben Spalte beginnen.
 
     `width` gibt die Label-Breite vor, wenn mehrere getrennt gebaute Blöcke
     dieselbe Spalte teilen sollen.
     """
-    if width is None:
-        width = max((cell_width(label) for label, _ in rows), default=0)
-    return [f"{indent}{pad_cells(label + ':', width + 1)}  {value}"
-            for label, value in rows]
+    label_width = (
+        width
+        if width is not None
+        else max(
+            (cell_width(label) for label, _ in rows),
+            default=0,
+        )
+    )
+    return [f"{indent}{pad_cells(label + ':', label_width + 1)}  {value}" for label, value in rows]
 
 
 def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
@@ -4979,8 +5973,41 @@ def repo_info_lines(st: RepoStatus, cfg: dict) -> list[str]:
     return build_info_view(st, cfg).lines
 
 
+InfoBlockSpec = tuple[str, str, str, list[tuple[str, str]]]
+
+
 def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
-    """Wie repo_info_lines, liefert zusätzlich die Zeilenbereiche der Remotes."""
+    """Repo, Remotes und Branches mit auswählbaren Detailblöcken anzeigen."""
+    lines = _info_overview_lines(st, cfg)
+    view = InfoView(lines=lines)
+    remote_specs, remote_note = _remote_info_specs(st, cfg)
+    if st.branches_error:
+        branch_specs = []
+    else:
+        branches = st.branches if st.branches_scanned else read_branches(st.path, cfg)
+        branch_specs = branch_block_specs(branches)
+
+    # Eine gemeinsame Labelbreite hält die Werte auch über Abschnittsgrenzen bündig.
+    width = max(
+        (cell_width(label) for _, _, _, rows in remote_specs + branch_specs for label, _ in rows),
+        default=0,
+    )
+    lines.extend(["", f"{t('info_remotes')}:"])
+    if remote_specs:
+        render_info_blocks(view, remote_specs, width)
+    else:
+        lines.append("  " + (remote_note or t("none_label")))
+    lines.extend(["", f"{t('info_branches')}:"])
+    if branch_specs:
+        render_info_blocks(view, branch_specs, width)
+    else:
+        lines.append(
+            "  " + (branch_inventory_summary(st) if st.branches_error else t("none_label"))
+        )
+    return view
+
+
+def _info_overview_lines(st: RepoStatus, cfg: dict) -> list[str]:
     t_ = cfg["git_timeout"]
 
     def read_git(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -5005,8 +6032,8 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     # Ersetzung beschreiben, waehrend "Historie: n Commits" den echten Graph
     # zaehlte — zwei Angaben ueber verschiedene Commits in derselben Ansicht.
     commit = read_git(
-        "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD",
-        env=NO_REPLACE_ENV)
+        "show", "-s", "--format=%H%x00%h%x00%aI%x00%an%x00%s", "HEAD", env=NO_REPLACE_ENV
+    )
     fields = commit.stdout.rstrip("\n").split("\0", 4) if commit.returncode == 0 else []
     subject_line = ""
     if len(fields) == 5:
@@ -5018,34 +6045,43 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
         count = read_git("rev-list", "--count", "HEAD", env=NO_REPLACE_ENV)
         shallow = read_git("rev-parse", "--is-shallow-repository")
         if count.returncode == 0:
-            clone_kind = (t("info_shallow_clone")
-                          if shallow.returncode == 0 and shallow.stdout.strip() == "true"
-                          else t("info_full_clone"))
-            head_rows.append((t("info_history"), t(
-                "info_history_value", n=count.stdout.strip(), kind=clone_kind)))
+            clone_kind = (
+                t("info_shallow_clone")
+                if shallow.returncode == 0 and shallow.stdout.strip() == "true"
+                else t("info_full_clone")
+            )
+            head_rows.append(
+                (
+                    t("info_history"),
+                    t("info_history_value", n=count.stdout.strip(), kind=clone_kind),
+                )
+            )
     else:
         head_rows.append((t("info_head"), t("info_no_commits")))
 
-    upstream = read_git(
-        "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    upstream = read_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     if upstream.returncode == 0 and upstream.stdout.strip():
         upstream_name = upstream.stdout.strip()
         delta = read_git(
-            "rev-list", "--left-right", "--count", f"HEAD...{upstream_name}",
-            env=NO_REPLACE_ENV)
+            "rev-list", "--left-right", "--count", f"HEAD...{upstream_name}", env=NO_REPLACE_ENV
+        )
         delta_fields = delta.stdout.split()
         if delta.returncode == 0 and len(delta_fields) == 2:
-            upstream_value = (f"{terminal_text(upstream_name)} "
-                              f"({t('info_delta', a=delta_fields[0], b=delta_fields[1])})")
+            upstream_value = (
+                f"{terminal_text(upstream_name)} "
+                f"({t('info_delta', a=delta_fields[0], b=delta_fields[1])})"
+            )
         else:
             upstream_value = terminal_text(upstream_name)
     else:
         upstream_value = t("none_label")
     head_rows.append((t("info_upstream"), upstream_value))
 
-    worktree = (t("info_clean") if not st.dirty else
-                t("info_changes", m=st.modified, d=st.deleted,
-                  u=st.untracked, c=st.conflicts))
+    worktree = (
+        t("info_clean")
+        if not st.dirty
+        else t("info_changes", m=st.modified, d=st.deleted, u=st.untracked, c=st.conflicts)
+    )
     head_rows.append((t("info_worktree"), worktree))
     head_rows.append((t("info_sync_state"), t("sync_clean") if st.sync_clean else t("sync_open")))
     publications = [r.badge() for r in st.remotes if r.public]
@@ -5057,13 +6093,14 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
     head_rows.append((t("info_modules"), submodule_summary(st)))
 
     tags = read_git("tag", "--points-at", "HEAD")
-    tag_names = [terminal_text(name) for name in tags.stdout.splitlines()
-                 if name.strip()] if tags.returncode == 0 else []
-    head_rows.append((t("info_tags"), ", ".join(tag_names) if tag_names
-                      else t("none_label")))
+    tag_names = (
+        [terminal_text(name) for name in tags.stdout.splitlines() if name.strip()]
+        if tags.returncode == 0
+        else []
+    )
+    head_rows.append((t("info_tags"), ", ".join(tag_names) if tag_names else t("none_label")))
     if st.error:
-        head_rows.append((t("info_last_error"),
-                          terminal_text(st.error_long or st.error)))
+        head_rows.append((t("info_last_error"), terminal_text(st.error_long or st.error)))
     if st.error_detail:
         head_rows.append((t("info_git_said"), terminal_text(st.error_detail)))
 
@@ -5075,27 +6112,31 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             if label == t("info_last_commit"):
                 lines.insert(index + 1, "  " + subject_line)
                 break
-    lines.extend(["", f"{t('info_remotes')}:"])
-    view = InfoView(lines=lines)
+    return lines
+
+
+def _remote_info_specs(st: RepoStatus, cfg: dict) -> tuple[list[InfoBlockSpec], str]:
     remote_note = ""
     try:
         configs = read_remote_configs(st.path, cfg)
     # Auch malformed Fremdkonfigurationen (etwa eine ungültige URL) sollen nur
     # diesen Abschnitt degradieren — die Branches darunter bleiben nutzbar.
-    except Exception as exc:
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
         configs = {}
         remote_note = t("info_remote_error", e=terminal_text(exc))
 
+    branch = terminal_text(st.branch)
     states = {remote.name: remote for remote in st.remotes}
     ordered_names = [remote.name for remote in st.remotes if remote.name in configs]
     ordered_names.extend(name for name in configs if name not in ordered_names)
-    specs: list[tuple[str, str, str, list[tuple[str, str]]]] = []
+    specs: list[InfoBlockSpec] = []
     for name in ordered_names:
         remote = configs[name]
         state = states.get(name)
         current_state = remote_status_from_config(remote, st.remote, st.branch)
-        known = (state is not None and remote_approval_signature(state)
-                 == remote_approval_signature(current_state))
+        known = state is not None and remote_approval_signature(state) == remote_approval_signature(
+            current_state
+        )
         if not known:
             state = None
         web_urls = github_web_urls(remote)
@@ -5124,50 +6165,46 @@ def build_info_view(st: RepoStatus, cfg: dict) -> InfoView:
             rows.extend((t("info_fetch_url"), url) for url in fetch_shown)
             rows.extend((t("info_push_url"), url) for url in push_shown)
         rows.extend((t("info_web_url"), url) for url in web_urls)
-        rows.append((t("info_fetched"),
-                     state.fetched_at if known and state.fetched_at else t("age_unknown")))
+        rows.append(
+            (
+                t("info_fetched"),
+                state.fetched_at if state is not None and state.fetched_at else t("age_unknown"),
+            )
+        )
         if state and st.branch not in ("?", "(detached)"):
-            value = (t("info_delta", a=state.ahead, b=state.behind)
-                     if state.branch_exists else t("info_branch_missing_value"))
+            value = (
+                t("info_delta", a=state.ahead, b=state.behind)
+                if state.branch_exists
+                else t("info_branch_missing_value")
+            )
             rows.append((t("info_branch_label", b=branch), value))
         if state and state.content_excludes:
-            rows.append((t("info_publication_excludes"), ", ".join(
-                display_git_path(path) for path in state.content_excludes)))
+            rows.append(
+                (
+                    t("info_publication_excludes"),
+                    ", ".join(display_git_path(path) for path in state.content_excludes),
+                )
+            )
         if state and state.content_error:
             rows.append((t("info_content_error"), terminal_text(state.content_error)))
         if state and state.fetch_failed:
-            rows.append((t("info_last_error"), terminal_text(
-                state.fetch_error_long
-                or remote_failure_short(state.name, state.fetch_outcome or "unknown"))))
+            rows.append(
+                (
+                    t("info_last_error"),
+                    terminal_text(
+                        state.fetch_error_long
+                        or remote_failure_short(state.name, state.fetch_outcome or "unknown")
+                    ),
+                )
+            )
             if state.fetch_error_detail:
-                rows.append((t("info_git_said"), terminal_text(
-                    state.fetch_error_detail)))
+                rows.append((t("info_git_said"), terminal_text(state.fetch_error_detail)))
         specs.append(("remote", name, f"  {terminal_text(name)}{suffix}", rows))
 
-    branches = ([] if st.branches_error else (st.branches if st.branches_scanned
-                                             else read_branches(st.path, cfg)))
-    if not st.branches_error:
-        specs.extend(branch_block_specs(branches))
-    # Eine gemeinsame Label-Breite für ALLE Detailzeilen der Seite: erst dadurch
-    # stehen die Werte über Remotes und Branches hinweg in derselben Spalte.
-    width = max((cell_width(label) for _, _, _, rows in specs for label, _ in rows),
-                default=0)
-    remote_specs = [s for s in specs if s[0] == "remote"]
-    branch_specs = [s for s in specs if s[0] == "branch"]
-    if remote_specs:
-        render_info_blocks(view, remote_specs, width)
-    else:
-        lines.append("  " + (remote_note or t("none_label")))
-    lines.extend(["", f"{t('info_branches')}:"])
-    if branch_specs:
-        render_info_blocks(view, branch_specs, width)
-    else:
-        lines.append("  " + (branch_inventory_summary(st) if st.branches_error
-                              else t("none_label")))
-    return view
+    return specs, remote_note
 
 
-def branch_block_specs(branches: list[BranchInfo]) -> list:
+def branch_block_specs(branches: list[BranchInfo]) -> list[InfoBlockSpec]:
     """Lokale Branches als Blöcke — der zweite Zustand, den Git nie überträgt.
 
     Genau wie bei Remotes sammeln sich hier Reste an (abgeschlossene Features,
@@ -5186,22 +6223,33 @@ def branch_block_specs(branches: list[BranchInfo]) -> list:
         if branch.coverage in ("uncovered", "unknown"):
             labels.append(t("branch_needs_review"))
         suffix = f" [{', '.join(labels)}]" if labels else ""
-        rows = [(t("info_branch_commit"),
-                 f"{terminal_text(branch.oid[:12])} · {terminal_text(branch.date)}"
-                 f" · {terminal_text(branch.subject)}")]
+        rows = [
+            (
+                t("info_branch_commit"),
+                f"{terminal_text(branch.oid[:12])} · {terminal_text(branch.date)}"
+                f" · {terminal_text(branch.subject)}",
+            )
+        ]
         if branch.upstream:
-            rows.append((t("info_upstream"),
-                         f"{terminal_text(branch.upstream)} "
-                         f"({t('info_delta', a=branch.ahead, b=branch.behind)})"))
+            rows.append(
+                (
+                    t("info_upstream"),
+                    f"{terminal_text(branch.upstream)} "
+                    f"({t('info_delta', a=branch.ahead, b=branch.behind)})",
+                )
+            )
         else:
             rows.append((t("info_upstream"), t("none_label")))
         if branch.coverage:
-            value = (t("branch_uncovered", n=branch.uncovered_commits)
-                     if branch.coverage == "uncovered" else
-                     t("branch_covered" if branch.coverage == "covered" else "branch_coverage_unknown"))
+            value = (
+                t("branch_uncovered", n=branch.uncovered_commits)
+                if branch.coverage == "uncovered"
+                else t(
+                    "branch_covered" if branch.coverage == "covered" else "branch_coverage_unknown"
+                )
+            )
             rows.append((t("info_branch_coverage"), value))
-        specs.append(("branch", branch.name,
-                      f"  {terminal_text(branch.name)}{suffix}", rows))
+        specs.append(("branch", branch.name, f"  {terminal_text(branch.name)}{suffix}", rows))
     return specs
 
 
@@ -5217,13 +6265,23 @@ def render_info_blocks(view: InfoView, specs: list, width: int) -> None:
 
 
 WORKTREE_STATUS_ARGS = (
-    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
 )
 
 
-def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
-                     timeout: int = 10, *,
-                     expected_public: bool | None = None) -> TransferCheck:
+def inspect_transfer(
+    repo: Path,
+    remote: str,
+    branch: str,
+    action: str,
+    timeout: int = 10,
+    *,
+    expected_public: bool | None = None,
+) -> TransferCheck:
     """Prüft einen Push oder Fast-Forward-Pull, ohne etwas zu verändern.
 
     Bewusst eng: sauberer Tree, vorhandener Remote-Branch und verwandte,
@@ -5239,9 +6297,12 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     try:
         configs = read_remote_configs(repo, cfg)
         remote_cfg = configs.get(remote)
-        if (remote_cfg is None or not remote_fetch_url_safe(remote_cfg)
-                or (action == "push" and not remote_cfg.transfer_safe)
-                or not fetch_maps_branch_exactly(remote_cfg, branch)):
+        if (
+            remote_cfg is None
+            or not remote_fetch_url_safe(remote_cfg)
+            or (action == "push" and not remote_cfg.transfer_safe)
+            or not fetch_maps_branch_exactly(remote_cfg, branch)
+        ):
             return TransferCheck("remote-unsafe")
         override = repo_transport_override(repo, timeout)
         if override is not None:
@@ -5250,51 +6311,44 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
         if expected_public is not None and actual_public != expected_public:
             return TransferCheck("remote-unsafe")
 
-        # Die Regel "bei is_local den aufgeloesten Pfad, sonst die
-        # konfigurierte Adresse" steht in remote_push_url(); hier stand sie
-        # ein zweites Mal ausgeschrieben. Eine spaetere Verschaerfung dort
-        # haette den Push-Pfad nicht erreicht.
-        transfer_url = (remote_push_url(remote_cfg) if action == "push"
-                        else remote_fetch_url(remote_cfg))
+        transfer_url = (
+            remote_push_url(remote_cfg) if action == "push" else remote_fetch_url(remote_cfg)
+        )
         if transfer_url is None or not _argv_safe_remote_url(transfer_url):
             return TransferCheck("remote-unsafe")
         if action == "pull" and repository_operation_in_progress(repo, timeout):
             return TransferCheck("operation-in-progress")
-        branch_r = _required_git(
-            repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
-            env=raw_env)
-        approved_ref = branch_r.stdout.strip()
-        if approved_ref != f"refs/heads/{branch}":
-            return TransferCheck("inspect-failed")
-        head = _required_git(
-            repo, "rev-parse", "--verify", approved_ref, timeout=timeout,
-            env=raw_env).stdout.strip()
-        index_oid = _required_git(
-            repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
-        dirty = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout, env=raw_env)
+        approved_ref = f"refs/heads/{branch}"
+        approved = _read_transfer_worktree(repo, approved_ref, timeout)
     except (GitReadError, ValueError, RuntimeError, OSError):
         return TransferCheck("inspect-failed")
     worktree_fingerprint = hashlib.sha256(
-        dirty.stdout.encode("utf-8", "surrogateescape")).hexdigest()
-    if dirty.stdout:
+        approved.status.encode("utf-8", "surrogateescape")
+    ).hexdigest()
+    if approved.status:
         return TransferCheck("dirty")
+    head = approved.head
     ref = f"refs/remotes/{remote}/{branch}"
-    exists = run_git(
-        repo, "show-ref", "--verify", "--quiet", ref, timeout=timeout,
-        env=raw_env)
+    exists = run_git(repo, "show-ref", "--verify", "--quiet", ref, timeout=timeout, env=raw_env)
     if exists.returncode == 1:
         return TransferCheck("missing-branch", remote_ref=ref)
     if exists.returncode != 0:
         return TransferCheck("inspect-failed", remote_ref=ref)
     try:
         target_oid = _required_git(
-            repo, "rev-parse", "--verify", ref, timeout=timeout,
-            env=raw_env).stdout.strip()
+            repo, "rev-parse", "--verify", ref, timeout=timeout, env=raw_env
+        ).stdout.strip()
     except GitReadError:
         return TransferCheck("inspect-failed", remote_ref=ref)
     delta = run_git(
-        repo, "rev-list", "--left-right", "--count",
-        f"{head}...{target_oid}", timeout=timeout, env=raw_env)
+        repo,
+        "rev-list",
+        "--left-right",
+        "--count",
+        f"{head}...{target_oid}",
+        timeout=timeout,
+        env=raw_env,
+    )
     if delta.returncode != 0 or len(delta.stdout.split()) != 2:
         return TransferCheck("inspect-failed", remote_ref=ref)
     ahead_s, behind_s = delta.stdout.split()
@@ -5304,57 +6358,100 @@ def inspect_transfer(repo: Path, remote: str, branch: str, action: str,
     if action == "push" and behind:
         return TransferCheck("behind", ahead=ahead, behind=behind, remote_ref=ref)
     if (action == "push" and not ahead) or (action == "pull" and not behind):
-        return (TransferCheck("nothing-push", remote_ref=ref) if action == "push"
-                else TransferCheck("nothing-pull", remote_ref=ref))
+        return (
+            TransferCheck("nothing-push", remote_ref=ref)
+            if action == "push"
+            else TransferCheck("nothing-pull", remote_ref=ref)
+        )
     commit_range = f"{target_oid}..{head}" if action == "push" else f"{head}..{target_oid}"
+    preview = _read_transfer_preview(repo, commit_range, timeout)
+    if preview is None:
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    try:
+        # Die Vorschau muss zu demselben Branch, Index und Arbeitsbaum gehören.
+        # Der Push verwendet anschließend die feste OID aus dieser Prüfung.
+        final = _read_transfer_worktree(repo, approved_ref, timeout)
+    except GitReadError:
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    if final != approved:
+        return TransferCheck("inspect-failed", ahead, behind, ref)
+    commits, files = preview
+    return TransferCheck(
+        "ready",
+        ahead=ahead,
+        behind=behind,
+        remote_ref=ref,
+        commits=commits,
+        files=files,
+        branch=branch,
+        head_oid=head,
+        index_oid=approved.index,
+        worktree_fingerprint=worktree_fingerprint,
+        fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
+        push_fingerprint=(remote_cfg.push_targets[0].fingerprint if action == "push" else ""),
+        remote_name=remote,
+        remote_config_signature=(
+            tuple(remote_cfg.fetch_urls),
+            tuple(remote_cfg.push_urls),
+            tuple(remote_cfg.settings),
+        ),
+        transfer_url=transfer_url,
+        target_oid=target_oid,
+    )
+
+
+@dataclass(frozen=True)
+class _TransferWorktree:
+    head: str
+    index: str
+    status: str
+
+
+def _read_transfer_worktree(repo: Path, approved_ref: str, timeout: int) -> _TransferWorktree:
+    env = TRANSFER_OBJECT_ENV
+    branch = _required_git(repo, "symbolic-ref", "-q", "HEAD", timeout=timeout, env=env)
+    if branch.stdout.strip() != approved_ref:
+        raise GitReadError("current branch changed during transfer preflight")
+    head = _required_git(repo, "rev-parse", "--verify", approved_ref, timeout=timeout, env=env)
+    index = _required_git(repo, "write-tree", timeout=timeout, env=env)
+    status = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout, env=env)
+    return _TransferWorktree(head.stdout.strip(), index.stdout.strip(), status.stdout)
+
+
+def _read_transfer_preview(
+    repo: Path,
+    commit_range: str,
+    timeout: int,
+) -> tuple[list[str], list[str]] | None:
+    raw_env = TRANSFER_OBJECT_ENV
     commits_r = run_git(
-        repo, "log", "--oneline", "--no-decorate",
-        commit_range, timeout=timeout, env=raw_env)
+        repo, "log", "--oneline", "--no-decorate", commit_range, timeout=timeout, env=raw_env
+    )
     # Nicht nur die beiden Endbaeume vergleichen: Eine Datei kann in einem
     # ausgehenden Commit hinzugefuegt und in einem spaeteren wieder geloescht
     # worden sein. Sie waere trotzdem Teil der veroeffentlichten Historie. `-m`
     # zeigt Merge-Commits gegen jeden Elternteil; doppelte Statuszeilen sind als
     # konservativer Privacy-Hinweis beabsichtigt.
     files_r = run_git(
-        repo, "log", "-m", "--root", "--format=", "--name-status",
-        "--no-renames", "--no-ext-diff", "--no-textconv",
+        repo,
+        "log",
+        "-m",
+        "--root",
+        "--format=",
+        "--name-status",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
         "--ignore-submodules=none",
-        commit_range, timeout=timeout, env=raw_env)
+        commit_range,
+        timeout=timeout,
+        env=raw_env,
+    )
     if commits_r.returncode != 0 or files_r.returncode != 0:
-        return TransferCheck("inspect-failed", ahead, behind, ref)
-    try:
-        # Die getrennten Git-Leser bilden nur dann einen freigegebenen Snapshot,
-        # wenn Branch-Ref, dessen OID, Index und Arbeitsbaum am Ende noch exakt
-        # zusammenpassen. Der Push selbst verwendet anschließend diese feste OID.
-        final_ref = _required_git(
-            repo, "symbolic-ref", "-q", "HEAD", timeout=timeout,
-            env=raw_env).stdout.strip()
-        final_head = _required_git(
-            repo, "rev-parse", "--verify", approved_ref, timeout=timeout,
-            env=raw_env).stdout.strip()
-        final_index = _required_git(
-            repo, "write-tree", timeout=timeout, env=raw_env).stdout.strip()
-        final_dirty = _required_git(repo, *WORKTREE_STATUS_ARGS, timeout=timeout, env=raw_env)
-    except GitReadError:
-        return TransferCheck("inspect-failed", ahead, behind, ref)
-    if (final_ref != approved_ref or final_head != head
-            or final_index != index_oid or final_dirty.stdout != dirty.stdout):
-        return TransferCheck("inspect-failed", ahead, behind, ref)
-    return TransferCheck(
-        "ready", ahead=ahead, behind=behind, remote_ref=ref,
-        commits=[line for line in commits_r.stdout.splitlines() if line.strip()],
-        files=[line for line in files_r.stdout.splitlines() if line.strip()],
-        branch=branch, head_oid=head, index_oid=index_oid,
-        worktree_fingerprint=worktree_fingerprint,
-        fetch_fingerprint=remote_cfg.fetch_targets[0].fingerprint,
-        push_fingerprint=(remote_cfg.push_targets[0].fingerprint
-                          if action == "push" else ""),
-        remote_name=remote,
-        remote_config_signature=(tuple(remote_cfg.fetch_urls),
-                                 tuple(remote_cfg.push_urls),
-                                 tuple(remote_cfg.settings)),
-        transfer_url=transfer_url,
-        target_oid=target_oid,
+        return None
+    return (
+        [line for line in commits_r.stdout.splitlines() if line.strip()],
+        [line for line in files_r.stdout.splitlines() if line.strip()],
     )
 
 
@@ -5366,25 +6463,44 @@ def safe_pull_args(target_oid: str) -> list[str]:
     """
     if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", target_oid):
         raise ValueError("invalid pull object ID")
-    return [*NO_GIT_HOOKS_ARGS, "-c", "submodule.recurse=false",
-            "merge", "--ff-only", "--no-squash", "--no-overwrite-ignore",
-            "--no-autostash", "--no-edit", "--no-stat", target_oid]
+    return [
+        *NO_GIT_HOOKS_ARGS,
+        "-c",
+        "submodule.recurse=false",
+        "merge",
+        "--ff-only",
+        "--no-squash",
+        "--no-overwrite-ignore",
+        "--no-autostash",
+        "--no-edit",
+        "--no-stat",
+        target_oid,
+    ]
 
 
-def safe_push_args(destination: str, branch: str, source_oid: str,
-                   target_oid: str) -> tuple[str, ...]:
+def safe_push_args(
+    destination: str, branch: str, source_oid: str, target_oid: str
+) -> tuple[str, ...]:
     """Push an die geprüfte URL, OID-/Lease-gebunden, ohne Hooks/Submodule/Tags."""
     lease = f"--force-with-lease=refs/heads/{branch}:{target_oid}"
-    pin_config, pinned_url = _pinned_url_config(destination)
-    return (*pin_config, *NO_GIT_HOOKS_ARGS,
-            "-c", "push.pushOption=",
-            "push", "--porcelain", "--no-follow-tags",
-            "--no-signed", "--recurse-submodules=no", lease, "--", pinned_url,
-            f"{source_oid}:refs/heads/{branch}")
+    pinned_url = _PinnedRemoteURL(destination)
+    return (
+        *NO_GIT_HOOKS_ARGS,
+        "-c",
+        "push.pushOption=",
+        "push",
+        "--porcelain",
+        "--no-follow-tags",
+        "--no-signed",
+        "--recurse-submodules=no",
+        lease,
+        "--",
+        pinned_url,
+        f"{source_oid}:refs/heads/{branch}",
+    )
 
 
-def update_tracking_after_push(repo: Path, check: TransferCheck,
-                               timeout: int) -> str:
+def update_tracking_after_push(repo: Path, check: TransferCheck, timeout: int) -> str:
     """Den geprüften Tracking-Ref nach belegtem Push-Erfolg per OID-CAS nachziehen.
 
     Der Remote-Name ist veränderliche Konfiguration. Vor und nach der Mutation
@@ -5406,24 +6522,26 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
     dafür immer denselben Grund („der lokale Tracking-Ref änderte sich
     parallel“) — in drei von vier Fällen falsch.
     """
+
     def config_matches() -> bool:
-        remote = read_remote_config_or_none(
-            repo, timeout_config(timeout), check.remote_name)
+        remote = read_remote_config_or_none(repo, timeout_config(timeout), check.remote_name)
         if remote is None:
             return False
-        signature = (tuple(remote.fetch_urls), tuple(remote.push_urls),
-                     tuple(remote.settings))
-        return (signature == check.remote_config_signature
-                and remote.transfer_safe
-                and fetch_maps_branch_exactly(remote, check.branch))
+        signature = (tuple(remote.fetch_urls), tuple(remote.push_urls), tuple(remote.settings))
+        return (
+            signature == check.remote_config_signature
+            and remote.transfer_safe
+            and fetch_maps_branch_exactly(remote, check.branch)
+        )
 
     if not config_matches():
         return "changed"
     try:
         updated = run_git_logged(
-            repo, *safe_update_ref_args(
-                "--no-deref", check.remote_ref,
-                check.head_oid, check.target_oid), timeout=timeout)
+            repo,
+            *safe_update_ref_args("--no-deref", check.remote_ref, check.head_oid, check.target_oid),
+            timeout=timeout,
+        )
     except (subprocess.TimeoutExpired, OSError):
         # Die Ref-CAS kann trotz Timeout oder Startfehler schon gewirkt haben.
         return "unknown"
@@ -5432,38 +6550,48 @@ def update_tracking_after_push(repo: Path, check: TransferCheck,
             return "ok"
         try:
             rolled_back = run_git_logged(
-                repo, *safe_update_ref_args(
-                    "--no-deref", check.remote_ref,
-                    check.target_oid, check.head_oid), timeout=timeout)
+                repo,
+                *safe_update_ref_args(
+                    "--no-deref", check.remote_ref, check.target_oid, check.head_oid
+                ),
+                timeout=timeout,
+            )
             if rolled_back.returncode == 0:
                 return "changed"
             # Eine gescheiterte Rücksetzung belegt keinen unveränderten Ref.
             # Nur ein lesbarer anderer Stand beweist den parallelen Zugriff;
             # bei unserem Stand (etwa wegen einer Lockdatei) bleibt es unklar.
             current = run_git(
-                repo, "rev-parse", "--verify", check.remote_ref,
-                timeout=timeout, env=TRANSFER_OBJECT_ENV)
+                repo,
+                "rev-parse",
+                "--verify",
+                check.remote_ref,
+                timeout=timeout,
+                env=TRANSFER_OBJECT_ENV,
+            )
         except (subprocess.TimeoutExpired, OSError):
             return "unknown"
-        if (current.returncode == 0
-                and current.stdout.strip() != check.head_oid):
+        if current.returncode == 0 and current.stdout.strip() != check.head_oid:
             return "raced"
         return "unknown"
     # Ein paralleler Fetch kann denselben Zielstand schon eingetragen haben.
     try:
         current = run_git(
-            repo, "rev-parse", "--verify", check.remote_ref, timeout=timeout,
-            env=TRANSFER_OBJECT_ENV)
+            repo,
+            "rev-parse",
+            "--verify",
+            check.remote_ref,
+            timeout=timeout,
+            env=TRANSFER_OBJECT_ENV,
+        )
     except (subprocess.TimeoutExpired, OSError):
         return "unknown"
-    if (current.returncode == 0
-            and current.stdout.strip() == check.head_oid):
+    if current.returncode == 0 and current.stdout.strip() == check.head_oid:
         return "ok" if config_matches() else "changed"
     return "raced"
 
 
-def upstream_delta(repo: Path, sync_remote: str | None,
-                   cfg: dict) -> tuple[str | None, int, int]:
+def upstream_delta(repo: Path, sync_remote: str | None, cfg: dict) -> tuple[str | None, int, int]:
     """Stand gegenüber dem konfigurierten Upstream, WENN dieser ein anderer
     Remote als der Sync-Remote ist (typisch: github).
 
@@ -5472,26 +6600,29 @@ def upstream_delta(repo: Path, sync_remote: str | None,
     dieses Remotes (wir fetchen hier NICHT übers Netz nach — wie in einem Editor).
     """
     t_ = cfg["git_timeout"]
-    r = run_git(repo, "branch", "--format=%(HEAD)%00%(upstream)%00%(upstream:remotename)",
-                timeout=t_)
+    r = run_git(
+        repo, "branch", "--format=%(HEAD)%00%(upstream)%00%(upstream:remotename)", timeout=t_
+    )
     if r.returncode != 0:
         return None, 0, 0
-    current = next((line.split("\0") for line in r.stdout.split("\n")
-                    if line.startswith("*\0")), [])
+    current: list[str] = next(
+        (line.split("\0") for line in r.stdout.split("\n") if line.startswith("*\0")), []
+    )
     if len(current) != 3:
         return None, 0, 0
     _, up, up_remote = current
     if not up or up_remote == sync_remote:
-        return None, 0, 0                 # kein Upstream oder == Sync-Remote (schon gezeigt)
-    r = run_git(repo, "rev-list", "--left-right", "--count", f"HEAD...{up}",
-                timeout=t_, env=NO_REPLACE_ENV)
+        return None, 0, 0  # kein Upstream oder == Sync-Remote (schon gezeigt)
+    r = run_git(
+        repo, "rev-list", "--left-right", "--count", f"HEAD...{up}", timeout=t_, env=NO_REPLACE_ENV
+    )
     if r.returncode != 0:
-        return None, 0, 0                 # Tracking-Ref (noch) nicht lokal vorhanden
+        return None, 0, 0  # Tracking-Ref (noch) nicht lokal vorhanden
     ahead, behind = r.stdout.split()
     display_up = up
     for prefix in ("refs/remotes/", "refs/heads/"):
         if up.startswith(prefix):
-            display_up = up[len(prefix):]
+            display_up = up[len(prefix) :]
             break
     return display_up, int(ahead), int(behind)
 
@@ -5518,7 +6649,7 @@ def parse_worktrees(output: str) -> list[WorktreeInfo]:
     if output and not output.endswith("\0\0"):
         raise GitReadError("incomplete worktree record")
     records = []
-    fields = {}
+    fields: dict[str, str | None] = {}
     known = {"worktree", "HEAD", "branch", "bare", "detached", "locked", "prunable"}
     for item in output.split("\0"):
         if item:
@@ -5540,17 +6671,30 @@ def parse_worktrees(output: str) -> list[WorktreeInfo]:
         if bare and (detached or oid is not None or branch):
             raise GitReadError("conflicting bare worktree state")
         if not bare:
-            if not is_object_id(oid) or (not detached and not (
-                    isinstance(branch, str) and branch.startswith("refs/heads/")
-                    and _valid_refspec_pattern(branch))):
+            if not is_object_id(oid) or (
+                not detached
+                and not (
+                    isinstance(branch, str)
+                    and branch.startswith("refs/heads/")
+                    and _valid_refspec_pattern(branch)
+                )
+            ):
                 raise GitReadError("invalid worktree HEAD")
             if detached and branch:
                 raise GitReadError("conflicting worktree branch state")
-        records.append(WorktreeInfo(
-            Path(path), oid if oid and set(oid) != {"0"} else None,
-            branch.removeprefix("refs/heads/") if branch else "",
-            bare, detached, "locked" in fields, fields.get("locked") or "",
-            "prunable" in fields, fields.get("prunable") or ""))
+        records.append(
+            WorktreeInfo(
+                Path(path),
+                oid if oid and set(oid) != {"0"} else None,
+                branch.removeprefix("refs/heads/") if branch else "",
+                bare,
+                detached,
+                "locked" in fields,
+                fields.get("locked") or "",
+                "prunable" in fields,
+                fields.get("prunable") or "",
+            )
+        )
         fields = {}
     if fields or len({str(entry.path) for entry in records}) != len(records):
         raise GitReadError("incomplete or duplicate worktree record")
@@ -5585,21 +6729,30 @@ def collect_worktrees(st: RepoStatus, root: Path, cfg: dict) -> None:
 
 
 def valid_relative_git_path(path) -> bool:
-    return (isinstance(path, str) and "\0" not in path and not path.startswith("/")
-            and all(part not in ("", ".", "..") for part in path.split("/")))
+    return (
+        isinstance(path, str)
+        and "\0" not in path
+        and not path.startswith("/")
+        and all(part not in ("", ".", "..") for part in path.split("/"))
+    )
 
 
 def read_index_entries(repo: Path, timeout: int) -> dict:
     result = _required_git(repo, "ls-files", "--stage", "-z", timeout=timeout)
-    entries = {}
+    entries: dict[str, list[tuple[str, str, int]]] = {}
     for record in result.stdout.split("\0"):
         if not record:
             continue
         header, separator, path = record.partition("\t")
         fields = header.split(" ")
-        if (not separator or len(fields) != 3 or not re.fullmatch(r"[0-7]{6}", fields[0])
-                or not is_object_id(fields[1]) or fields[2] not in ("0", "1", "2", "3")
-                or not valid_relative_git_path(path)):
+        if (
+            not separator
+            or len(fields) != 3
+            or not re.fullmatch(r"[0-7]{6}", fields[0])
+            or not is_object_id(fields[1])
+            or fields[2] not in ("0", "1", "2", "3")
+            or not valid_relative_git_path(path)
+        ):
             raise GitReadError("invalid index entry")
         value = (fields[0], fields[1], int(fields[2]))
         bucket = entries.setdefault(path, [])
@@ -5614,8 +6767,18 @@ def read_head_gitlinks(repo: Path, oid: str | None, paths: set, timeout: int) ->
         return {}
     if not is_object_id(oid):
         raise GitReadError("HEAD identity unknown during submodule inventory")
-    result = _required_git(repo, "ls-tree", "-r", "--full-tree", "-z", oid, "--", *sorted(paths),
-                           timeout=timeout, env={**NO_REPLACE_ENV, "GIT_LITERAL_PATHSPECS": "1"})
+    result = _required_git(
+        repo,
+        "ls-tree",
+        "-r",
+        "--full-tree",
+        "-z",
+        oid,
+        "--",
+        *sorted(paths),
+        timeout=timeout,
+        env={**NO_REPLACE_ENV, "GIT_LITERAL_PATHSPECS": "1"},
+    )
     links = {}
     for record in result.stdout.split("\0"):
         if not record:
@@ -5634,13 +6797,19 @@ def read_head_gitlinks(repo: Path, oid: str | None, paths: set, timeout: int) ->
 def collect_submodules(st: RepoStatus, cfg: dict) -> None:
     timeout = cfg["git_timeout"]
     entries = read_index_entries(st.path, timeout)
-    indexed = {path for path, values in entries.items() if any(mode == "160000" for mode, oid, stage in values)}
+    indexed = {
+        path
+        for path, values in entries.items()
+        if any(mode == "160000" for mode, oid, stage in values)
+    }
     candidates = indexed | {entry.path for entry in st.files if entry.code != "U"}
     head_links = read_head_gitlinks(st.path, st.head_oid, candidates, timeout)
     paths = indexed | set(head_links)
     modules = []
     for path in sorted(paths):
-        module = SubmoduleInfo(path, head_oid=head_links.get(path), index_entries=entries.get(path, []))
+        module = SubmoduleInfo(
+            path, head_oid=head_links.get(path), index_entries=entries.get(path, [])
+        )
         current = next((entry for entry in module.index_entries if entry[2] == 0), None)
         if current is not None:
             module.index_mode = current[0]
@@ -5650,15 +6819,18 @@ def collect_submodules(st: RepoStatus, cfg: dict) -> None:
         try:
             if not path_in_root(child, st.path):
                 raise GitReadError("submodule path leaves parent worktree")
-            if any((st.path.joinpath(*Path(path).parts[:index])).is_symlink()
-                   for index in range(1, len(Path(path).parts))):
+            if any(
+                (st.path.joinpath(*Path(path).parts[:index])).is_symlink()
+                for index in range(1, len(Path(path).parts))
+            ):
                 raise GitReadError("submodule path traverses a symlink")
             try:
                 info = child.lstat()
             except FileNotFoundError:
                 info = None
-            module.worktree_kind = ("missing" if info is None else
-                                    "directory" if stat.S_ISDIR(info.st_mode) else "file")
+            module.worktree_kind = (
+                "missing" if info is None else "directory" if stat.S_ISDIR(info.st_mode) else "file"
+            )
             if module.worktree_kind == "directory" and (child / ".git").exists():
                 actual = _git_reported_path(child, "--show-toplevel", timeout=timeout)
                 if path_identity(actual) != path_identity(child):
@@ -5666,9 +6838,18 @@ def collect_submodules(st: RepoStatus, cfg: dict) -> None:
                 module.initialized = True
                 module.worktree_kind = "repository"
                 module.checked_out_oid = current_head(child, timeout)
-                status = _required_git(child, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                                       "--ignore-submodules=none", timeout=timeout)
-                module.modified, module.deleted, module.untracked, module.conflicts, _ = parse_porcelain(status.stdout)
+                status = _required_git(
+                    child,
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                    timeout=timeout,
+                )
+                module.modified, module.deleted, module.untracked, module.conflicts, _ = (
+                    parse_porcelain(status.stdout)
+                )
                 module.operation = repository_operation(child, timeout)
                 if current_head(child, timeout) != module.checked_out_oid:
                     raise GitReadError("submodule HEAD changed during inventory")
@@ -5677,11 +6858,18 @@ def collect_submodules(st: RepoStatus, cfg: dict) -> None:
         modules.append(module)
     if paths:
         after = read_index_entries(st.path, timeout)
-        after_indexed = {path for path, values in after.items() if any(mode == "160000" for mode, oid, stage in values)}
-        if (indexed != after_indexed or any(entries.get(path) != after.get(path) for path in paths)
-                or current_head(st.path, timeout) != st.head_oid
-                or current_symbolic_head_ref(st.path, timeout) != (
-                    None if st.branch == "(detached)" else "refs/heads/" + st.branch)):
+        after_indexed = {
+            path
+            for path, values in after.items()
+            if any(mode == "160000" for mode, oid, stage in values)
+        }
+        if (
+            indexed != after_indexed
+            or any(entries.get(path) != after.get(path) for path in paths)
+            or current_head(st.path, timeout) != st.head_oid
+            or current_symbolic_head_ref(st.path, timeout)
+            != (None if st.branch == "(detached)" else "refs/heads/" + st.branch)
+        ):
             raise GitReadError("parent HEAD or submodule index changed during inventory")
     st.submodules, st.submodules_scanned = modules, True
 
@@ -5702,8 +6890,11 @@ def worktree_summary(st: RepoStatus) -> str:
         return t("family_error", e=terminal_text(st.worktrees_error))
     if not st.worktrees_measured_at:
         return t("family_unknown")
-    return t("worktrees_summary", n=len(st.worktrees),
-             outside=sum(not entry.in_scan_root for entry in st.worktrees))
+    return t(
+        "worktrees_summary",
+        n=len(st.worktrees),
+        outside=sum(not entry.in_scan_root for entry in st.worktrees),
+    )
 
 
 def submodule_summary(st: RepoStatus) -> str:
@@ -5712,7 +6903,11 @@ def submodule_summary(st: RepoStatus) -> str:
     if not st.submodules_scanned:
         return t("submodule_unknown")
     value = t("submodules_summary", n=len(st.submodules))
-    return value + " · " + t("modules_review", n=st.submodule_review_count) if st.submodule_review_count else value
+    return (
+        value + " · " + t("modules_review", n=st.submodule_review_count)
+        if st.submodule_review_count
+        else value
+    )
 
 
 def inspection_summary(st: RepoStatus) -> str:
@@ -5728,8 +6923,14 @@ def worktree_lines(st: RepoStatus, statuses: list) -> list[str]:
     lines = [worktree_summary(st)]
     if not st.worktrees_measured_at:
         return lines
-    lines.extend(aligned_rows([(t("family_common"), display_git_path(st.common_dir)),
-                               (t("family_measured"), st.worktrees_measured_at)]))
+    lines.extend(
+        aligned_rows(
+            [
+                (t("family_common"), display_git_path(st.common_dir)),
+                (t("family_measured"), st.worktrees_measured_at),
+            ]
+        )
+    )
     local = {path_identity(status.path): status for status in statuses}
     for entry in st.worktrees:
         lines.extend(["", display_git_path(entry.path)])
@@ -5749,22 +6950,39 @@ def worktree_lines(st: RepoStatus, statuses: list) -> list[str]:
         elif entry.present is None:
             notes.append(t("family_unknown_presence"))
         if entry.locked:
-            notes.append(t("family_locked", reason=terminal_text(entry.lock_reason) or t("none_label")))
+            notes.append(
+                t("family_locked", reason=terminal_text(entry.lock_reason) or t("none_label"))
+            )
         if entry.prunable:
-            notes.append(t("family_prunable", reason=terminal_text(entry.prune_reason) or t("none_label")))
+            notes.append(
+                t("family_prunable", reason=terminal_text(entry.prune_reason) or t("none_label"))
+            )
         lines.append("  " + " · ".join(notes))
         measured = local.get(path_identity(entry.path))
         if measured is not None and not entry.bare:
-            worktree = (t("age_unknown") if measured.error and not measured.fetch_error else
-                        t("info_changes", m=measured.modified, d=measured.deleted,
-                          u=measured.untracked, c=measured.conflicts))
-            rows = [(t("info_branch"), terminal_text(measured.branch)),
-                    (t("info_worktree"), worktree), (t("info_stashes"), str(len(measured.stashes))),
-                    (t("info_measured"), measured.measured_at or t("age_unknown"))]
+            worktree = (
+                t("age_unknown")
+                if measured.error and not measured.fetch_error
+                else t(
+                    "info_changes",
+                    m=measured.modified,
+                    d=measured.deleted,
+                    u=measured.untracked,
+                    c=measured.conflicts,
+                )
+            )
+            rows = [
+                (t("info_branch"), terminal_text(measured.branch)),
+                (t("info_worktree"), worktree),
+                (t("info_stashes"), str(len(measured.stashes))),
+                (t("info_measured"), measured.measured_at or t("age_unknown")),
+            ]
             if measured.operation:
                 rows.append((t("info_operation"), operation_label(measured.operation)))
             if measured.error:
-                rows.append((t("info_last_error"), terminal_text(measured.error_long or measured.error)))
+                rows.append(
+                    (t("info_last_error"), terminal_text(measured.error_long or measured.error))
+                )
             lines.extend("  " + line for line in aligned_rows(rows))
         elif not entry.bare:
             lines.append("  " + t("family_unmeasured" if entry.in_scan_root else "family_outside"))
@@ -5803,17 +7021,34 @@ def submodule_lines(st: RepoStatus) -> list[str]:
             index = f"{t('submodule_replaced')} ({module.index_mode} {value})"
         elif module.conflicted:
             index = t("conflict_label")
-        contents = (t("age_unknown") if module.error else t("info_changes", m=module.modified,
-                    d=module.deleted, u=module.untracked, c=module.conflicts))
-        rows = [(t("submodule_head"), module.head_oid or t("submodule_not_recorded")),
-                (t("submodule_index"), index),
-                (t("submodule_checkout"), checkout),
-                (t("submodule_contents"), contents)]
+        contents = (
+            t("age_unknown")
+            if module.error
+            else t(
+                "info_changes",
+                m=module.modified,
+                d=module.deleted,
+                u=module.untracked,
+                c=module.conflicts,
+            )
+        )
+        rows = [
+            (t("submodule_head"), module.head_oid or t("submodule_not_recorded")),
+            (t("submodule_index"), index),
+            (t("submodule_checkout"), checkout),
+            (t("submodule_contents"), contents),
+        ]
         if state:
             lines.append("  " + " · ".join(state))
         if module.conflicted:
-            rows.append((t("submodule_stages"), ", ".join(
-                f"{stage}: {mode} {oid}" for mode, oid, stage in module.index_entries)))
+            rows.append(
+                (
+                    t("submodule_stages"),
+                    ", ".join(
+                        f"{stage}: {mode} {oid}" for mode, oid, stage in module.index_entries
+                    ),
+                )
+            )
         if module.operation:
             rows.append((t("info_operation"), operation_label(module.operation)))
         if module.error:
@@ -5844,8 +7079,9 @@ def valid_timestamp(value) -> bool:
 def measurement_age(value: str) -> str:
     if not value or not valid_timestamp(value):
         return t("age_unknown")
-    seconds = (datetime.datetime.now(datetime.timezone.utc)
-               - parse_timestamp(value)).total_seconds()
+    seconds = (
+        datetime.datetime.now(datetime.timezone.utc) - parse_timestamp(value)
+    ).total_seconds()
     if seconds < 0:
         return t("age_clock")
     if seconds < 60:
@@ -5859,12 +7095,16 @@ def measurement_age(value: str) -> str:
 
 def measurement_summary(st: RepoStatus) -> str:
     remotes = ", ".join(f"{r.name} {measurement_age(r.fetched_at)}" for r in st.remotes)
-    return t("measurement_summary", local=measurement_age(st.measured_at),
-             remote=remotes or t("none_label"))
+    return t(
+        "measurement_summary",
+        local=measurement_age(st.measured_at),
+        remote=remotes or t("none_label"),
+    )
 
 
-def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
-                   fetch_remote: str | None = None) -> RepoStatus:
+def collect_status(
+    repo: Path, root: Path, cfg: dict, fetch: bool = False, fetch_remote: str | None = None
+) -> RepoStatus:
     """Kompletten Zustand eines Repos einsammeln (läuft parallel in Threads)."""
     rel = str(repo.relative_to(root)) if repo != root else repo.name
     # macOS liefert Dateinamen je nach Herkunft in NFD ("ö" = "o" + kombinierender
@@ -5905,195 +7145,254 @@ def collect_status(repo: Path, root: Path, cfg: dict, fetch: bool = False,
             # Die Gitlinks erklären den Fehler, ohne dem fremden Pfad zu folgen.
             collect_topology(st, root, cfg)
             raise
-        st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(
-            r.stdout)
+        st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(r.stdout)
         st.operation = repository_operation(repo, t_)
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
         r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
-        st.stashes = [l for l in r.stdout.splitlines() if l.strip()]
+        st.stashes = [line for line in r.stdout.splitlines() if line.strip()]
         collect_topology(st, root, cfg)
         st.measured_at = utc_now()
 
         # Vergleich mit ALLEN Remotes (auf Basis des letzten fetch-Stands).
         configs = read_remote_configs(repo, cfg)
+        if fetch:
+            configs, fetch_failures, fetch_times = _refresh_scan_remotes(
+                st, configs, cfg, fetch_remote
+            )
+        else:
+            fetch_failures, fetch_times = {}, {}
         st.remote = detect_sync_remote(repo, cfg, configs)
-        fetch_failures: dict[str, tuple[str, str, str]] = {}
-        fetch_times: dict[str, str] = {}
-        if fetch and fetch_remote is not None and fetch_remote not in configs:
-            fetch_failures[fetch_remote] = (
-                "changed", remote_check_message(fetch_remote, "changed", 0, "", t_), "")
-        # Ohne ausgecheckten Branch gibt es keinen Tracking-Ref zu holen. Der
-        # Fetch entfaellt dann ganz, statt jedes Remote als gescheitert zu
-        # melden: Das ueberschriebe den ehrlichen Zustand "detached" mit einem
-        # Fehler und setzte `fetch_error`, was im Rechnervergleich zusaetzlich
-        # `error` und `remote_state` aus dem Vergleich nimmt.
-        if fetch and st.branch not in ("?", "(detached)"):
-            # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
-            # Fetch verändert weder Branch noch Working Tree. Als bewusst
-            # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
-            for name, remote in configs.items():
-                if fetch_remote is not None and name != fetch_remote:
-                    continue
-                blocked = fetch_remote_block_reason(
-                    repo, remote, st.branch, t_)
-                if blocked is not None:
-                    block_reason, block_detail = blocked
-                    fetch_failures[name] = (
-                        block_reason,
-                        remote_check_message(name, block_reason, 0,
-                                             block_detail, cfg["fetch_timeout"]),
-                        "",
-                    )
-                    continue
-                try:
-                    fetched = fetch_remote_safely(
-                        repo, remote, st.branch, cfg["fetch_timeout"])
-                except RemoteConfigChangedError:
-                    outcome, detail = "changed", ""
-                except FetchTrackingTimeout:
-                    outcome, detail = "outcome_unknown", ""
-                except subprocess.TimeoutExpired:
-                    outcome, detail = "timeout", ""
-                except OSError:
-                    # Fetch oder Tracking-CAS können bereits gewirkt haben.
-                    # Der Fehler gehört nur zu diesem Remote; weitere sichere
-                    # Remotes werden trotzdem aktualisiert und angezeigt.
-                    outcome, detail = "outcome_unknown", ""
-                else:
-                    if fetched.returncode == 0:
-                        fetch_times[name] = utc_now()
-                        continue
-                    outcome = classify_remote_check(
-                        fetched,
-                        keychain_helper=remote_uses_keychain_helper(
-                            repo, name, cfg["git_timeout"]),
-                    )
-                    detail = last_error_line(fetched)
-                fetch_failures[name] = (
-                    outcome,
-                    remote_check_message(
-                        name, outcome, 0, detail, cfg["fetch_timeout"]),
-                    detail,
-                )
-            # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
-            # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
-            # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
-            fetched_configs = configs
-            configs = read_remote_configs(repo, cfg)
-            for name in set(fetched_configs) | set(configs):
-                if fetched_configs.get(name) != configs.get(name):
-                    fetch_times.pop(name, None)
-                    fetch_failures[name] = (
-                        "changed",
-                        remote_check_message(
-                            name, "changed", 0, "", cfg["fetch_timeout"]),
-                        "",
-                    )
-            st.remote = detect_sync_remote(repo, cfg, configs)
         # Der eigene Fetch darf Refs bewegen. Erst danach beginnt die gemeinsame
         # Messung für Remote-Zähler, Branch-Inventar und Upstream.
         scan_refs = read_ref_snapshot(repo, t_)
-        st.remotes = collect_remote_statuses(
-            repo, st.branch, st.remote, cfg, configs,
-            fetch_failures=fetch_failures, head_oid=st.head_oid)
-        for remote in st.remotes:
-            remote.fetched_at = fetch_times.get(remote.name, "")
-        try:
-            st.branches = read_branch_inventory(repo, cfg)
-            st.branches_scanned = True
-        except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            st.branches = []
-            st.branches_error = str(exc)
-        summarize_fetch_failures(st)
-        removed_during_fetch = set(fetch_failures) - set(configs)
-        if removed_during_fetch:
-            messages = [remote_check_message(
-                name, "changed", 0, "", cfg["fetch_timeout"])
-                for name in sorted(removed_during_fetch)]
-            st.error = "; ".join(filter(None, [st.error, *(
-                remote_failure_short(name, "changed")
-                for name in sorted(removed_during_fetch))]))
-            st.error_long = " ".join(filter(None, [st.error_long, *messages]))
-            st.remote_state = "error"
-            st.fetch_error = True
-        if st.remote is None:
-            if not st.error and not detached:
-                st.remote_state = "no-remote"
-            st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(
-                repo, None, cfg)
-            return st
-        if detached:
-            return st
-        sync = next((remote for remote in st.remotes if remote.is_sync), None)
-        if sync is None or not sync.branch_exists:
-            if not st.error:
-                st.remote_state = "no-branch"
-            return st
-        st.ahead, st.behind = sync.ahead, sync.behind
-
-        # Zusatz: Stand gegenüber einem fremden Upstream (z.B. github).
-        st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(
-            repo, st.remote, cfg)
+        _measure_scan_graph(st, cfg, configs, fetch_failures, fetch_times, detached)
     except subprocess.TimeoutExpired:
         st.error = t("git_timeout")
         st.remote_state = "error"
-    except Exception as exc:  # Ein kaputtes Repo darf die Übersicht nicht killen.
+        st.fetch_error = False
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
         st.error = str(exc)
         st.remote_state = "error"
-    finally:
-        if scan_refs is not None:
-            try:
-                # Auch unborn HEAD und detached HEAD gehören zur Identität.
-                # finally prüft ebenso die frühen Rückgaben ohne Sync-Remote.
-                if (current_symbolic_head_ref(repo, t_), current_head(repo, t_)) != head_before:
-                    raise GitReadError(t("scan_head_changed"))
-                if read_ref_snapshot(repo, t_) != scan_refs:
-                    raise GitReadError(t("scan_refs_changed"))
-            except Exception as exc:
-                st.head_oid = ""
-                st.branches = []
-                st.branches_scanned = False
-                st.branches_error = st.error = st.error_long = str(exc)
-                st.remote_state = "error"
-                for remote in st.remotes:
-                    remote.content_equal = None
-                    if remote.public:
-                        remote.content_error = str(exc)
-                # Dies ist ein lokaler Messfehler, auch wenn zusätzlich ein
-                # Remote-Fetch scheiterte. Der Vergleich darf ihn nicht ausblenden.
-                st.fetch_error = False
-        if not st.measured_at:
-            st.measured_at = utc_now()
+        st.fetch_error = False
+    if scan_refs is not None:
+        _verify_scan_measurement(st, t_, head_before, scan_refs)
+    if not st.measured_at:
+        st.measured_at = utc_now()
     return st
+
+
+def _refresh_scan_remotes(
+    st: RepoStatus,
+    configs: dict[str, RemoteConfig],
+    cfg: dict,
+    fetch_remote: str | None,
+) -> tuple[dict[str, RemoteConfig], dict[str, tuple[str, str, str]], dict[str, str]]:
+    repo = st.path
+    t_ = cfg["git_timeout"]
+    fetch_failures: dict[str, tuple[str, str, str]] = {}
+    fetch_times: dict[str, str] = {}
+    if fetch_remote is not None and fetch_remote not in configs:
+        fetch_failures[fetch_remote] = (
+            "changed",
+            remote_check_message(fetch_remote, "changed", 0, "", t_),
+            "",
+        )
+    # Ohne ausgecheckten Branch gibt es keinen Tracking-Ref zu holen. Der
+    # Fetch entfaellt dann ganz, statt jedes Remote als gescheitert zu
+    # melden: Das ueberschriebe den ehrlichen Zustand "detached" mit einem
+    # Fehler und setzte `fetch_error`, was im Rechnervergleich zusaetzlich
+    # `error` und `remote_state` aus dem Vergleich nimmt.
+    if st.branch not in ("?", "(detached)"):
+        # R aktualisiert nicht nur alle Repos, sondern je Repo auch alle Remotes.
+        # Fetch verändert weder Branch noch Working Tree. Als bewusst
+        # ausgelöste, zustandsändernde Aktion gehört er ins Befehlsprotokoll.
+        for name, remote in configs.items():
+            if fetch_remote is not None and name != fetch_remote:
+                continue
+            blocked = fetch_remote_block_reason(repo, remote, st.branch, t_)
+            if blocked is not None:
+                block_reason, block_detail = blocked
+                fetch_failures[name] = (
+                    block_reason,
+                    remote_check_message(name, block_reason, 0, block_detail, cfg["fetch_timeout"]),
+                    "",
+                )
+                continue
+            try:
+                fetched = fetch_remote_safely(repo, remote, st.branch, cfg["fetch_timeout"])
+            except RemoteConfigChangedError:
+                outcome, detail = "changed", ""
+            except FetchTrackingTimeout:
+                outcome, detail = "outcome_unknown", ""
+            except subprocess.TimeoutExpired:
+                outcome, detail = "timeout", ""
+            except OSError:
+                # Fetch oder Tracking-CAS können bereits gewirkt haben.
+                # Der Fehler gehört nur zu diesem Remote; weitere sichere
+                # Remotes werden trotzdem aktualisiert und angezeigt.
+                outcome, detail = "outcome_unknown", ""
+            else:
+                if fetched.returncode == 0:
+                    fetch_times[name] = utc_now()
+                    continue
+                outcome = classify_remote_check(
+                    fetched,
+                    keychain_helper=remote_uses_keychain_helper(repo, name, cfg["git_timeout"]),
+                )
+                detail = last_error_line(fetched)
+            fetch_failures[name] = (
+                outcome,
+                remote_check_message(name, outcome, 0, detail, cfg["fetch_timeout"]),
+                detail,
+            )
+        # Auch nach einem Teilfehler sind vorhandene Remotes und ihre zuletzt
+        # bekannten Tracking-Refs wertvoll. Ohne sie sähe ein Auth-Fehler wie
+        # ein gelöschtes Remote aus und erzeugte irreführende DRIFT-Zeilen.
+        fetched_configs = configs
+        configs = read_remote_configs(repo, cfg)
+        for name in set(fetched_configs) | set(configs):
+            if fetched_configs.get(name) != configs.get(name):
+                fetch_times.pop(name, None)
+                fetch_failures[name] = (
+                    "changed",
+                    remote_check_message(name, "changed", 0, "", cfg["fetch_timeout"]),
+                    "",
+                )
+
+    return configs, fetch_failures, fetch_times
+
+
+def _measure_scan_graph(
+    st: RepoStatus,
+    cfg: dict,
+    configs: dict[str, RemoteConfig],
+    fetch_failures: dict[str, tuple[str, str, str]],
+    fetch_times: dict[str, str],
+    detached: bool,
+) -> None:
+    repo = st.path
+    st.remotes = collect_remote_statuses(
+        repo,
+        st.branch,
+        st.remote,
+        cfg,
+        configs,
+        fetch_failures=fetch_failures,
+        head_oid=st.head_oid,
+    )
+    for state in st.remotes:
+        state.fetched_at = fetch_times.get(state.name, "")
+    try:
+        st.branches = read_branch_inventory(repo, cfg)
+        st.branches_scanned = True
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        st.branches = []
+        st.branches_error = str(exc)
+    summarize_fetch_failures(st)
+    removed_during_fetch = set(fetch_failures) - set(configs)
+    if removed_during_fetch:
+        messages = [
+            remote_check_message(name, "changed", 0, "", cfg["fetch_timeout"])
+            for name in sorted(removed_during_fetch)
+        ]
+        st.error = "; ".join(
+            filter(
+                None,
+                [
+                    st.error,
+                    *(
+                        remote_failure_short(name, "changed")
+                        for name in sorted(removed_during_fetch)
+                    ),
+                ],
+            )
+        )
+        st.error_long = " ".join(filter(None, [st.error_long, *messages]))
+        st.remote_state = "error"
+        st.fetch_error = True
+    if st.remote is None:
+        if not st.error and not detached:
+            st.remote_state = "no-remote"
+        st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(repo, None, cfg)
+        return
+    if detached:
+        return
+    sync = next((remote for remote in st.remotes if remote.is_sync), None)
+    if sync is None or not sync.branch_exists:
+        if not st.error:
+            st.remote_state = "no-branch"
+        return
+    st.ahead, st.behind = sync.ahead, sync.behind
+
+    # Zusatz: Stand gegenüber einem fremden Upstream (z.B. github).
+    st.upstream, st.upstream_ahead, st.upstream_behind = upstream_delta(repo, st.remote, cfg)
+
+
+def _verify_scan_measurement(
+    st: RepoStatus,
+    timeout: int,
+    head_before: tuple[str | None, str | None],
+    scan_refs: dict[str, tuple[str, str]],
+) -> None:
+    repo = st.path
+    try:
+        # Auch unborn HEAD und detached HEAD gehören zur Identität.
+        if (current_symbolic_head_ref(repo, timeout), current_head(repo, timeout)) != head_before:
+            raise GitReadError(t("scan_head_changed"))
+        if read_ref_snapshot(repo, timeout) != scan_refs:
+            raise GitReadError(t("scan_refs_changed"))
+    except (GitReadError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        detail = str(exc)
+        st.head_oid = ""
+        st.branches = []
+        st.branches_scanned = False
+        st.branches_error = detail
+        if not st.error or st.fetch_error:
+            st.error = detail
+        st.error_long = " ".join(dict.fromkeys(filter(None, [st.error, st.error_long, detail])))
+        st.remote_state = "error"
+        for remote in st.remotes:
+            remote.content_equal = None
+            if remote.public:
+                remote.content_error = detail
+        # Ein lokaler Messfehler muss auch nach einem fehlgeschlagenen Fetch sichtbar sein.
+        st.fetch_error = False
 
 
 def remote_approval_signature(remote: RemoteStatus | None) -> tuple | None:
     if remote is None:
         return None
     return (
-        tuple(remote.fetch_fingerprints), tuple(remote.push_fingerprints),
-        remote.public, remote.mixed_public, remote.target_mismatch,
-        remote.multiple_pushurls, remote.fetch_refspecs_safe,
-        remote.fetch_refspec_fingerprint, remote.branch_mapping_safe,
-        remote.fetch_url_safe, remote.push_url_safe,
+        tuple(remote.fetch_fingerprints),
+        tuple(remote.push_fingerprints),
+        remote.public,
+        remote.mixed_public,
+        remote.target_mismatch,
+        remote.multiple_pushurls,
+        remote.fetch_refspecs_safe,
+        remote.fetch_refspec_fingerprint,
+        remote.branch_mapping_safe,
+        remote.fetch_url_safe,
+        remote.push_url_safe,
     )
 
 
-def carry_fetch_times(old: RepoStatus, new: RepoStatus,
-                      refetched: str | None = None) -> None:
+def carry_fetch_times(old: RepoStatus, new: RepoStatus, refetched: str | None = None) -> None:
     previous = {remote.name: remote for remote in old.remotes}
     for remote in new.remotes:
         before = previous.get(remote.name)
-        if (old.branch == new.branch and before is not None
-                and remote_approval_signature(before) == remote_approval_signature(remote)):
+        if (
+            old.branch == new.branch
+            and before is not None
+            and remote_approval_signature(before) == remote_approval_signature(remote)
+        ):
             if remote.name == refetched:
                 remote.fetched_at = utc_now()
             elif not remote.fetched_at:
                 remote.fetched_at = before.fetched_at
 
 
-def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
-                        refetched: str | None = None) -> None:
+def carry_fetch_failure(old: RepoStatus, new: RepoStatus, refetched: str | None = None) -> None:
     """Einen bekannten Fetch-Fehler in den frisch gelesenen Zustand übernehmen.
 
     `collect_status` ohne `fetch` geht nur über lokale Daten und weiß deshalb
@@ -6110,15 +7409,20 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
     repariert.
     """
     carry_fetch_times(old, new, refetched)
-    failed = {remote.name: remote for remote in old.remotes
-              if remote.fetch_failed and remote.name != refetched}
+    failed = {
+        remote.name: remote
+        for remote in old.remotes
+        if remote.fetch_failed and remote.name != refetched
+    }
     if not failed:
         return
     for remote in new.remotes:
         previous = failed.get(remote.name)
-        same_endpoint = (previous and old.branch == new.branch
-                         and remote_approval_signature(previous) == remote_approval_signature(remote))
-        if same_endpoint:
+        if (
+            previous is not None
+            and old.branch == new.branch
+            and remote_approval_signature(previous) == remote_approval_signature(remote)
+        ):
             remote.fetch_failed = True
             remote.fetch_outcome = previous.fetch_outcome
             remote.fetch_error_long = previous.fetch_error_long
@@ -6130,15 +7434,15 @@ def carry_fetch_failure(old: RepoStatus, new: RepoStatus,
         summarize_fetch_failures(new)
 
 
-def collect_all(root: Path, cfg: dict, fetch: bool = False,
-                progress=None, fetch_remote: str | None = None) -> list[RepoStatus]:
+def collect_all(
+    root: Path, cfg: dict, fetch: bool = False, progress=None, fetch_remote: str | None = None
+) -> list[RepoStatus]:
     """Alle Repos parallel einsammeln; optional Fortschritts-Callback (done, total)."""
     repos = find_repos(root, cfg["skip_dirs"])
     results: list[RepoStatus] = []
     workers = FETCH_SCAN_WORKERS if fetch else LOCAL_SCAN_WORKERS
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(collect_status, r, root, cfg, fetch, fetch_remote)
-                   for r in repos]
+        futures = [pool.submit(collect_status, r, root, cfg, fetch, fetch_remote) for r in repos]
         for done, fut in enumerate(concurrent.futures.as_completed(futures), 1):
             results.append(fut.result())
             if progress:
@@ -6174,15 +7478,8 @@ class BackgroundScan:
 
     def __init__(self, root: Path, cfg: dict):
         self.root = root
-        # Eigene Kopie: Ein Scan ist EINE Messung und muss unter EINER
-        # Einstellung stattfinden. Vorher lasen die Arbeiter dasselbe dict wie
-        # die Oberflaeche, und wer waehrend eines laufenden `R` ueber `,` etwa
-        # `fetch_timeout` aenderte, bekam eine Liste, deren vordere Repos unter
-        # der alten und deren hintere unter der neuen Geduldsgrenze gemessen
-        # wurden — ohne dass irgendwo stand, welches Repo unter welcher
-        # (Entscheidung Daniel, 2026-09-10). Eine Aenderung wirkt jetzt ab dem
-        # naechsten Scan. Die Anzeigesprache haengt weiterhin am globalen
-        # `UI_LANG`, den `t()` liest; sie laesst sich nicht mitkopieren.
+        # Die Worker teilen eine Kopie der Einstellungen. Änderungen in der
+        # Oberfläche gelten erst beim nächsten Scan.
         self.cfg = json.loads(json.dumps(cfg))
         self.queue: queue.Queue = queue.Queue()
         self.total = 0
@@ -6198,10 +7495,11 @@ class BackgroundScan:
             repos = find_repos(self.root, self.cfg["skip_dirs"])
             self.queue.put(("total", len(repos)))
             results = []
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=FETCH_SCAN_WORKERS) as pool:
-                futures = [pool.submit(self.scope.call, collect_status, repo,
-                                       self.root, self.cfg, True) for repo in repos]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_SCAN_WORKERS) as pool:
+                futures = [
+                    pool.submit(self.scope.call, collect_status, repo, self.root, self.cfg, True)
+                    for repo in repos
+                ]
                 for fut in concurrent.futures.as_completed(futures):
                     st = fut.result()
                     if self.scope.cancelled.is_set():
@@ -6209,7 +7507,7 @@ class BackgroundScan:
                     results.append(st)
                     self.queue.put(("one", st))
             self.queue.put(("done", sort_statuses(results)))
-        except BaseException as exc:            # noqa: BLE001 — siehe unten
+        except BaseException as exc:  # noqa: BLE001 — siehe unten
             # Auch ein Abbruch (GitCancelled) oder ein Fehler in find_repos darf
             # den Thread nicht stumm sterben lassen: Die Oberflaeche wartete
             # sonst ewig auf ein "done", das nie kaeme.
@@ -6231,6 +7529,7 @@ class BackgroundScan:
 # ---------------------------------------------------------------------------
 # Nicht-interaktive Ausgabe (--list / --json / kein TTY)
 # ---------------------------------------------------------------------------
+
 
 def json_text(value):
     """Git-Text an der JSON-Grenze gültig und sichtbar machen; None bleibt None.
@@ -6282,7 +7581,8 @@ def valid_snapshot_path(entry: dict, *, relative: bool) -> bool:
 
 
 def unique_snapshot_paths(entries: list) -> bool:
-    identities, labels = set(), {}
+    identities = set()
+    labels: dict[str, str | None] = {}
     for entry in entries:
         identity = snapshot_path_identity(entry)
         key = identity if identity is not None else ("legacy", entry["path"])
@@ -6297,46 +7597,60 @@ def unique_snapshot_paths(entries: list) -> bool:
 
 def status_dict(st: RepoStatus) -> dict:
     payload = {
-        "path": terminal_text(st.path), "rel": terminal_text(st.rel),
+        "path": terminal_text(st.path),
+        "rel": terminal_text(st.rel),
         "branch": json_text(st.branch),
-        "head_oid": st.head_oid, "operation": st.operation,
+        "head_oid": st.head_oid,
+        "operation": st.operation,
         "measured_at": st.measured_at,
-        "remote": json_text(st.remote), "remote_state": st.remote_state,
-        "ahead": st.ahead, "behind": st.behind,
+        "remote": json_text(st.remote),
+        "remote_state": st.remote_state,
+        "ahead": st.ahead,
+        "behind": st.behind,
         "upstream": json_text(st.upstream),
-        "upstream_ahead": st.upstream_ahead, "upstream_behind": st.upstream_behind,
+        "upstream_ahead": st.upstream_ahead,
+        "upstream_behind": st.upstream_behind,
         "remotes": [
-            {"name": json_text(r.name), "public": r.public,
-             "mixed_public": r.mixed_public,
-             "sync": r.is_sync,
-             "branch_exists": r.branch_exists, "ahead": r.ahead, "behind": r.behind,
-             "content_equal": r.content_equal,
-             "content_excludes": [json_text(path) for path in r.content_excludes],
-             "content_error": json_text(r.content_error),
-             "history_differs": r.history_differs,
-             "fetch_fingerprint": r.fetch_fingerprint,
-             "fetch_fingerprints": r.fetch_fingerprints,
-             "push_fingerprints": r.push_fingerprints,
-             "target_mismatch": r.target_mismatch,
-             "multiple_pushurls": r.multiple_pushurls,
-             "fetch_refspecs_safe": r.fetch_refspecs_safe,
-            "fetch_refspec_fingerprint": r.fetch_refspec_fingerprint,
-            "branch_mapping_safe": r.branch_mapping_safe,
-            "fetch_url_safe": r.fetch_url_safe,
-            "push_url_safe": r.push_url_safe,
-             # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
-             # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
-             "fetch_failed": r.fetch_failed,
-             "fetched_at": r.fetched_at,
-             "fetch_outcome": r.fetch_outcome,
-             "fetch_error_long": json_text(r.fetch_error_long),
-             "fetch_error_detail": json_text(r.fetch_error_detail)}
+            {
+                "name": json_text(r.name),
+                "public": r.public,
+                "mixed_public": r.mixed_public,
+                "sync": r.is_sync,
+                "branch_exists": r.branch_exists,
+                "ahead": r.ahead,
+                "behind": r.behind,
+                "content_equal": r.content_equal,
+                "content_excludes": [json_text(path) for path in r.content_excludes],
+                "content_error": json_text(r.content_error),
+                "history_differs": r.history_differs,
+                "fetch_fingerprint": r.fetch_fingerprint,
+                "fetch_fingerprints": r.fetch_fingerprints,
+                "push_fingerprints": r.push_fingerprints,
+                "target_mismatch": r.target_mismatch,
+                "multiple_pushurls": r.multiple_pushurls,
+                "fetch_refspecs_safe": r.fetch_refspecs_safe,
+                "fetch_refspec_fingerprint": r.fetch_refspec_fingerprint,
+                "branch_mapping_safe": r.branch_mapping_safe,
+                "fetch_url_safe": r.fetch_url_safe,
+                "push_url_safe": r.push_url_safe,
+                # Bewusst NICHT im --diff-Vergleich: dieser Zustand hängt am Netz des
+                # jeweiligen Rechners, sonst meldete eine Offline-Seite lauter Drift.
+                "fetch_failed": r.fetch_failed,
+                "fetched_at": r.fetched_at,
+                "fetch_outcome": r.fetch_outcome,
+                "fetch_error_long": json_text(r.fetch_error_long),
+                "fetch_error_detail": json_text(r.fetch_error_detail),
+            }
             for r in st.remotes
         ],
-        "modified": st.modified, "deleted": st.deleted, "untracked": st.untracked,
+        "modified": st.modified,
+        "deleted": st.deleted,
+        "untracked": st.untracked,
         "conflicts": st.conflicts,
-        "stashes": len(st.stashes), "clean_and_synced": st.clean_and_synced,
-        "sync_clean": st.sync_clean, "publication_pending": st.publication_pending,
+        "stashes": len(st.stashes),
+        "clean_and_synced": st.clean_and_synced,
+        "sync_clean": st.sync_clean,
+        "publication_pending": st.publication_pending,
         "error": json_text(st.error),
         "error_long": json_text(st.error_long),
         # Aus demselben Grund wie `fetch_failed` oben nicht als Wert verglichen,
@@ -6347,46 +7661,77 @@ def status_dict(st: RepoStatus) -> dict:
     }
     if st.branches_scanned or st.branches_error:
         payload.update(
-            branches=[{
-                "name": json_text(b.name), "oid": b.oid, "current": b.is_head,
-                "upstream": json_text(b.upstream_ref),
-                "upstream_remote": json_text(b.upstream_remote),
-                "ahead": b.ahead, "behind": b.behind,
-                "upstream_gone": b.upstream_gone, "merged": b.merged,
-                "coverage": b.coverage, "uncovered_commits": b.uncovered_commits,
-            } for b in st.branches],
+            branches=[
+                {
+                    "name": json_text(b.name),
+                    "oid": b.oid,
+                    "current": b.is_head,
+                    "upstream": json_text(b.upstream_ref),
+                    "upstream_remote": json_text(b.upstream_remote),
+                    "ahead": b.ahead,
+                    "behind": b.behind,
+                    "upstream_gone": b.upstream_gone,
+                    "merged": b.merged,
+                    "coverage": b.coverage,
+                    "uncovered_commits": b.uncovered_commits,
+                }
+                for b in st.branches
+            ],
             branches_error=json_text(st.branches_error),
             branch_coverage_basis=BRANCH_COVERAGE_BASIS,
         )
     if st.worktrees_measured_at or st.worktrees_error:
         payload["worktrees_error"] = json_text(st.worktrees_error)
         payload["worktree_family"] = {
-            "id": st.worktree_family_id, "common_dir": json_text(st.common_dir),
+            "id": st.worktree_family_id,
+            "common_dir": json_text(st.common_dir),
             "measured_at": st.worktrees_measured_at,
-            "members": [{"path": terminal_text(entry.path), "path_key": snapshot_path_key(entry.path),
-                         "head_oid": entry.head_oid,
-                         "branch": json_text(entry.branch), "bare": entry.bare,
-                         "detached": entry.detached, "locked": entry.locked,
-                         "lock_reason": json_text(entry.lock_reason), "prunable": entry.prunable,
-                         "prune_reason": json_text(entry.prune_reason), "present": entry.present,
-                         "in_scan_root": entry.in_scan_root, "is_current": entry.is_current}
-                        for entry in st.worktrees],
+            "members": [
+                {
+                    "path": terminal_text(entry.path),
+                    "path_key": snapshot_path_key(entry.path),
+                    "head_oid": entry.head_oid,
+                    "branch": json_text(entry.branch),
+                    "bare": entry.bare,
+                    "detached": entry.detached,
+                    "locked": entry.locked,
+                    "lock_reason": json_text(entry.lock_reason),
+                    "prunable": entry.prunable,
+                    "prune_reason": json_text(entry.prune_reason),
+                    "present": entry.present,
+                    "in_scan_root": entry.in_scan_root,
+                    "is_current": entry.is_current,
+                }
+                for entry in st.worktrees
+            ],
         }
     if st.submodules_scanned or st.submodules_error:
         payload["submodules_error"] = json_text(st.submodules_error)
         payload["submodule_review_count"] = st.submodule_review_count
-        payload["submodules"] = [{
-            "path": json_text(module.path), "path_key": snapshot_path_key(module.path),
-            "head_oid": module.head_oid,
-            "index_oid": module.index_oid, "index_mode": module.index_mode,
-            "index_entries": [{"mode": mode, "oid": oid, "stage": stage}
-                              for mode, oid, stage in module.index_entries],
-            "checked_out_oid": module.checked_out_oid, "initialized": module.initialized,
-            "worktree_kind": module.worktree_kind,
-            "modified": module.modified, "deleted": module.deleted, "untracked": module.untracked,
-            "conflicts": module.conflicts, "conflicted": module.conflicted,
-            "operation": module.operation, "error": json_text(module.error),
-        } for module in st.submodules]
+        payload["submodules"] = [
+            {
+                "path": json_text(module.path),
+                "path_key": snapshot_path_key(module.path),
+                "head_oid": module.head_oid,
+                "index_oid": module.index_oid,
+                "index_mode": module.index_mode,
+                "index_entries": [
+                    {"mode": mode, "oid": oid, "stage": stage}
+                    for mode, oid, stage in module.index_entries
+                ],
+                "checked_out_oid": module.checked_out_oid,
+                "initialized": module.initialized,
+                "worktree_kind": module.worktree_kind,
+                "modified": module.modified,
+                "deleted": module.deleted,
+                "untracked": module.untracked,
+                "conflicts": module.conflicts,
+                "conflicted": module.conflicted,
+                "operation": module.operation,
+                "error": json_text(module.error),
+            }
+            for module in st.submodules
+        ]
     return payload
 
 
@@ -6418,18 +7763,35 @@ def _remote_root(local_root: Path, spec_path: str | None) -> str:
         return str(local_root)
 
 
-def make_snapshot(root: Path, statuses: list, *, all_statuses: list | None = None,
-                  query: str = "", view: str = "all") -> dict:
+def make_snapshot(
+    root: Path,
+    statuses: list,
+    *,
+    all_statuses: list | None = None,
+    query: str = "",
+    view: str = "all",
+) -> dict:
     inventory = statuses if all_statuses is None else all_statuses
-    payload = {"schema_version": JSON_SCHEMA_VERSION, "version": __version__,
-               "generated_at": utc_now(), "root": terminal_text(root),
-               "repos": [status_dict(status) for status in statuses]}
+    payload = {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "version": __version__,
+        "generated_at": utc_now(),
+        "root": terminal_text(root),
+        "repos": [status_dict(status) for status in statuses],
+    }
     if query:
-        payload["filter"] = {"query": terminal_text(query), "matches": len(statuses),
-                             "total": len(inventory)}
+        payload["filter"] = {
+            "query": terminal_text(query),
+            "matches": len(statuses),
+            "total": len(inventory),
+        }
     if view != "all":
-        payload["view"] = {"id": view, "matches": len(statuses), "total": len(inventory),
-                           "hidden_attention": hidden_dirty(inventory, statuses)}
+        payload["view"] = {
+            "id": view,
+            "matches": len(statuses),
+            "total": len(inventory),
+            "hidden_attention": hidden_dirty(inventory, statuses),
+        }
     return payload
 
 
@@ -6438,11 +7800,15 @@ def valid_worktree_family(family, error: str) -> bool:
         return False
     if not valid_timestamp(family.get("measured_at")):
         return False
-    if (not isinstance(family.get("id"), str)
-            or (family.get("common_dir") is not None and not isinstance(family["common_dir"], str))):
+    if not isinstance(family.get("id"), str) or (
+        family.get("common_dir") is not None and not isinstance(family["common_dir"], str)
+    ):
         return False
-    if not error and (not re.fullmatch(r"[0-9a-f]{20}", family.get("id", ""))
-                      or not isinstance(family.get("common_dir"), str) or not family["members"]):
+    if not error and (
+        not re.fullmatch(r"[0-9a-f]{20}", family.get("id", ""))
+        or not isinstance(family.get("common_dir"), str)
+        or not family["members"]
+    ):
         return False
     for entry in family["members"]:
         if not isinstance(entry, dict):
@@ -6471,12 +7837,23 @@ def valid_submodule_payload(modules) -> bool:
         for key in ("head_oid", "index_oid", "checked_out_oid"):
             if module.get(key) is not None and not is_object_id(module[key]):
                 return False
-        if module.get("index_mode") != "" and (not isinstance(module.get("index_mode"), str)
-                                                 or not re.fullmatch(r"[0-7]{6}", module["index_mode"])):
+        if module.get("index_mode") != "" and (
+            not isinstance(module.get("index_mode"), str)
+            or not re.fullmatch(r"[0-7]{6}", module["index_mode"])
+        ):
             return False
-        if type(module.get("initialized")) is not bool or type(module.get("conflicted")) is not bool:
+        if (
+            type(module.get("initialized")) is not bool
+            or type(module.get("conflicted")) is not bool
+        ):
             return False
-        if module.get("worktree_kind") not in ("missing", "directory", "repository", "file", "unavailable"):
+        if module.get("worktree_kind") not in (
+            "missing",
+            "directory",
+            "repository",
+            "file",
+            "unavailable",
+        ):
             return False
         if module["initialized"] != (module["worktree_kind"] == "repository"):
             return False
@@ -6493,10 +7870,15 @@ def valid_submodule_payload(modules) -> bool:
             return False
         stages = set()
         for entry in module["index_entries"]:
-            if (not isinstance(entry, dict) or not isinstance(entry.get("mode"), str)
-                    or not re.fullmatch(r"[0-7]{6}", entry["mode"]) or not is_object_id(entry.get("oid"))
-                    or type(entry.get("stage")) is not int or entry["stage"] not in (0, 1, 2, 3)
-                    or entry["stage"] in stages):
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("mode"), str)
+                or not re.fullmatch(r"[0-7]{6}", entry["mode"])
+                or not is_object_id(entry.get("oid"))
+                or type(entry.get("stage")) is not int
+                or entry["stage"] not in (0, 1, 2, 3)
+                or entry["stage"] in stages
+            ):
                 return False
             stages.add(entry["stage"])
         if module["conflicted"] != any(stage != 0 for stage in stages):
@@ -6504,168 +7886,242 @@ def valid_submodule_payload(modules) -> bool:
         current = next((entry for entry in module["index_entries"] if entry["stage"] == 0), None)
         if module["index_mode"] != (current["mode"] if current else ""):
             return False
-        expected = (current["oid"] if current and current["mode"] == "160000"
-                    and set(current["oid"]) != {"0"} else None)
+        expected = (
+            current["oid"]
+            if current and current["mode"] == "160000" and set(current["oid"]) != {"0"}
+            else None
+        )
         if module.get("index_oid") != expected:
             return False
     return unique_snapshot_paths(modules)
 
 
-def _valid_remote_payload(payload) -> bool:
-    """Den --json-Vertrag direkt an der nicht vertrauenswürdigen ssh-Grenze prüfen."""
+def _valid_snapshot_count(value) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _snapshot_scope_error(scope, name: str, repo_count: int) -> str | None:
+    if not isinstance(scope, dict):
+        return name
+    if name == "filter" and not isinstance(scope.get("query"), str):
+        return "filter.query"
+    if name == "view" and scope.get("id") not in STATUS_VIEWS:
+        return "view.id"
+    for key in ("matches", "total"):
+        if not _valid_snapshot_count(scope.get(key)):
+            return f"{name}.{key}"
+    if scope["matches"] != repo_count:
+        return f"{name}.matches"
+    if scope["total"] < scope["matches"]:
+        return f"{name}.total"
+    if name == "filter" and not filter_terms(scope["query"]) and scope["total"] != repo_count:
+        return "filter.total"
+    if name == "view" and (
+        not _valid_snapshot_count(scope.get("hidden_attention"))
+        or scope["hidden_attention"] > scope["total"] - scope["matches"]
+    ):
+        return "view.hidden_attention"
+    return None
+
+
+def _snapshot_branch_error(branch: dict) -> str | None:
+    if not is_object_id(branch.get("oid")):
+        return "oid"
+    coverage = branch.get("coverage")
+    if coverage not in BRANCH_COVERAGE_STATES:
+        return "coverage"
+    count = branch.get("uncovered_commits")
+    if coverage == "unknown":
+        if count is not None:
+            return "uncovered_commits"
+    elif not _valid_snapshot_count(count) or (count == 0) != (coverage == "covered"):
+        return "uncovered_commits"
+    for key in ("current", "upstream_gone", "merged"):
+        if type(branch.get(key)) is not bool:
+            return key
+    for key in ("upstream", "upstream_remote"):
+        if not isinstance(branch.get(key), str):
+            return key
+    for key in ("ahead", "behind"):
+        if not _valid_snapshot_count(branch.get(key)):
+            return key
+    return None
+
+
+def _snapshot_remote_error(remote: dict) -> str | None:
+    if not valid_timestamp(remote.get("fetched_at", "")):
+        return "fetched_at"
+    if remote.get("content_equal") is not None and type(remote["content_equal"]) is not bool:
+        return "content_equal"
+    for key in ("ahead", "behind"):
+        if key in remote and not _valid_snapshot_count(remote[key]):
+            return key
+    for key in (
+        "public",
+        "mixed_public",
+        "sync",
+        "branch_exists",
+        "target_mismatch",
+        "multiple_pushurls",
+        "fetch_refspecs_safe",
+        "branch_mapping_safe",
+        "fetch_url_safe",
+        "push_url_safe",
+        "fetch_failed",
+        "history_differs",
+    ):
+        if key in remote and type(remote[key]) is not bool:
+            return key
+    for key in (
+        "fetch_fingerprint",
+        "fetch_refspec_fingerprint",
+        "fetch_outcome",
+        "fetch_error_long",
+        "fetch_error_detail",
+        "content_error",
+    ):
+        if key in remote and not isinstance(remote[key], str):
+            return key
+    for key in ("fetch_fingerprints", "push_fingerprints", "content_excludes"):
+        values = remote.get(key, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            return key
+    return None
+
+
+def _snapshot_topology_error(repo: dict) -> str | None:
+    if "worktree_family" in repo and not valid_worktree_family(
+        repo["worktree_family"], repo.get("worktrees_error", "")
+    ):
+        return "worktree_family"
+    if "submodules" in repo and not valid_submodule_payload(repo["submodules"]):
+        return "submodules"
+    if "submodule_review_count" in repo and (
+        "submodules" not in repo
+        or not _valid_snapshot_count(repo["submodule_review_count"])
+        or repo["submodule_review_count"] > len(repo["submodules"])
+    ):
+        return "submodule_review_count"
+    return None
+
+
+def _snapshot_repo_error(repo, path: str) -> str | None:
+    if not isinstance(repo, dict):
+        return path
+    if not isinstance(repo.get("rel"), str):
+        return f"{path}.rel"
+    for key in (
+        "modified",
+        "deleted",
+        "untracked",
+        "conflicts",
+        "stashes",
+        "ahead",
+        "behind",
+        "upstream_ahead",
+        "upstream_behind",
+    ):
+        if key in repo and not _valid_snapshot_count(repo[key]):
+            return f"{path}.{key}"
+    for key in ("fetch_error", "sync_clean", "publication_pending"):
+        if key in repo and type(repo[key]) is not bool:
+            return f"{path}.{key}"
+    for key in (
+        "branch",
+        "remote_state",
+        "error",
+        "branches_error",
+        "worktrees_error",
+        "submodules_error",
+    ):
+        if key in repo and not isinstance(repo[key], str):
+            return f"{path}.{key}"
+    oid = repo.get("head_oid")
+    if oid is not None and oid != "" and not is_object_id(oid):
+        return f"{path}.head_oid"
+    if "operation" in repo and repo["operation"] not in (
+        "",
+        *(name for _, name in OPERATION_MARKERS),
+    ):
+        return f"{path}.operation"
+    if not valid_timestamp(repo.get("measured_at", "")):
+        return f"{path}.measured_at"
+    topology_error = _snapshot_topology_error(repo)
+    if topology_error is not None:
+        return f"{path}.{topology_error}"
+    if "branch_coverage_basis" in repo and repo["branch_coverage_basis"] != BRANCH_COVERAGE_BASIS:
+        return f"{path}.branch_coverage_basis"
+    for key, validate_entry in (
+        ("branches", _snapshot_branch_error),
+        ("remotes", _snapshot_remote_error),
+    ):
+        entries = repo.get(key, [])
+        if not isinstance(entries, list):
+            return f"{path}.{key}"
+        names: set[str] = set()
+        for index, entry in enumerate(entries):
+            entry_path = f"{path}.{key}[{index}]"
+            if not isinstance(entry, dict):
+                return entry_path
+            name = entry.get("name")
+            if not isinstance(name, str) or not name or name in names:
+                return f"{entry_path}.name"
+            names.add(name)
+            error = validate_entry(entry)
+            if error is not None:
+                return f"{entry_path}.{error}"
+    return None
+
+
+def _snapshot_schema_error(payload) -> str | None:
+    """Den ersten ungültigen Feldpfad melden, ohne Werte aus dem Snapshot auszugeben."""
     if not isinstance(payload, dict):
-        return False
+        return "$"
     if not isinstance(payload.get("version"), str):
-        return False
+        return "version"
     if "schema_version" in payload and (
-            type(payload["schema_version"]) is not int or payload["schema_version"] != JSON_SCHEMA_VERSION):
-        return False
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != JSON_SCHEMA_VERSION
+    ):
+        return "schema_version"
     if not valid_timestamp(payload.get("generated_at", "")):
-        return False
+        return "generated_at"
     if "root" in payload and not isinstance(payload["root"], str):
-        return False
+        return "root"
     repos = payload.get("repos")
     if not isinstance(repos, list):
-        return False
+        return "repos"
     for name in ("filter", "view"):
-        if name not in payload:
-            continue
-        scope = payload[name]
-        if not isinstance(scope, dict):
-            return False
-        if name == "filter" and not isinstance(scope.get("query"), str):
-            return False
-        if name == "view" and scope.get("id") not in STATUS_VIEWS:
-            return False
-        if any(type(scope.get(key)) is not int or scope[key] < 0 for key in ("matches", "total")):
-            return False
-        if scope["matches"] != len(repos) or scope["total"] < scope["matches"]:
-            return False
-        if name == "filter" and not filter_terms(scope["query"]) and scope["total"] != scope["matches"]:
-            return False
-        if name == "view" and (type(scope.get("hidden_attention")) is not int
-                               or not 0 <= scope["hidden_attention"] <= scope["total"] - scope["matches"]):
-            return False
-    if "filter" in payload and "view" in payload and payload["filter"]["total"] != payload["view"]["total"]:
-        return False
-    if (payload.get("view", {}).get("id") == "all" and "filter" not in payload
-            and payload["view"]["total"] != len(repos)):
-        return False
-    for repo in repos:
-        if not isinstance(repo, dict) or not isinstance(repo.get("rel"), str):
-            return False
-        for field_name in ("modified", "deleted", "untracked", "conflicts", "stashes",
-                           "ahead", "behind", "upstream_ahead", "upstream_behind"):
-            if field_name in repo and (type(repo[field_name]) is not int or repo[field_name] < 0):
-                return False
-        if "fetch_error" in repo and type(repo["fetch_error"]) is not bool:
-            return False
-        for key in ("sync_clean", "publication_pending"):
-            if key in repo and type(repo[key]) is not bool:
-                return False
-        for field_name in ("branch", "remote_state", "error"):
-            if field_name in repo and not isinstance(repo[field_name], str):
-                return False
-        if "head_oid" in repo:
-            oid = repo["head_oid"]
-            if oid is not None and oid != "" and not is_object_id(oid):
-                return False
-        if "operation" in repo and repo["operation"] not in (
-                "", *(operation for _, operation in OPERATION_MARKERS)):
-            return False
-        if not valid_timestamp(repo.get("measured_at", "")):
-            return False
-        if "branches_error" in repo and not isinstance(repo["branches_error"], str):
-            return False
-        for key in ("worktrees_error", "submodules_error"):
-            if key in repo and not isinstance(repo[key], str):
-                return False
-        if "worktree_family" in repo and not valid_worktree_family(repo["worktree_family"], repo.get("worktrees_error", "")):
-            return False
-        if "submodules" in repo and not valid_submodule_payload(repo["submodules"]):
-            return False
-        if "submodule_review_count" in repo and (
-                "submodules" not in repo or type(repo["submodule_review_count"]) is not int
-                or not 0 <= repo["submodule_review_count"] <= len(repo["submodules"])):
-            return False
-        if "branch_coverage_basis" in repo and repo["branch_coverage_basis"] != BRANCH_COVERAGE_BASIS:
-            return False
-        if "branches" in repo:
-            if not isinstance(repo["branches"], list):
-                return False
-            names = set()
-            for branch in repo["branches"]:
-                if not isinstance(branch, dict) or not isinstance(branch.get("name"), str):
-                    return False
-                if not branch["name"] or branch["name"] in names or not is_object_id(branch.get("oid")):
-                    return False
-                names.add(branch["name"])
-                if branch.get("coverage") not in BRANCH_COVERAGE_STATES:
-                    return False
-                count = branch.get("uncovered_commits")
-                if (branch["coverage"] == "unknown" and count is not None) or (
-                        branch["coverage"] != "unknown" and (type(count) is not int or count < 0)):
-                    return False
-                if (branch["coverage"] == "covered" and count != 0) or (
-                        branch["coverage"] == "uncovered" and count == 0):
-                    return False
-                for key in ("current", "upstream_gone", "merged"):
-                    if type(branch.get(key)) is not bool:
-                        return False
-                for key in ("upstream", "upstream_remote"):
-                    if not isinstance(branch.get(key), str):
-                        return False
-                for key in ("ahead", "behind"):
-                    if type(branch.get(key)) is not int or branch[key] < 0:
-                        return False
-        remotes = repo.get("remotes", [])
-        if not isinstance(remotes, list):
-            return False
-        remote_names = set()
-        for remote in remotes:
-            if not isinstance(remote, dict) or not isinstance(remote.get("name"), str):
-                return False
-            if not remote["name"] or remote["name"] in remote_names:
-                return False
-            remote_names.add(remote["name"])
-            if not valid_timestamp(remote.get("fetched_at", "")):
-                return False
-            if ("content_equal" in remote and remote["content_equal"] is not None
-                    and type(remote["content_equal"]) is not bool):
-                return False
-            if "history_differs" in remote and type(remote["history_differs"]) is not bool:
-                return False
-            if "content_error" in remote and not isinstance(remote["content_error"], str):
-                return False
-            if "content_excludes" in remote and (
-                    not isinstance(remote["content_excludes"], list)
-                    or any(not isinstance(path, str) for path in remote["content_excludes"])):
-                return False
-            for field_name in ("ahead", "behind"):
-                if field_name in remote and (type(remote[field_name]) is not int or remote[field_name] < 0):
-                    return False
-            for field_name in ("public", "mixed_public", "sync", "branch_exists",
-                               "target_mismatch", "multiple_pushurls",
-                               "fetch_refspecs_safe", "branch_mapping_safe",
-                               "fetch_url_safe", "push_url_safe",
-                               "fetch_failed"):
-                if field_name in remote and type(remote[field_name]) is not bool:
-                    return False
-            for field_name in ("fetch_fingerprint", "fetch_refspec_fingerprint",
-                               "fetch_outcome",
-                               "fetch_error_long", "fetch_error_detail"):
-                if field_name in remote and not isinstance(remote[field_name], str):
-                    return False
-            for field_name in ("fetch_fingerprints", "push_fingerprints"):
-                values = remote.get(field_name, [])
-                if (not isinstance(values, list)
-                        or any(not isinstance(value, str) for value in values)):
-                    return False
-    return True
+        if name in payload:
+            error = _snapshot_scope_error(payload[name], name, len(repos))
+            if error is not None:
+                return error
+    if (
+        "filter" in payload
+        and "view" in payload
+        and payload["filter"]["total"] != payload["view"]["total"]
+    ):
+        return "view.total"
+    if (
+        payload.get("view", {}).get("id") == "all"
+        and "filter" not in payload
+        and payload["view"]["total"] != len(repos)
+    ):
+        return "view.total"
+    for index, repo in enumerate(repos):
+        error = _snapshot_repo_error(repo, f"repos[{index}]")
+        if error is not None:
+            return error
+    return None
 
 
-def fetch_remote_status(host: str, root: str, *, fetch: bool,
-                        process_timeout: int | None = 300) -> dict:
+def _valid_remote_payload(payload) -> bool:
+    return _snapshot_schema_error(payload) is None
+
+
+def fetch_remote_status(
+    host: str, root: str, *, fetch: bool, process_timeout: int | None = 300
+) -> dict:
     """Run this very script on `host` over ssh and return its --json output."""
     if not host or host.startswith("-") or terminal_text(host) != host:
         raise RuntimeError(t("diff_bad_host"))
@@ -6694,7 +8150,9 @@ def fetch_remote_status(host: str, root: str, *, fetch: bool,
         with open(os.path.abspath(__file__), "rb") as fh:
             r = _run_process_group(
                 ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", host, inner],
-                stdin=fh, timeout=process_timeout)
+                stdin=fh,
+                timeout=process_timeout,
+            )
     except (OSError, subprocess.SubprocessError) as e:
         raise ssh_error(str(e)[:100])
     # `--json` behält den normalen CLI-Exit-Code bei: 1 bedeutet, dass mindestens
@@ -6702,18 +8160,18 @@ def fetch_remote_status(host: str, root: str, *, fetch: bool,
     # für den Rechnervergleich ausgewertet werden. Nur echte SSH-/Prozessfehler
     # (Exit-Codes außerhalb 0/1) machen die Gegenstelle unerreichbar.
     if r.returncode not in (0, 1):
-        last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
-        raise ssh_error(last[-1] if last else
-                        t("diff_ssh_exit", code=r.returncode))
+        last = [line for line in (r.stderr or "").strip().splitlines() if line.strip()]
+        raise ssh_error(last[-1] if last else t("diff_ssh_exit", code=r.returncode))
     if not (r.stdout or "").strip():
-        last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
+        last = [line for line in (r.stderr or "").strip().splitlines() if line.strip()]
         raise ssh_error(last[-1] if last else t("diff_ssh_no_output"))
     try:
         payload = parse_snapshot_json(r.stdout)
     except ValueError:
         raise ssh_error(t("diff_ssh_bad_json"))
-    if not _valid_remote_payload(payload):
-        raise ssh_error(t("diff_ssh_bad_schema"))
+    schema_path = _snapshot_schema_error(payload)
+    if schema_path is not None:
+        raise ssh_error(f"{t('diff_ssh_bad_schema')} ({schema_path})")
     return payload
 
 
@@ -6729,16 +8187,30 @@ def _loc(name: str) -> str:
 
 
 FINDING_CATEGORIES = {
-    "version": "warning", "ambiguous_repo": "drift", "only_on": "drift",
-    "remote_missing": "drift", "remote_security": "drift", "remote_branch": "drift",
-    "remote_state": "drift", "sync_even": "sync", "branch": "local", "head": "drift",
-    "local_branch_missing": "drift", "branch_coverage": "local", "branch_pending": "sync",
-    "repo_field": "drift", "branch_inventory_failed": "local",
-    "branch_coverage_unknown": "local", "operation": "local", "dirty": "local",
+    "version": "warning",
+    "ambiguous_repo": "drift",
+    "only_on": "drift",
+    "remote_missing": "drift",
+    "remote_security": "drift",
+    "remote_branch": "drift",
+    "remote_state": "drift",
+    "sync_even": "sync",
+    "branch": "local",
+    "head": "drift",
+    "local_branch_missing": "drift",
+    "branch_coverage": "local",
+    "branch_pending": "sync",
+    "repo_field": "drift",
+    "branch_inventory_failed": "local",
+    "branch_coverage_unknown": "local",
+    "operation": "local",
+    "dirty": "local",
     "fetch_failed_side": "local",
     "publication_inspection_failed": "local",
-    "worktree_inventory_failed": "local", "submodule_inventory_failed": "local",
-    "submodule_inspection_failed": "local", "submodule_state": "local",
+    "worktree_inventory_failed": "local",
+    "submodule_inventory_failed": "local",
+    "submodule_inspection_failed": "local",
+    "submodule_state": "local",
 }
 
 
@@ -6752,266 +8224,533 @@ def json_safe_value(value):
     return value
 
 
-def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> list:
-    """Zwei Zustandsobjekte in stabile Befunde und lokalisierte Anzeigetexte vergleichen.
+_FINDING_FORMAT_FIELDS = {
+    "version": {"here_version": "va", "there_version": "vb"},
+    "branch": {"here_branch": "ba", "there_branch": "bb"},
+    "head": {"here_oid": "oa", "there_oid": "ob"},
+    "repo_field": {"here_value": "va", "there_value": "vb"},
+    "remote_state": {
+        "here_ahead": "aa",
+        "here_behind": "ab",
+        "there_ahead": "ba",
+        "there_behind": "bb",
+    },
+    "sync_even": {"ahead": "aa", "behind": "ab"},
+}
 
-    The split matters more than the comparison: `DRIFT` = should be identical but
-    isn't (actionable); `SYNC` = both machines agree but sit ahead/behind the sync
-    remote (invisible in a pure two-machine diff, yet exactly the number you care
-    about); `local` = explainable (different branch checked out, dirty working
-    tree). A report that lists everything gets ignored.
 
-    Ein gescheiterter Fetch zaehlt ausdruecklich NICHT als Unterschied. Er
-    beschreibt die Sitzung, die gemessen hat — kein Netz, oder ein Schluesselbund,
-    an den nur die GUI-Sitzung kommt. Genau daran ist am 2026-08-05 ein ganzer
-    Bericht gescheitert: `gmf --diff` laeuft auf der Gegenseite per ssh, dort
-    verweigerte der Credential-Helper jedes GitHub-Remote, und das erschien als
-    zwei DRIFT-Zeilen (`error`, `remote_state`) je Repo. Deshalb blendet der
-    Vergleich diese beiden Felder aus, sobald eine Seite `fetch_error` meldet, und
-    nennt die betroffene Seite stattdessen EINMAL als `lokal`."""
-    out = []
+def _comparison_finding(
+    kind: str,
+    *,
+    repo: str | None = None,
+    remote: str | None = None,
+    branch: str | None = None,
+    field: str | None = None,
+    side: str | None = None,
+    here_label: str = "",
+    there_label: str = "",
+    location: str = "",
+    **values,
+) -> dict:
+    aliases = _FINDING_FORMAT_FIELDS.get(kind, {})
+    display = {aliases.get(name, name): value for name, value in values.items()}
+    display.update(
+        rel=repo, r=remote, br=branch, field=field, a=here_label, b=there_label, m=location
+    )
+    if "count" in values:
+        display["n"] = values["count"]
+    if "error" in values:
+        display["e"] = values["error"]
+    if kind == "head":
+        for key in ("oa", "ob"):
+            display[key] = display[key] or t("info_no_commits")
+    elif kind == "operation":
+        display["op"] = operation_label(values["operation"])
+    return {
+        "type": kind,
+        "category": FINDING_CATEGORIES[kind],
+        "repo": json_safe_value(repo),
+        "remote": json_safe_value(remote),
+        "branch": json_safe_value(branch),
+        "field": field,
+        "side": side,
+        "values": json_safe_value(values),
+        "message": terminal_text(t("diff_" + kind, **display)),
+    }
 
-    def emit(key: str, *, side: str | None = None, **data):
-        kind = key.removeprefix("diff_")
-        names = {"va": "here_value", "vb": "there_value", "oa": "here_oid",
-                 "ob": "there_oid", "n": "count", "e": "error", "op": "operation"}
-        if kind == "version":
-            names.update(va="here_version", vb="there_version")
-        elif kind == "branch":
-            names.update(ba="here_branch", bb="there_branch")
-        elif kind == "remote_state":
-            names.update(aa="here_ahead", ab="here_behind", ba="there_ahead", bb="there_behind")
-        elif kind == "sync_even":
-            names.update(aa="ahead", ab="behind")
-        values = {names.get(name, name): value for name, value in data.items()
-                  if name not in ("rel", "r", "br", "field", "a", "b", "m")}
-        display = dict(data)
-        if kind == "head":
-            for name in ("oa", "ob"):
-                display[name] = display[name] or t("info_no_commits")
-        elif kind == "operation":
-            display["op"] = operation_label(display["op"])
-        out.append({
-            "type": kind, "category": FINDING_CATEGORIES[kind],
-            "repo": json_safe_value(data.get("rel")), "remote": json_safe_value(data.get("r")),
-            "branch": json_safe_value(data.get("br")), "field": data.get("field"),
-            "side": side, "values": json_safe_value(values),
-            "message": terminal_text(t(key, **display)),
-        })
 
+_REMOTE_SECURITY_FIELDS = (
+    "public",
+    "mixed_public",
+    "sync",
+    "fetch_fingerprints",
+    "push_fingerprints",
+    "target_mismatch",
+    "multiple_pushurls",
+    "fetch_refspecs_safe",
+    "fetch_refspec_fingerprint",
+    "fetch_url_safe",
+    "push_url_safe",
+)
+
+
+def _remote_security_changes(here: dict, there: dict, same_branch: bool) -> list[str]:
+    def value(remote: dict, key: str):
+        # Alte Snapshots speichern den Fingerprint einer einzelnen URL im Singular.
+        if key == "fetch_fingerprints" and key not in remote:
+            return [remote.get("fetch_fingerprint")]
+        return remote.get(key)
+
+    changed = [key for key in _REMOTE_SECURITY_FIELDS if value(here, key) != value(there, key)]
+    if same_branch and here.get("branch_mapping_safe") != there.get("branch_mapping_safe"):
+        changed.append("branch_mapping_safe")
+    return changed
+
+
+def _compare_remotes(
+    here: dict,
+    there: dict,
+    rel: str,
+    here_at: str,
+    there_at: str,
+    *,
+    same_branch: bool,
+    head_differs: bool,
+) -> list[dict]:
+    findings = []
+    here_remotes, there_remotes = _remotes_by_name(here), _remotes_by_name(there)
+    for side, location, mine, other in (
+        ("here", here_at, here_remotes, there_remotes),
+        ("there", there_at, there_remotes, here_remotes),
+    ):
+        for name in sorted(set(mine) - set(other)):
+            findings.append(
+                _comparison_finding(
+                    "remote_missing", repo=rel, remote=name, location=location, side=side
+                )
+            )
+
+    # Das Sync-Remote zuerst, danach die übrigen Remotes nach Name.
+    common = sorted(
+        set(here_remotes) & set(there_remotes),
+        key=lambda name: (
+            not (here_remotes[name].get("sync") or there_remotes[name].get("sync")),
+            name,
+        ),
+    )
+    for name in common:
+        here_remote, there_remote = here_remotes[name], there_remotes[name]
+        changed_fields = _remote_security_changes(here_remote, there_remote, same_branch)
+        if changed_fields:
+            findings.append(
+                _comparison_finding(
+                    "remote_security", repo=rel, remote=name, changed_fields=changed_fields
+                )
+            )
+        # Konfiguration bleibt vergleichbar, Tracking-Refs nach einem Fetch-Fehler nicht.
+        if not same_branch or here_remote.get("fetch_failed") or there_remote.get("fetch_failed"):
+            continue
+        here_ahead, here_behind = here_remote.get("ahead"), here_remote.get("behind")
+        there_ahead, there_behind = there_remote.get("ahead"), there_remote.get("behind")
+        here_exists = bool(here_remote.get("branch_exists"))
+        if here_exists != bool(there_remote.get("branch_exists")):
+            findings.append(
+                _comparison_finding(
+                    "remote_branch",
+                    repo=rel,
+                    remote=name,
+                    branch=here.get("branch"),
+                    location=here_at if here_exists else there_at,
+                    side="here" if here_exists else "there",
+                )
+            )
+        elif (here_ahead, here_behind) != (there_ahead, there_behind):
+            findings.append(
+                _comparison_finding(
+                    "remote_state",
+                    repo=rel,
+                    remote=name,
+                    here_label=here_at,
+                    there_label=there_at,
+                    here_ahead=here_ahead,
+                    here_behind=here_behind,
+                    there_ahead=there_ahead,
+                    there_behind=there_behind,
+                )
+            )
+        elif (
+            not head_differs
+            and (here_remote.get("sync") or there_remote.get("sync"))
+            and not (
+                publication_content_current(here_remote)
+                and publication_content_current(there_remote)
+            )
+            and (here_ahead or here_behind)
+        ):
+            findings.append(
+                _comparison_finding(
+                    "sync_even", repo=rel, remote=name, ahead=here_ahead, behind=here_behind
+                )
+            )
+    return findings
+
+
+def _compare_branches(
+    here: dict, there: dict, rel: str, here_at: str, there_at: str, *, head_differs: bool
+) -> list[dict]:
+    findings = []
+    here_branch, there_branch = here.get("branch"), there.get("branch")
+    if here_branch != there_branch:
+        findings.append(
+            _comparison_finding(
+                "branch",
+                repo=rel,
+                here_label=here_at,
+                there_label=there_at,
+                here_branch=here_branch,
+                there_branch=there_branch,
+            )
+        )
+    if (
+        "branches" not in here
+        or "branches" not in there
+        or here.get("branches_error")
+        or there.get("branches_error")
+    ):
+        return findings
+    here_branches = {branch["name"]: branch for branch in here["branches"]}
+    there_branches = {branch["name"]: branch for branch in there["branches"]}
+    for side, location, mine, other in (
+        ("here", here_at, here_branches, there_branches),
+        ("there", there_at, there_branches, here_branches),
+    ):
+        for name in sorted(set(mine) - set(other)):
+            findings.append(
+                _comparison_finding(
+                    "local_branch_missing", repo=rel, branch=name, location=location, side=side
+                )
+            )
+    for name in sorted(set(here_branches) & set(there_branches)):
+        here_entry, there_entry = here_branches[name], there_branches[name]
+        if here_entry["oid"] != there_entry["oid"]:
+            # Der aktuelle Branch hat bereits einen Befund aus den HEAD-Feldern.
+            if not (head_differs and name == here_branch):
+                findings.append(
+                    _comparison_finding(
+                        "head",
+                        repo=rel,
+                        branch=name,
+                        here_label=here_at,
+                        there_label=there_at,
+                        here_oid=here_entry["oid"],
+                        there_oid=there_entry["oid"],
+                    )
+                )
+        elif not here_entry["current"] and not there_entry["current"]:
+            here_coverage = {
+                "state": here_entry["coverage"],
+                "uncovered_commits": here_entry["uncovered_commits"],
+            }
+            there_coverage = {
+                "state": there_entry["coverage"],
+                "uncovered_commits": there_entry["uncovered_commits"],
+            }
+            if here_coverage != there_coverage:
+                findings.append(
+                    _comparison_finding(
+                        "branch_coverage",
+                        repo=rel,
+                        branch=name,
+                        here_coverage=here_coverage,
+                        there_coverage=there_coverage,
+                    )
+                )
+            elif here_entry["coverage"] == "uncovered":
+                findings.append(
+                    _comparison_finding(
+                        "branch_pending",
+                        repo=rel,
+                        branch=name,
+                        count=here_entry["uncovered_commits"],
+                    )
+                )
+    return findings
+
+
+def _compare_submodules(here: dict, there: dict, rel: str) -> list[dict]:
+    if (
+        "submodules" not in here
+        or "submodules" not in there
+        or here.get("submodules_error")
+        or there.get("submodules_error")
+    ):
+        return []
+    here_modules = [(snapshot_path_identity(module), module) for module in here["submodules"]]
+    there_modules = [(snapshot_path_identity(module), module) for module in there["submodules"]]
+    # Ein mehrdeutiger alter Anzeigename verhindert auch die Zuordnung auf der Gegenseite.
+    unknown_labels = {
+        module["path"] for identity, module in here_modules + there_modules if identity is None
+    }
+    here_by_path = {
+        key: module
+        for key, module in here_modules
+        if key is not None and module["path"] not in unknown_labels
+    }
+    there_by_path = {
+        key: module
+        for key, module in there_modules
+        if key is not None and module["path"] not in unknown_labels
+    }
+    fields = (
+        "head_oid",
+        "index_oid",
+        "index_mode",
+        "index_entries",
+        "checked_out_oid",
+        "initialized",
+        "worktree_kind",
+        "modified",
+        "deleted",
+        "untracked",
+        "conflicts",
+        "conflicted",
+        "operation",
+    )
+    findings = []
+    for path in sorted(set(here_by_path) | set(there_by_path)):
+        here_module, there_module = here_by_path.get(path), there_by_path.get(path)
+        if (here_module and here_module.get("error")) or (
+            there_module and there_module.get("error")
+        ):
+            continue
+        before = {key: here_module.get(key) for key in fields} if here_module else None
+        after = {key: there_module.get(key) for key in fields} if there_module else None
+        if before != after:
+            findings.append(
+                _comparison_finding(
+                    "submodule_state",
+                    repo=rel,
+                    path=snapshot_path_label(here_module or there_by_path[path]),
+                    path_key=path,
+                    here_state=before,
+                    there_state=after,
+                )
+            )
+    return findings
+
+
+def _compare_repo_fields(
+    here: dict, there: dict, rel: str, here_at: str, there_at: str
+) -> list[dict]:
+    # Einen echten lokalen Fehler der anderen Seite auch bei einem Fetch-Fehler zeigen.
+    fields = {
+        "error": (
+            "" if here.get("fetch_error") else (here.get("error") or ""),
+            "" if there.get("fetch_error") else (there.get("error") or ""),
+        ),
+        "conflicts": (here.get("conflicts"), there.get("conflicts")),
+        "stashes": (here.get("stashes"), there.get("stashes")),
+    }
+    if not (here.get("fetch_error") or there.get("fetch_error")):
+        fields["remote_state"] = (here.get("remote_state"), there.get("remote_state"))
+    return [
+        _comparison_finding(
+            "repo_field",
+            repo=rel,
+            field=name,
+            here_label=here_at,
+            there_label=there_at,
+            here_value=here_value,
+            there_value=there_value,
+        )
+        for name, (here_value, there_value) in fields.items()
+        if here_value != there_value
+    ]
+
+
+def _repo_local_findings(repo: dict, rel: str, side: str, location: str) -> list[dict]:
+    findings = []
+    for remote in repo.get("remotes", []):
+        if remote.get("content_error"):
+            findings.append(
+                _comparison_finding(
+                    "publication_inspection_failed",
+                    repo=rel,
+                    remote=remote["name"],
+                    location=location,
+                    error=remote["content_error"],
+                    side=side,
+                )
+            )
+    for key, kind in (
+        ("worktrees_error", "worktree_inventory_failed"),
+        ("submodules_error", "submodule_inventory_failed"),
+    ):
+        if repo.get(key):
+            findings.append(
+                _comparison_finding(kind, repo=rel, location=location, error=repo[key], side=side)
+            )
+    for module in repo.get("submodules", []):
+        if module.get("error"):
+            findings.append(
+                _comparison_finding(
+                    "submodule_inspection_failed",
+                    repo=rel,
+                    path=snapshot_path_label(module),
+                    path_key=snapshot_path_identity(module),
+                    location=location,
+                    error=module["error"],
+                    side=side,
+                )
+            )
+    if repo.get("branches_error"):
+        findings.append(
+            _comparison_finding(
+                "branch_inventory_failed",
+                repo=rel,
+                location=location,
+                error=repo["branches_error"],
+                side=side,
+            )
+        )
+    unknown_branches = sum(
+        not branch["current"] and branch["coverage"] == "unknown"
+        for branch in repo.get("branches", [])
+    )
+    if unknown_branches:
+        findings.append(
+            _comparison_finding(
+                "branch_coverage_unknown",
+                repo=rel,
+                location=location,
+                count=unknown_branches,
+                side=side,
+            )
+        )
+    if repo.get("operation"):
+        findings.append(
+            _comparison_finding(
+                "operation", repo=rel, location=location, operation=repo["operation"], side=side
+            )
+        )
+    dirty = sum(repo.get(key) or 0 for key in ("modified", "untracked", "deleted"))
+    if dirty:
+        findings.append(
+            _comparison_finding("dirty", repo=rel, location=location, count=dirty, side=side)
+        )
+    return findings
+
+
+def _group_snapshot_repos(repos: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for repo in repos:
+        groups.setdefault(repo["rel"], []).append(repo)
+    return groups
+
+
+def _graph_measurement_valid(repo: RepoStatus | dict) -> bool:
+    # Der Scan verwirft die HEAD-Identität und das Inventar, wenn sich Refs
+    # während der Messung bewegt haben. Die bis dahin gezählten Deltas sind
+    # kein Befund. Unbekannte HEADs älterer Snapshots bleiben vergleichbar.
+    return not (
+        status_value(repo, "head_oid") == ""
+        and status_value(repo, "error")
+        and status_value(repo, "branches_error")
+    )
+
+
+def diff_findings(here: dict, there: dict, here_name: str, there_name: str) -> list[dict]:
+    """Zwei Zustandsobjekte in stabile Befunde und lokalisierte Anzeigetexte vergleichen."""
+    findings = []
     if here.get("version") != there.get("version"):
-        emit("diff_version", a=here_name, va=here.get("version"),
-                     b=there_name, vb=there.get("version"))
+        findings.append(
+            _comparison_finding(
+                "version",
+                here_label=here_name,
+                there_label=there_name,
+                here_version=here.get("version"),
+                there_version=there.get("version"),
+            )
+        )
     here_at, there_at = _loc(here_name), _loc(there_name)
-    # Je Seite gezaehlt, damit die Erklaerung EINMAL erscheint und nicht je Repo.
-    fetch_gescheitert: dict[str, int] = {}
-    def grouped(repos):
-        result = {}
-        for repo in repos:
-            result.setdefault(repo["rel"], []).append(repo)
-        return result
-
-    groups_a = grouped(here.get("repos", []))
-    groups_b = grouped(there.get("repos", []))
-    ambiguous = {rel for rel in set(groups_a) | set(groups_b)
-                 if len(groups_a.get(rel, ())) > 1
-                 or len(groups_b.get(rel, ())) > 1}
+    here_groups = _group_snapshot_repos(here.get("repos", []))
+    there_groups = _group_snapshot_repos(there.get("repos", []))
+    ambiguous = {
+        rel
+        for rel in set(here_groups) | set(there_groups)
+        if len(here_groups.get(rel, [])) > 1 or len(there_groups.get(rel, [])) > 1
+    }
     for rel in sorted(ambiguous):
-        emit("diff_ambiguous_repo", rel=terminal_text(rel))
-    # Mehrdeutige Namen nicht willkürlich paaren. Die eigene DRIFT-Zeile ist
-    # ehrlicher, als einen der kollidierenden Pfade still zu verlieren.
-    ra = {rel: repos[0] for rel, repos in groups_a.items()
-          if rel not in ambiguous}
-    rb = {rel: repos[0] for rel, repos in groups_b.items()
-          if rel not in ambiguous}
-    for rel in sorted(set(ra) - set(rb)):
-        emit("diff_only_on", rel=rel, m=here_at, side="here")
-    for rel in sorted(set(rb) - set(ra)):
-        emit("diff_only_on", rel=rel, m=there_at, side="there")
+        findings.append(_comparison_finding("ambiguous_repo", repo=terminal_text(rel)))
+    for side, location, mine, other in (
+        ("here", here_at, here_groups, there_groups),
+        ("there", there_at, there_groups, here_groups),
+    ):
+        for rel in sorted(set(mine) - set(other) - ambiguous):
+            findings.append(_comparison_finding("only_on", repo=rel, location=location, side=side))
 
-    for rel in sorted(set(ra) & set(rb)):
-        x, y = ra[rel], rb[rel]
-        same_branch = (x.get("branch") == y.get("branch")
-                       and x.get("branch") not in (None, "?", "(detached)"))
-        head_differs = (same_branch and "head_oid" in x and "head_oid" in y
-                        and x["head_oid"] != "" and y["head_oid"] != ""
-                        and x["head_oid"] != y["head_oid"])
+    failed_fetches = {"here": 0, "there": 0}
+    comparable = (set(here_groups) & set(there_groups)) - ambiguous
+    for rel in sorted(comparable):
+        here_repo, there_repo = here_groups[rel][0], there_groups[rel][0]
+        graph_valid = _graph_measurement_valid(here_repo) and _graph_measurement_valid(there_repo)
+        branch = here_repo.get("branch")
+        same_branch = (
+            graph_valid
+            and branch == there_repo.get("branch")
+            and branch
+            not in (
+                None,
+                "?",
+                "(detached)",
+            )
+        )
+        here_oid, there_oid = here_repo.get("head_oid", ""), there_repo.get("head_oid", "")
+        head_differs = same_branch and here_oid != "" and there_oid != "" and here_oid != there_oid
         if head_differs:
-            emit("diff_head", rel=rel, br=x["branch"],
-                         oa=x["head_oid"], ob=y["head_oid"],
-                         a=here_at, b=there_at)
-        xr, yr = _remotes_by_name(x), _remotes_by_name(y)
-        for side_id, name, mine, other in (("here", here_at, xr, yr), ("there", there_at, yr, xr)):
-            for rn in sorted(set(mine) - set(other)):
-                emit("diff_remote_missing", rel=rel, r=rn, m=name, side=side_id)
-        # Sync-Remote zuerst: sein Stand ist die interessantere Zahl als z.B. github.
-        for rn in sorted(set(xr) & set(yr),
-                         key=lambda n: (not (xr[n].get("sync") or yr[n].get("sync")), n)):
-            pa, pb = xr[rn], yr[rn]
-            # `branch_exists` fehlt hier bewusst: es hängt am jeweils
-            # ausgecheckten Branch und ist damit kein Endpunkt-Merkmal — zwei
-            # Rechner mit identischen Remotes, aber verschiedenen Branches,
-            # meldeten sonst dauerhaft eine Sicherheits-Drift.
-            security_fields = ("public", "mixed_public", "sync",
-                               "fetch_fingerprints", "push_fingerprints",
-                               "target_mismatch", "multiple_pushurls",
-                               "fetch_refspecs_safe", "fetch_refspec_fingerprint",
-                               "fetch_url_safe", "push_url_safe")
-            left = tuple(pa.get(k) for k in security_fields)
-            right = tuple(pb.get(k) for k in security_fields)
-            # Abwaertskompatibel zu Payloads vor 0.18.8: Dort gab es nur den
-            # Singularwert, der bei genau einer URL dieselbe Aussage traegt.
-            if "fetch_fingerprints" not in pa:
-                left = (*left[:3], [pa.get("fetch_fingerprint")], *left[4:])
-            if "fetch_fingerprints" not in pb:
-                right = (*right[:3], [pb.get("fetch_fingerprint")], *right[4:])
-            valid_same_branch = (x.get("branch") == y.get("branch")
-                                 and x.get("branch") not in (None, "?", "(detached)"))
-            if (left != right or (valid_same_branch
-                                  and pa.get("branch_mapping_safe")
-                                  != pb.get("branch_mapping_safe"))):
-                changed = [name for name, a, b in zip(security_fields, left, right) if a != b]
-                if valid_same_branch and pa.get("branch_mapping_safe") != pb.get("branch_mapping_safe"):
-                    changed.append("branch_mapping_safe")
-                emit("diff_remote_security", rel=rel, r=rn, changed_fields=changed)
-            if pa.get("fetch_failed") or pb.get("fetch_failed"):
-                # Scheiterte der Fetch dieses Remotes auf einer Seite, steht dort
-                # ein veralteter Tracking-Ref. Ahead/Behind und "kennt den Branch"
-                # beschrieben dann die misslungene Messung, nicht die Rechner —
-                # genau der Fehlalarm, den dieser Vergleich vermeiden soll. Die
-                # Sicherheitsfelder oben bleiben vergleichbar: sie stammen aus der
-                # Konfiguration und nicht aus dem Fetch.
-                continue
-            if not valid_same_branch:
-                # Zähler verschiedener Branches beschreiben keinen Rechnerunterschied.
-                continue
-            sa = (pa.get("ahead"), pa.get("behind"))
-            sb = (pb.get("ahead"), pb.get("behind"))
-            if (x.get("branch") == y.get("branch")
-                    and bool(pa.get("branch_exists")) != bool(pb.get("branch_exists"))):
-                # Gleicher Branch, aber nur eine Seite kennt ihn auf dem Remote:
-                # DAS ist der echte Zustandsunterschied. Die Ahead/Behind-Zahlen
-                # der Seite ohne Branch wären daneben nur irreführende Nullen.
-                side = here_at if pa.get("branch_exists") else there_at
-                emit("diff_remote_branch", rel=rel, r=rn,
-                             br=x.get("branch"), m=side,
-                             side="here" if pa.get("branch_exists") else "there")
-            elif sa != sb:
-                emit("diff_remote_state", rel=rel, r=rn,
-                             a=here_at, aa=pa.get("ahead"), ab=pa.get("behind"),
-                             b=there_at, ba=pb.get("ahead"), bb=pb.get("behind"))
-            elif (not head_differs and (pa.get("sync") or pb.get("sync"))
-                  and not (publication_content_current(pa) and publication_content_current(pb))
-                  and (pa.get("ahead") or pa.get("behind"))):
-                # Beide Rechner gleichauf, aber gemeinsam neben dem Sync-Remote:
-                # im reinen Zwei-Rechner-Vergleich unsichtbar, trotzdem Handlungsbedarf.
-                emit("diff_sync_even", rel=rel, r=rn,
-                             aa=pa.get("ahead"), ab=pa.get("behind"))
-        if x.get("branch") != y.get("branch"):
-            emit("diff_branch", rel=rel, a=here_at, ba=x.get("branch"),
-                         b=there_at, bb=y.get("branch"))
-        if ("branches" in x and "branches" in y
-                and not x.get("branches_error") and not y.get("branches_error")):
-            bx = {branch["name"]: branch for branch in x["branches"]}
-            by = {branch["name"]: branch for branch in y["branches"]}
-            for side_id, side, mine, other in (("here", here_at, bx, by), ("there", there_at, by, bx)):
-                for name in sorted(set(mine) - set(other)):
-                    emit("diff_local_branch_missing", rel=rel, br=name, m=side, side=side_id)
-            for name in sorted(set(bx) & set(by)):
-                left, right = bx[name], by[name]
-                if left["oid"] != right["oid"]:
-                    if not (head_differs and name == x.get("branch") == y.get("branch")):
-                        emit("diff_head", rel=rel, br=name,
-                                     oa=left["oid"], ob=right["oid"], a=here_at, b=there_at)
-                elif not left["current"] and not right["current"]:
-                    a_coverage = (left["coverage"], left["uncovered_commits"])
-                    b_coverage = (right["coverage"], right["uncovered_commits"])
-                    if a_coverage != b_coverage:
-                        emit("diff_branch_coverage", rel=rel, br=name,
-                             here_coverage={"state": a_coverage[0], "uncovered_commits": a_coverage[1]},
-                             there_coverage={"state": b_coverage[0], "uncovered_commits": b_coverage[1]})
-                    elif left["coverage"] == "uncovered":
-                        emit("diff_branch_pending", rel=rel, br=name,
-                                     n=left["uncovered_commits"])
-        if ("submodules" in x and "submodules" in y
-                and not x.get("submodules_error") and not y.get("submodules_error")):
-            unknown = {module["path"] for module in x["submodules"] + y["submodules"]
-                       if snapshot_path_identity(module) is None}
-            mx = {snapshot_path_identity(module): module for module in x["submodules"]
-                  if module["path"] not in unknown}
-            my = {snapshot_path_identity(module): module for module in y["submodules"]
-                  if module["path"] not in unknown}
-            fields = ("head_oid", "index_oid", "index_mode", "index_entries", "checked_out_oid",
-                      "initialized", "worktree_kind", "modified", "deleted", "untracked",
-                      "conflicts", "conflicted", "operation")
-            for path in sorted(set(mx) | set(my)):
-                left, right = mx.get(path), my.get(path)
-                if (left and left.get("error")) or (right and right.get("error")):
-                    continue
-                before = {key: left.get(key) for key in fields} if left else None
-                after = {key: right.get(key) for key in fields} if right else None
-                if before != after:
-                    emit("diff_submodule_state", rel=rel, path=snapshot_path_label(left or right),
-                         path_key=path, here_state=before, there_state=after)
-        # Scheiterte auf einer Seite der Fetch, sagen `error` und `remote_state`
-        # nichts ueber das Repo, sondern nur etwas ueber jene Sitzung. Konflikte
-        # und Stashes sind davon unberuehrt und werden weiter verglichen.
-        #
-        # Die beiden Felder werden dabei unterschiedlich behandelt:
-        # `error` wird nur auf DER Seite geleert, deren Fetch scheiterte. Sonst
-        # verdeckte ein Fetch-Problem hier einen echten lokalen Schaden drueben
-        # (unlesbarer Index z.B.) — der haette mit dem Fetch nichts zu tun.
-        # `remote_state` beschreibt dagegen den Stand gegenueber dem Remote und
-        # ist ohne gelungenen Fetch auf KEINER Seite vergleichbar; er faellt
-        # deshalb ganz aus dem Vergleich.
-        messbar = not (x.get("fetch_error") or y.get("fetch_error"))
-        werte = {
-            # "" heisst hier "kein (messbarer) Fehler" — dieselbe Schreibweise,
-            # die ein fehlerfreies Repo ohnehin liefert.
-            "error": ("" if x.get("fetch_error") else (x.get("error") or ""),
-                      "" if y.get("fetch_error") else (y.get("error") or "")),
-            "conflicts": (x.get("conflicts"), y.get("conflicts")),
-            "stashes": (x.get("stashes"), y.get("stashes")),
-        }
-        if messbar:
-            werte["remote_state"] = (x.get("remote_state"), y.get("remote_state"))
-        for field_name, (va, vb) in werte.items():
-            if va != vb:
-                emit("diff_repo_field", rel=rel, field=field_name,
-                             a=here_at, va=va, b=there_at, vb=vb)
-        for name, r in (("here", x), ("there", y)):
-            if r.get("fetch_error"):
-                fetch_gescheitert[name] = fetch_gescheitert.get(name, 0) + 1
-        for side_id, name, r in (("here", here_at, x), ("there", there_at, y)):
-            for remote in r.get("remotes", []):
-                if remote.get("content_error"):
-                    emit("diff_publication_inspection_failed", rel=rel, r=remote["name"],
-                         m=name, e=remote["content_error"], side=side_id)
-            for field in ("worktrees_error", "submodules_error"):
-                if r.get(field):
-                    kind = "diff_worktree_inventory_failed" if field == "worktrees_error" else "diff_submodule_inventory_failed"
-                    emit(kind, rel=rel, m=name, e=r[field], side=side_id)
-            for module in r.get("submodules", []):
-                if module.get("error"):
-                    emit("diff_submodule_inspection_failed", rel=rel, path=snapshot_path_label(module),
-                         path_key=snapshot_path_identity(module), m=name, e=module["error"], side=side_id)
-            if r.get("branches_error"):
-                emit("diff_branch_inventory_failed", rel=rel, m=name,
-                             e=r["branches_error"], side=side_id)
-            unknown = sum(not branch["current"] and branch["coverage"] == "unknown"
-                          for branch in r.get("branches", []))
-            if unknown:
-                emit("diff_branch_coverage_unknown", rel=rel, m=name, n=unknown, side=side_id)
-            if r.get("operation"):
-                emit("diff_operation", rel=rel, m=name,
-                             op=r["operation"], side=side_id)
-            n = (r.get("modified") or 0) + (r.get("untracked") or 0) + (r.get("deleted") or 0)
-            if n:
-                emit("diff_dirty", rel=rel, m=name, n=n, side=side_id)
-    for side_id, name in (("here", here_at), ("there", there_at)):
-        if fetch_gescheitert.get(side_id):
-            emit("diff_fetch_failed_side", m=name, n=fetch_gescheitert[side_id], side=side_id)
-    return out
+            findings.append(
+                _comparison_finding(
+                    "head",
+                    repo=rel,
+                    branch=branch,
+                    here_label=here_at,
+                    there_label=there_at,
+                    here_oid=here_oid,
+                    there_oid=there_oid,
+                )
+            )
+        findings.extend(
+            _compare_remotes(
+                here_repo,
+                there_repo,
+                rel,
+                here_at,
+                there_at,
+                same_branch=same_branch,
+                head_differs=head_differs,
+            )
+        )
+        if graph_valid:
+            findings.extend(
+                _compare_branches(
+                    here_repo, there_repo, rel, here_at, there_at, head_differs=head_differs
+                )
+            )
+        findings.extend(_compare_submodules(here_repo, there_repo, rel))
+        findings.extend(_compare_repo_fields(here_repo, there_repo, rel, here_at, there_at))
+        for side, location, repo in (("here", here_at, here_repo), ("there", there_at, there_repo)):
+            if repo.get("fetch_error"):
+                failed_fetches[side] += 1
+            findings.extend(_repo_local_findings(repo, rel, side, location))
+    for side, location in (("here", here_at), ("there", there_at)):
+        if failed_fetches[side]:
+            findings.append(
+                _comparison_finding(
+                    "fetch_failed_side", location=location, count=failed_fetches[side], side=side
+                )
+            )
+    return findings
+
 
 def diff_status(here: dict, there: dict, here_name: str, there_name: str) -> list:
     return [finding["message"] for finding in diff_findings(here, there, here_name, there_name)]
@@ -7079,81 +8818,128 @@ def status_value(status, name: str, default=None):
 
 
 def remote_access_problem(remote, named_branch: bool) -> bool:
-    return bool(status_value(remote, "content_error") or status_value(remote, "fetch_failed") or status_value(remote, "mixed_public")
-                or status_value(remote, "target_mismatch") or status_value(remote, "multiple_pushurls")
-                or (status_value(remote, "fetch_refspec_fingerprint") and (
-                    not status_value(remote, "fetch_refspecs_safe", True)
-                    or not status_value(remote, "fetch_url_safe", True)
-                    or not status_value(remote, "push_url_safe", True)
-                    or (named_branch and not status_value(remote, "branch_mapping_safe", True)))))
+    return bool(
+        status_value(remote, "content_error")
+        or status_value(remote, "fetch_failed")
+        or status_value(remote, "mixed_public")
+        or status_value(remote, "target_mismatch")
+        or status_value(remote, "multiple_pushurls")
+        or (
+            status_value(remote, "fetch_refspec_fingerprint")
+            and (
+                not status_value(remote, "fetch_refspecs_safe", True)
+                or not status_value(remote, "fetch_url_safe", True)
+                or not status_value(remote, "push_url_safe", True)
+                or (named_branch and not status_value(remote, "branch_mapping_safe", True))
+            )
+        )
+    )
 
 
 def publication_content_current(remote) -> bool:
-    return (bool(status_value(remote, "public"))
-            and bool(status_value(remote, "branch_exists"))
-            and status_value(remote, "content_equal") is True
-            and not remote_access_problem(remote, True))
+    return (
+        bool(status_value(remote, "public"))
+        and bool(status_value(remote, "branch_exists"))
+        and status_value(remote, "content_equal") is True
+        and not remote_access_problem(remote, True)
+    )
 
 
 def remote_action_delta(remote, direction: str) -> int:
     if status_value(remote, "public"):
-        divergent_content = (status_value(remote, "content_equal") is not None
-                             and status_value(remote, "ahead", 0)
-                             and status_value(remote, "behind", 0))
+        divergent_content = (
+            status_value(remote, "content_equal") is not None
+            and status_value(remote, "ahead", 0)
+            and status_value(remote, "behind", 0)
+        )
         if publication_content_current(remote) or divergent_content:
             return 0
     return status_value(remote, direction, 0)
 
 
 def sync_action_delta(status, direction: str) -> int:
-    sync = next((remote for remote in status_value(status, "remotes", [])
-                 if status_value(remote, "sync", status_value(remote, "is_sync", False))), None)
+    sync = next(
+        (
+            remote
+            for remote in status_value(status, "remotes", [])
+            if status_value(remote, "sync", status_value(remote, "is_sync", False))
+        ),
+        None,
+    )
     if sync is not None:
         return remote_action_delta(sync, direction)
     return status_value(status, direction, 0)
 
 
 def submodule_needs_attention(module) -> bool:
-    return bool(any(status_value(module, name) for name in (
-        "modified", "deleted", "untracked", "conflicts", "conflicted", "operation"))
-        or (status_value(module, "initialized")
-            and status_value(module, "checked_out_oid") != status_value(module, "index_oid")))
+    return bool(
+        any(
+            status_value(module, name)
+            for name in ("modified", "deleted", "untracked", "conflicts", "conflicted", "operation")
+        )
+        or (
+            status_value(module, "initialized")
+            and status_value(module, "checked_out_oid") != status_value(module, "index_oid")
+        )
+    )
 
 
 def repo_matches_view(status, view: str) -> bool:
     """Eine fachliche Auswahlregel für Modell und JSON, ohne lokalisierte Texte."""
     if view == "all":
         return True
+    if view in ("incoming", "outgoing", "publish") and not _graph_measurement_valid(status):
+        return False
     remotes = status_value(status, "remotes", [])
     named_branch = status_value(status, "branch", "?") not in ("", "?", "(detached)")
     has_head = named_branch and is_object_id(status_value(status, "head_oid"))
     if view == "changes":
-        return (any(status_value(status, key) for key in (
-            "modified", "deleted", "untracked", "conflicts", "stashes", "operation"))
-            or any(submodule_needs_attention(module) for module in status_value(status, "submodules", [])))
+        return any(
+            status_value(status, key)
+            for key in ("modified", "deleted", "untracked", "conflicts", "stashes", "operation")
+        ) or any(
+            submodule_needs_attention(module) for module in status_value(status, "submodules", [])
+        )
     if view == "incoming":
-        return bool(sync_action_delta(status, "behind") or any(
-            remote_action_delta(remote, "behind") for remote in remotes))
+        return bool(
+            sync_action_delta(status, "behind")
+            or any(remote_action_delta(remote, "behind") for remote in remotes)
+        )
     if view == "outgoing":
-        return bool(sync_action_delta(status, "ahead") or any(
-            remote_action_delta(remote, "ahead")
-            or (has_head and not status_value(remote, "branch_exists", False))
-            for remote in remotes) or any(
+        return bool(
+            sync_action_delta(status, "ahead")
+            or any(
+                remote_action_delta(remote, "ahead")
+                or (has_head and not status_value(remote, "branch_exists", False))
+                for remote in remotes
+            )
+            or any(
                 status_value(branch, "coverage") == "uncovered"
-                for branch in status_value(status, "branches", [])))
+                for branch in status_value(status, "branches", [])
+            )
+        )
     if view == "access":
-        return bool(status_value(status, "error") or status_value(status, "branches_error")
-                    or status_value(status, "worktrees_error") or status_value(status, "submodules_error")
-                    or any(status_value(module, "error") for module in status_value(status, "submodules", [])) or any(
-            remote_access_problem(remote, named_branch)
-            for remote in remotes))
+        return bool(
+            status_value(status, "error")
+            or status_value(status, "branches_error")
+            or status_value(status, "worktrees_error")
+            or status_value(status, "submodules_error")
+            or any(
+                status_value(module, "error") for module in status_value(status, "submodules", [])
+            )
+            or any(remote_access_problem(remote, named_branch) for remote in remotes)
+        )
     if view == "publish":
-        return named_branch and any(status_value(remote, "public", False)
-            and not publication_content_current(remote) and (
-            status_value(remote, "content_equal") is False
-            or status_value(remote, "ahead", 0) > 0
-            or (has_head and not status_value(remote, "branch_exists", False)))
-            for remote in remotes)
+        return named_branch and any(
+            status_value(remote, "public", False)
+            and not publication_content_current(remote)
+            and (
+                status_value(remote, "content_equal") is False
+                or status_value(remote, "ahead", 0) > 0
+                or (has_head and not status_value(remote, "branch_exists", False))
+            )
+            for remote in remotes
+        )
     raise ValueError("unknown status view: " + view)
 
 
@@ -7162,28 +8948,19 @@ def filter_statuses(statuses: list, query: str, view: str = "all") -> list:
     terms = filter_terms(query)
     if not terms and view == "all":
         return list(statuses)
-    return [st for st in statuses if repo_matches_filter(st.rel, terms)
-            and repo_matches_view(st, view)]
+    return [
+        st for st in statuses if repo_matches_filter(st.rel, terms) and repo_matches_view(st, view)
+    ]
 
 
 def hidden_dirty(all_statuses: list, statuses: list) -> int:
-    """Wie viele der ausgeblendeten Repos Aufmerksamkeit braeuchten.
+    """Die ausgeblendeten Repos zählen, die Aufmerksamkeit brauchen.
 
-    gmf ist ein Uebersichtswerkzeug, und ein Filter, der stillschweigend gerade
-    die dreckigen Repos versteckt, verkehrt seinen Zweck ins Gegenteil. Die Zahl
-    gehoert deshalb in jede Kopfzeile, die man als Uebersicht liest — in der
-    Oberflaeche und seit 0.22.12 auch in `--list` (Entscheidung Daniel,
-    2026-09-10). Vorher konnte dort eine einzelne `✔`-Zeile mit Exit-Code 0
-    stehen, waehrend fuenfzig dreckige Repos ausgeblendet waren: dieselbe
-    Ausgabe wie bei einem wirklich sauberen Bestand.
-
-    Verglichen wird ueber IDENTITAET, nicht ueber Gleichheit: Zwei Repos mit
-    identischem Zustand sind als Dataclass gleich, und die sichtbare Liste
-    enthaelt dieselben Objekte wie die vollstaendige.
+    Die sichtbare Auswahl enthält dieselben Objekte wie der Scan. Zwei Repos
+    mit gleichen Dataclass-Feldern können trotzdem verschiedene Listeneinträge sein.
     """
     visible = {id(st) for st in statuses}
-    return sum(1 for st in all_statuses
-               if id(st) not in visible and not st.clean_and_synced)
+    return sum(1 for st in all_statuses if id(st) not in visible and not st.clean_and_synced)
 
 
 def filter_repo_dicts(repos: list, query: str, view: str = "all") -> list:
@@ -7196,48 +8973,70 @@ def filter_repo_dicts(repos: list, query: str, view: str = "all") -> list:
     terms = filter_terms(query)
     if not terms and view == "all":
         return list(repos)
-    return [repo for repo in repos
-            if repo_matches_filter(str(repo.get("rel", "")), terms)
-            and repo_matches_view(repo, view)]
+    return [
+        repo
+        for repo in repos
+        if repo_matches_filter(str(repo.get("rel", "")), terms) and repo_matches_view(repo, view)
+    ]
 
 
-def filter_comparison_repos(here: list, there: list, query: str,
-                            view: str) -> tuple[list, list]:
+def filter_comparison_repos(here: list, there: list, query: str, view: str) -> tuple[list, list]:
     left, right = filter_repo_dicts(here, query), filter_repo_dicts(there, query)
     # Zustandsfilter dürfen die Vergleichsseite nicht verschwinden lassen:
     # Treffen Änderungen nur hier zu, wird derselbe Repo-Pfad trotzdem dort gelesen.
     selected = {repo["rel"] for repo in left + right if repo_matches_view(repo, view)}
-    return ([repo for repo in left if repo["rel"] in selected],
-            [repo for repo in right if repo["rel"] in selected])
+    return (
+        [repo for repo in left if repo["rel"] in selected],
+        [repo for repo in right if repo["rel"] in selected],
+    )
 
 
 def comparison_selection(here: dict, there: dict, query: str, view: str):
     if not query and view == "all":
         return here, there, None
     left, right = filter_comparison_repos(here["repos"], there["repos"], query, view)
-    info = {"query": terminal_text(query), "here_matches": len(left),
-            "here_total": len(here["repos"]), "host_matches": len(right),
-            "host_total": len(there["repos"])}
+    info = {
+        "query": terminal_text(query),
+        "here_matches": len(left),
+        "here_total": len(here["repos"]),
+        "host_matches": len(right),
+        "host_total": len(there["repos"]),
+    }
     if view != "all":
-        info.update(view=view, selection="either-side",
-                    here_view_matches=len(filter_repo_dicts(here["repos"], query, view)),
-                    host_view_matches=len(filter_repo_dicts(there["repos"], query, view)))
+        info.update(
+            view=view,
+            selection="either-side",
+            here_view_matches=len(filter_repo_dicts(here["repos"], query, view)),
+            host_view_matches=len(filter_repo_dicts(there["repos"], query, view)),
+        )
     return dict(here, repos=left), dict(there, repos=right), info
 
 
 def snapshot_metadata(payload: dict) -> dict:
     dates = [repo["measured_at"] for repo in payload["repos"] if repo.get("measured_at")]
     dates.sort(key=parse_timestamp)
-    return {"version": payload["version"], "schema_version": payload.get("schema_version"),
-            "generated_at": payload.get("generated_at", ""), "root": payload.get("root", ""),
-            "recorded_repos": len(payload["repos"]),
-            "filter": ({key: payload["filter"][key] for key in ("query", "matches", "total")}
-                       if "filter" in payload else None),
-            "view": ({key: payload["view"][key] for key in ("id", "matches", "total", "hidden_attention")}
-                     if "view" in payload else None),
-            "local_measurement": {"earliest": dates[0] if dates else "",
-                                  "latest": dates[-1] if dates else "",
-                                  "unknown_repos": len(payload["repos"]) - len(dates)}}
+    return {
+        "version": payload["version"],
+        "schema_version": payload.get("schema_version"),
+        "generated_at": payload.get("generated_at", ""),
+        "root": payload.get("root", ""),
+        "recorded_repos": len(payload["repos"]),
+        "filter": (
+            {key: payload["filter"][key] for key in ("query", "matches", "total")}
+            if "filter" in payload
+            else None
+        ),
+        "view": (
+            {key: payload["view"][key] for key in ("id", "matches", "total", "hidden_attention")}
+            if "view" in payload
+            else None
+        ),
+        "local_measurement": {
+            "earliest": dates[0] if dates else "",
+            "latest": dates[-1] if dates else "",
+            "unknown_repos": len(payload["repos"]) - len(dates),
+        },
+    }
 
 
 def snapshot_limitations(payload: dict, side: str, other: dict | None = None) -> list:
@@ -7246,25 +9045,48 @@ def snapshot_limitations(payload: dict, side: str, other: dict | None = None) ->
         limits.append({"side": side, "code": "legacy_schema", "count": 1})
     repos = payload["repos"]
     counts = {
-        "head_identity_unknown": sum("head_oid" not in repo or repo["head_oid"] == "" for repo in repos),
-        "branch_inventory_unknown": sum("branches" not in repo and not repo.get("branches_error") for repo in repos),
+        "head_identity_unknown": sum(
+            "head_oid" not in repo or repo["head_oid"] == "" for repo in repos
+        ),
+        "branch_inventory_unknown": sum(
+            "branches" not in repo and not repo.get("branches_error") for repo in repos
+        ),
         "local_measurement_unknown": sum(not repo.get("measured_at") for repo in repos),
-        "fetch_age_unknown": sum(not remote.get("fetched_at") for repo in repos for remote in repo.get("remotes", [])),
+        "fetch_age_unknown": sum(
+            not remote.get("fetched_at") for repo in repos for remote in repo.get("remotes", [])
+        ),
     }
     if other is not None:
         measured = {repo["rel"] for repo in other["repos"] if "submodules" in repo}
         counts["submodule_path_identity_unknown"] = sum(
-            snapshot_path_identity(module) is None for repo in repos if repo["rel"] in measured
-            and not repo.get("submodules_error") for module in repo.get("submodules", []))
+            snapshot_path_identity(module) is None
+            for repo in repos
+            if repo["rel"] in measured and not repo.get("submodules_error")
+            for module in repo.get("submodules", [])
+        )
         counts["submodule_inventory_unknown"] = sum(
-            repo["rel"] in measured and "submodules" not in repo and not repo.get("submodules_error")
-            for repo in repos)
-    limits.extend({"side": side, "code": code, "count": count} for code, count in counts.items() if count)
+            repo["rel"] in measured
+            and "submodules" not in repo
+            and not repo.get("submodules_error")
+            for repo in repos
+        )
+    limits.extend(
+        {"side": side, "code": code, "count": count} for code, count in counts.items() if count
+    )
     return limits
 
 
-def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
-                     *, as_json: bool, filter_info=None, sources=None, offline=False) -> int:
+def print_comparison(
+    here: dict,
+    there: dict,
+    here_name: str,
+    there_name: str,
+    *,
+    as_json: bool,
+    filter_info=None,
+    sources=None,
+    offline=False,
+) -> int:
     findings = diff_findings(here, there, here_name, there_name)
     lines = [finding["message"] for finding in findings]
     sources = sources or {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
@@ -7273,16 +9095,30 @@ def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
     if filter_info is not None:
         shown = filter_info["query"]
         if filter_info.get("view"):
-            shown = " · ".join(filter(None, [shown, t("view_active", v=t("view_" + filter_info["view"]))]))
-        note = t("diff_filter_note", q=shown, n=len(here["repos"]),
-                 total=filter_info["here_total"], m=len(there["repos"]),
-                 mt=filter_info["host_total"], h=terminal_text(there_name))
+            shown = " · ".join(
+                filter(None, [shown, t("view_active", v=t("view_" + filter_info["view"]))])
+            )
+        note = t(
+            "diff_filter_note",
+            q=shown,
+            n=len(here["repos"]),
+            total=filter_info["here_total"],
+            m=len(there["repos"]),
+            mt=filter_info["host_total"],
+            h=terminal_text(there_name),
+        )
         if not here["repos"] and not there["repos"]:
             print(t("filter_cli_no_hit", q=shown), file=sys.stderr)
     if as_json:
-        payload = {"schema_version": JSON_SCHEMA_VERSION, "here": json_text(here["version"]),
-                   "host": terminal_text(there_name), "differences": lines,
-                   "findings": findings, "sources": json_safe_value(sources), "limitations": limits}
+        payload = {
+            "schema_version": JSON_SCHEMA_VERSION,
+            "here": json_text(here["version"]),
+            "host": terminal_text(there_name),
+            "differences": lines,
+            "findings": findings,
+            "sources": json_safe_value(sources),
+            "limitations": limits,
+        }
         if filter_info is not None:
             payload["filter"] = filter_info
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -7290,14 +9126,32 @@ def print_comparison(here: dict, there: dict, here_name: str, there_name: str,
         if offline:
             for side, name in (("here", here_name), ("there", there_name)):
                 source = sources[side]
-                print(t("snapshot_source", name=terminal_text(name), at=source["generated_at"] or t("age_unknown"),
-                        age=measurement_age(source["generated_at"]), n=source["recorded_repos"]))
+                print(
+                    t(
+                        "snapshot_source",
+                        name=terminal_text(name),
+                        at=source["generated_at"] or t("age_unknown"),
+                        age=measurement_age(source["generated_at"]),
+                        n=source["recorded_repos"],
+                    )
+                )
                 local = source["local_measurement"]
-                print(t("snapshot_measurements", first=local["earliest"] or t("age_unknown"),
-                        last=local["latest"] or t("age_unknown"), n=local["unknown_repos"]))
+                print(
+                    t(
+                        "snapshot_measurements",
+                        first=local["earliest"] or t("age_unknown"),
+                        last=local["latest"] or t("age_unknown"),
+                        n=local["unknown_repos"],
+                    )
+                )
                 for limit in limits:
                     if limit["side"] == side:
-                        print(t("snapshot_limit", detail=t("snapshot_" + limit["code"], n=limit["count"])))
+                        print(
+                            t(
+                                "snapshot_limit",
+                                detail=t("snapshot_" + limit["code"], n=limit["count"]),
+                            )
+                        )
         if note:
             print(note)
         if offline and not here["repos"] and not there["repos"]:
@@ -7330,8 +9184,9 @@ def parse_snapshot_json(text: str):
         return number
 
     try:
-        payload = json.loads(text, object_pairs_hook=unique_keys, parse_constant=nonfinite,
-                             parse_float=finite_float)
+        payload = json.loads(
+            text, object_pairs_hook=unique_keys, parse_constant=nonfinite, parse_float=finite_float
+        )
     except RecursionError:
         raise ValueError(t("snapshot_depth")) from None
     # Die Decoder verschiedener Python-Versionen haben unterschiedliche Grenzen.
@@ -7356,8 +9211,9 @@ def load_snapshot(path: Path) -> dict:
     if len(data) > MAX_SNAPSHOT_BYTES:
         raise ValueError(t("snapshot_too_large"))
     payload = parse_snapshot_json(data.decode("utf-8-sig"))
-    if not _valid_remote_payload(payload):
-        raise ValueError(t("diff_ssh_bad_schema"))
+    schema_path = _snapshot_schema_error(payload)
+    if schema_path is not None:
+        raise ValueError(f"{t('diff_ssh_bad_schema')} ({schema_path})")
     return payload
 
 
@@ -7368,22 +9224,41 @@ def run_offline_comparison(paths: list[str], *, as_json: bool, query: str, view:
         for payload in (here, there):
             if payload.get("view", {}).get("id", "all") != "all":
                 raise ValueError(t("snapshot_filtered_view"))
-        scopes = [set(filter_terms(payload.get("filter", {}).get("query", ""))) for payload in (here, there)]
+        scopes = [
+            set(filter_terms(payload.get("filter", {}).get("query", "")))
+            for payload in (here, there)
+        ]
         if scopes[0] != scopes[1]:
             raise ValueError(t("snapshot_filter_mismatch"))
         sources = {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
         for side, path in zip(("here", "there"), files):
             sources[side]["file"] = terminal_text(path)
         here, there, info = comparison_selection(here, there, query, view)
-        return print_comparison(here, there, files[0].name, files[1].name, as_json=as_json,
-                                filter_info=info, sources=sources, offline=True)
+        return print_comparison(
+            here,
+            there,
+            files[0].name,
+            files[1].name,
+            as_json=as_json,
+            filter_info=info,
+            sources=sources,
+            offline=True,
+        )
     except (OSError, UnicodeError, ValueError) as exc:
         print(t("snapshot_error", e=terminal_text(exc)), file=sys.stderr)
         return 2
 
 
-def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
-             query: str = "", view: str = "all") -> int:
+def run_diff(
+    spec: str,
+    root: Path,
+    cfg: dict,
+    *,
+    fetch: bool,
+    as_json: bool,
+    query: str = "",
+    view: str = "all",
+) -> int:
     """Rechner vergleichen; Config-Erzeugung und optionaler Fetch sind die Ausnahmen."""
     host, _, path = spec.partition(":")
     if not host or host.startswith("-") or terminal_text(host) != host:
@@ -7396,17 +9271,17 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
         # Prozess: Nach erfolgreichem Verbindungsaufbau können auch Python,
         # Dateisystem oder Sitzung selbst hängen bleiben.
         there = fetch_remote_status(
-            host, remote_root, fetch=fetch,
-            process_timeout=cfg["diff_timeout"])
+            host, remote_root, fetch=fetch, process_timeout=cfg["diff_timeout"]
+        )
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
     here = make_snapshot(root, collect_all(root, cfg, fetch=fetch))
     sources = {"here": snapshot_metadata(here), "there": snapshot_metadata(there)}
     here, there, info = comparison_selection(here, there, query, view)
-    return print_comparison(here, there, t("diff_here"), host, as_json=as_json,
-                            filter_info=info, sources=sources)
-
+    return print_comparison(
+        here, there, t("diff_here"), host, as_json=as_json, filter_info=info, sources=sources
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -7416,6 +9291,7 @@ def run_diff(spec: str, root: Path, cfg: dict, *, fetch: bool, as_json: bool,
 # kompakte Ansicht nutzt die Breite statt der Höhe — pro Repo nur Name und ein
 # Symbol, dafür drei bis vier Spalten nebeneinander und der ganze Bestand auf
 # einen Blick. Die Details holt man sich mit M (umschalten) oder I zurück.
+
 
 def compact_mark(st: RepoStatus) -> tuple[str, int]:
     """Kürzestmögliche Zustandsmarke eines Repos plus ihre Farbe.
@@ -7441,8 +9317,7 @@ def compact_mark(st: RepoStatus) -> tuple[str, int]:
         # würden die Markenspalte für alle anderen unnötig verbreitern.
         return "⇅", C_RED
     if ahead or behind:
-        return (f"↑{ahead}" if ahead else f"↓{behind}"), (
-            C_RED if behind else C_YELLOW)
+        return (f"↑{ahead}" if ahead else f"↓{behind}"), (C_RED if behind else C_YELLOW)
     if st.branch_review_count:
         return f"B{st.branch_review_count}", C_YELLOW
     if st.publication_pending:
@@ -7461,18 +9336,18 @@ def compact_cells(statuses: list[RepoStatus]) -> list[tuple[str, str, int]]:
     return cells
 
 
-COMPACT_TARGET_COLUMNS = 3      # so viele Spalten sollen mindestens entstehen
-COMPACT_MIN_WIDTH = 14          # darunter wird ein Name unlesbar
-COMPACT_MARK_WIDTH = 3          # Platz für "↑12"; Divergenz ist ⇅ (ein Zeichen)
+COMPACT_TARGET_COLUMNS = 3  # so viele Spalten sollen mindestens entstehen
+COMPACT_MIN_WIDTH = 14  # darunter wird ein Name unlesbar
+COMPACT_MARK_WIDTH = 3  # Platz für "↑12"; Divergenz ist ⇅ (ein Zeichen)
 
 
 def compact_mark_width(cells: list[tuple[str, str, int]]) -> int:
-    return max(COMPACT_MARK_WIDTH, max((cell_width(mark) for mark, _, _ in cells),
-                                       default=0))
+    return max(COMPACT_MARK_WIDTH, max((cell_width(mark) for mark, _, _ in cells), default=0))
 
 
-def compact_layout(count: int, width: int, height: int,
-                   cell_width_hint: int) -> tuple[int, int, int]:
+def compact_layout(
+    count: int, width: int, height: int, cell_width_hint: int
+) -> tuple[int, int, int]:
     """Spaltenaufteilung für `count` Einträge: (Zeilen, Spalten, Spaltenbreite).
 
     Gefüllt wird spaltenweise wie bei `ls`: die ersten `rows` Einträge stehen
@@ -7491,8 +9366,9 @@ def compact_layout(count: int, width: int, height: int,
     return min(rows, height), columns, column_width
 
 
-def compact_plan(count: int, width: int, height: int,
-                 cell_width_hint: int) -> tuple[int, int, int, bool]:
+def compact_plan(
+    count: int, width: int, height: int, cell_width_hint: int
+) -> tuple[int, int, int, bool]:
     """Layout der Kompaktansicht inklusive Platz für den Scroll-Hinweis.
 
     -> (Zeilen, Spalten, Spaltenbreite, hinweis). `hinweis` heißt: nicht alle
@@ -7511,8 +9387,7 @@ def compact_plan(count: int, width: int, height: int,
             return rows, columns, column_width, False
         # Das Raster gibt seine unterste Zeile an den Hinweis ab. Weniger Zeilen
         # heißt mehr Gesamtspalten — scrollbar bleibt es also auf jeden Fall.
-        rows, columns, column_width = compact_layout(count, width, height - 1,
-                                                     cell_width_hint)
+        rows, columns, column_width = compact_layout(count, width, height - 1, cell_width_hint)
     return rows, columns, column_width, True
 
 
@@ -7531,19 +9406,37 @@ def compact_position(index: int, rows: int) -> tuple[int, int]:
 def color_enabled(policy: str = "auto") -> bool:
     if policy not in ("auto", "always", "never"):
         raise ValueError("unknown color policy: " + policy)
-    return policy == "always" or (policy == "auto" and "NO_COLOR" not in os.environ
-                                  and sys.stdout.isatty())
+    return policy == "always" or (
+        policy == "auto" and "NO_COLOR" not in os.environ and sys.stdout.isatty()
+    )
 
 
-def print_list(statuses: list[RepoStatus], root: Path | None = None,
-               query: str = "", hidden: int = 0, view: str = "all",
-               color: str = "auto") -> None:
+def print_list(
+    statuses: list[RepoStatus],
+    root: Path | None = None,
+    query: str = "",
+    hidden: int = 0,
+    view: str = "all",
+    color: str = "auto",
+) -> None:
     green, red, yellow, cyan, gray, reset = (
-        "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[90m", "\033[0m")
+        "\033[32m",
+        "\033[31m",
+        "\033[33m",
+        "\033[36m",
+        "\033[90m",
+        "\033[0m",
+    )
     if not color_enabled(color):
         green = red = yellow = cyan = gray = reset = ""
-    colors = {C_GREEN: green, C_RED: red, C_YELLOW: yellow,
-              C_CYAN: cyan, C_HISTORY: gray, C_DIM: ""}
+    colors = {
+        C_GREEN: green,
+        C_RED: red,
+        C_YELLOW: yellow,
+        C_CYAN: cyan,
+        C_HISTORY: gray,
+        C_DIM: "",
+    }
     # Kopfzeile wie in der TUI: Version + Wurzel. Genau dieser Text landet in einer
     # umgeleiteten Datei, die man spaeter gegen die eines anderen Macs diffed —
     # ohne Version haelt man einen Versionsunterschied fuer einen Repo-Unterschied.
@@ -7551,20 +9444,25 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
     # Datei, die später gegen die eines anderen Macs verglichen wird. Ohne den
     # Filter im Kopf hielte man einen ausgeblendeten Bestand für einen echten
     # Unterschied.
-    print(f"gitmaster_flash {__version__}"
-          + (f" · {display_git_path(root)}" if root else "")
-          + f" · {len(statuses)} {t('hdr_repos')}"
-          + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else "")
-          + (" · " + t("view_active", v=t("view_" + view)) if view != "all" else "")
-          # Dieselbe Zusage wie in der Oberflaeche: Ein Filter darf nicht
-          # ausgerechnet die Repos verstecken, deretwegen man gmf startet.
-          + (f" · {t('hdr_hidden_dirty', n=hidden)}" if hidden else ""))
+    print(
+        f"gitmaster_flash {__version__}"
+        + (f" · {display_git_path(root)}" if root else "")
+        + f" · {len(statuses)} {t('hdr_repos')}"
+        + (f" · {t('hdr_filter_note', q=terminal_text(query))}" if query else "")
+        + (" · " + t("view_active", v=t("view_" + view)) if view != "all" else "")
+        # Dieselbe Zusage wie in der Oberflaeche: Ein Filter darf nicht
+        # ausgerechnet die Repos verstecken, deretwegen man gmf startet.
+        + (f" · {t('hdr_hidden_dirty', n=hidden)}" if hidden else "")
+    )
     for st in statuses:
         remote_bits = []
         for remote in st.remotes:
-            remote_bits.append(" ".join(
-                f"{colors[pair]}{terminal_text(text)}{reset}"
-                for text, pair in remote_badge_parts(remote)))
+            remote_bits.append(
+                " ".join(
+                    f"{colors[pair]}{terminal_text(text)}{reset}"
+                    for text, pair in remote_badge_parts(remote)
+                )
+            )
         badge_txt = ("  " + "  ".join(remote_bits)) if remote_bits else ""
         if st.clean_and_synced:
             print(f"{green}✔ {display_git_path(st.rel)}{reset}{badge_txt}")
@@ -7599,9 +9497,8 @@ def print_list(statuses: list[RepoStatus], root: Path | None = None,
             # UnicodeEncodeError abbrechen, ein `\x1b[` im Namen fuhr als
             # Steuersequenz ins Terminal (Review-Fund 2026-09-10).
             bits.append(
-                f"{yellow}"
-                f"{terminal_text(t('branch_not_on', b=st.branch, r=st.remote))}"
-                f"{reset}")
+                f"{yellow}{terminal_text(t('branch_not_on', b=st.branch, r=st.remote))}{reset}"
+            )
         bits.extend(remote_bits)
         print(f"{red}✘{reset} {display_git_path(st.rel)}  {' '.join(bits)}")
 
@@ -7617,8 +9514,11 @@ C_HISTORY = 9
 
 
 def remote_badge_parts(remote: RemoteStatus) -> list[tuple[str, int]]:
-    if (remote.public and remote.content_equal is not None
-            and not remote_access_problem(remote, True)):
+    if (
+        remote.public
+        and remote.content_equal is not None
+        and not remote_access_problem(remote, True)
+    ):
         label = t("github_current" if remote.content_equal else "github_different")
         if remote.name != "github":
             label = f"{remote.name}: {label}"
@@ -7626,17 +9526,28 @@ def remote_badge_parts(remote: RemoteStatus) -> list[tuple[str, int]]:
         if remote.history_differs:
             parts.append((t("history_different"), C_HISTORY))
         return parts
-    arrows = (f"↑{remote.ahead}" if remote.ahead else "")
+    arrows = f"↑{remote.ahead}" if remote.ahead else ""
     arrows += f"↓{remote.behind}" if remote.behind else ""
     if not remote.branch_exists:
         arrows = "?"
     if remote.fetch_failed or remote.content_error:
         arrows = "✘" + arrows
     text = f"{arrows} {remote.name}" if arrows else remote.name
-    pair = (C_RED if remote.fetch_failed or remote.content_error else C_CYAN if remote.public
-            else C_RED if remote.behind else C_YELLOW if remote.ahead
-            else C_GREEN if remote.is_sync else C_DIM)
+    pair = (
+        C_RED
+        if remote.fetch_failed or remote.content_error
+        else C_CYAN
+        if remote.public
+        else C_RED
+        if remote.behind
+        else C_YELLOW
+        if remote.ahead
+        else C_GREEN
+        if remote.is_sync
+        else C_DIM
+    )
     return [(text, pair)]
+
 
 # Farbe je Anzeigecode aus parse_porcelain(). Untracked ist gelb: eine Datei,
 # die Git noch gar nicht kennt, ist eine Entscheidung und kein Schaden.
@@ -7854,22 +9765,43 @@ def selected_repo_context_parts(st: RepoStatus, width: int) -> list[tuple[str, i
     actions = ["I"]
     if st.dirty and not (st.operation or st.conflicts):
         actions.append("C")
-    if (st.ahead and not st.behind and not st.dirty and not st.operation
-            and st.remote_state == "ok" and not any(r.public and r.is_sync for r in st.remotes)):
+    if (
+        st.ahead
+        and not st.behind
+        and not st.dirty
+        and not st.operation
+        and st.remote_state == "ok"
+        and not any(r.public and r.is_sync for r in st.remotes)
+    ):
         actions.append("P")
-    if not st.dirty and not st.operation and any(
-            r.public and r.ahead and not r.behind and r.branch_exists
-            and not r.fetch_failed and r.transfer_safe and not publication_content_current(r)
-            for r in st.remotes):
+    if (
+        not st.dirty
+        and not st.operation
+        and any(
+            r.public
+            and r.ahead
+            and not r.behind
+            and r.branch_exists
+            and not r.fetch_failed
+            and r.transfer_safe
+            and not publication_content_current(r)
+            for r in st.remotes
+        )
+    ):
         actions.append("G")
     short = width < 80
     limit = 8 if short else max(8, min(20, width // 5))
     name = ellipsize(display_git_path(st.rel), limit)
     branch = ellipsize(terminal_text(st.branch), limit)
     # Git-Namen sind bereits sichtbar escaped und können kein NUL enthalten.
-    before, _, after = t("selected_context_short" if short else "selected_context",
-                         rel=name, branch=branch, state=state,
-                         remotes="\0", actions="/".join(actions)).partition("\0")
+    before, _, after = t(
+        "selected_context_short" if short else "selected_context",
+        rel=name,
+        branch=branch,
+        state=state,
+        remotes="\0",
+        actions="/".join(actions),
+    ).partition("\0")
     parts = [(before, C_CYAN)]
     for index, remote in enumerate(st.remotes):
         if index:
@@ -7884,18 +9816,132 @@ def selected_repo_context_parts(st: RepoStatus, width: int) -> list[tuple[str, i
     return parts
 
 
-def selected_repo_context(st: RepoStatus, width: int) -> str:
-    return "".join(text for text, _ in selected_repo_context_parts(st, width))
+class AppDiagnostics:
+    """Ein unabhängiger Leser verwirft alte Diagnosebytes auch nach dem TUI-Ende."""
+
+    READER = """
+import os, select, socket, struct
+control = socket.socket(fileno=1)
+tail = b''
+while True:
+    ready, _, _ = select.select([0] + ([control] if control else []), [], [])
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if not data:
+            break
+        tail = (tail + data)[-4096:]
+    if control and control in ready:
+        if not control.recv(1):
+            control.close()
+            control = None
+            continue
+        # Nach dem Starterende bereits gepufferte Ausgabe vor dem Snapshot lesen.
+        for _ in range(128):
+            if not select.select([0], [], [], 0)[0]:
+                break
+            data = os.read(0, 65536)
+            if not data:
+                break
+            tail = (tail + data)[-4096:]
+        try:
+            control.sendall(struct.pack('!I', len(tail)) + tail)
+        except OSError:
+            control.close()
+            control = None
+"""
+
+    def __init__(self):
+        reader, self.writer = os.pipe()
+        self.control, peer = socket.socketpair()
+        self.closed = False
+        try:
+            pid = os.posix_spawn(
+                sys.executable,
+                [sys.executable, "-I", "-S", "-c", self.READER],
+                os.environ,
+                setsid=True,
+                file_actions=[
+                    (os.POSIX_SPAWN_DUP2, reader, 0),
+                    (os.POSIX_SPAWN_DUP2, peer.fileno(), 1),
+                    (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
+                ],
+            )
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            os.close(reader)
+            peer.close()
+        threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
+
+    def fileno(self):
+        return self.writer
+
+    def read_tail(self):
+        self.control.settimeout(2)
+        self.control.sendall(b"r")
+
+        def receive(size):
+            data = b""
+            while len(data) < size:
+                part = self.control.recv(size - len(data))
+                if not part:
+                    raise OSError("diagnostic reader closed")
+                data += part
+            return data
+
+        length = struct.unpack("!I", receive(4))[0]
+        if length > 4096:
+            raise OSError("invalid diagnostic length")
+        return receive(length).decode(errors="replace")
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            os.close(self.writer)
+            self.control.close()
+
+
+StashRow = tuple[str, StashEntry, Optional[StashFile], str]
+
+
+KEY_BINDINGS = {
+    "C": "action_commit_wizard",
+    "R": "start_background_scan",
+    "N": "action_refresh_local",
+    "U": "action_fetch_one",
+    "X": "action_stop_scan",
+    "L": "action_pull",
+    "P": "action_sync_push",
+    "G": "action_github_push",
+    "H": "action_git_help",
+    "I": "action_repo_info",
+    "W": "action_worktrees",
+    "O": "action_submodules",
+    "A": "action_file_changes",
+    "M": "toggle_list_layout",
+    "B": "action_work_view",
+    "S": "action_stash_show",
+    "/": "action_filter",
+    ",": "action_settings",
+}
 
 
 class TUI:
-    def __init__(self, stdscr, root: Path, cfg: dict, cd_file: str | None,
-                 query: str = "", config_path: Path | None = None,
-                 status_view: str = "all"):
+    def __init__(
+        self,
+        stdscr,
+        root: Path,
+        cfg: dict,
+        cd_file: str | None,
+        query: str = "",
+        config_path: Path | None = None,
+        status_view: str = "all",
+    ):
         self.scr = stdscr
         self.root = root
         self.cfg = cfg
-        self.app_results = queue.Queue()
+        self.app_results: queue.Queue[tuple[str, str, int, str]] = queue.Queue()
         self.pending_app_launches = 0
         self.cd_file = cd_file
         # Ohne Pfad wird nichts gespeichert. Der Demo-Modus läuft absichtlich
@@ -7907,21 +9953,23 @@ class TUI:
         # auf `statuses` — ohne aktiven Filter sind beide Listen inhaltsgleich.
         self.all_statuses: list[RepoStatus] = []
         self.statuses: list[RepoStatus] = []
-        self.filter_query = canonical_filter_query(query)  # "" = kein Filter; --filter belegt ihn vor
+        self.filter_query = canonical_filter_query(
+            query
+        )  # "" = kein Filter; --filter belegt ihn vor
         self.status_view = status_view
         self.selected = 0
-        self.offset = 0            # Scroll-Position
+        self.offset = 0  # Scroll-Position
         self.expanded: set[Path] = set()  # echte Pfade der aufgeklappten Repos
-        self.message = ""          # Feedback-Zeile über dem Footer
+        self.message = ""  # Feedback-Zeile über dem Footer
         # "detail" = eine Zeile je Repo mit allem; "compact" = mehrspaltige
         # Kurzfassung. Der Startmodus richtet sich nach der Repo-Zahl (s. reload).
         self.view_mode = "detail"
-        self.focus = "repos"       # "repos" oder "log" (Tab wechselt)
-        self.log_top = 0           # erste sichtbare Protokollzeile
-        self.log_visible = 1       # zuletzt gezeichnete Hoehe (Seitenschritt)
-        self.log_selected = None   # gewählte Protokollzeile (None = noch nie dort)
-        self.compact_col = 0       # erste sichtbare Spalte der Kompaktansicht
-        self.scan: BackgroundScan | None = None   # laufender Hintergrund-Fetch
+        self.focus = "repos"  # "repos" oder "log" (Tab wechselt)
+        self.log_top = 0  # erste sichtbare Protokollzeile
+        self.log_visible = 1  # zuletzt gezeichnete Hoehe (Seitenschritt)
+        self.log_selected: int | None = None  # gewählte Protokollzeile (None = noch nie dort)
+        self.compact_col = 0  # erste sichtbare Spalte der Kompaktansicht
+        self.scan: BackgroundScan | None = None  # laufender Hintergrund-Fetch
         # Repos, die WAEHREND des Hintergrund-Fetch lokal neu eingelesen wurden
         # (Commit, Stash, Push). Deren Ergebnis aus dem Scan ist aelter als das,
         # was der Anwender gerade sieht, und wird verworfen.
@@ -7941,8 +9989,7 @@ class TUI:
 
         def progress(done, total):
             self.scr.erase()
-            safe_addstr(self.scr, 1, 2, f"{label} … {done}/{total}",
-                        curses.color_pair(C_YELLOW))
+            safe_addstr(self.scr, 1, 2, f"{label} … {done}/{total}", curses.color_pair(C_YELLOW))
             self.scr.refresh()
 
         progress(0, 0)
@@ -7964,7 +10011,6 @@ class TUI:
         if self.scan:
             self.message = t("scan_already_running")
             return
-        resume_git_calls()
         self.locally_refreshed.clear()
         self.scan = BackgroundScan(self.root, self.cfg)
         self.scan.start()
@@ -7996,7 +10042,7 @@ class TUI:
                 self.scan = None
                 self.message = t("scan_failed", e=str(payload)[:120])
                 return
-            else:                                   # "done"
+            else:  # "done"
                 self._finish_scan(payload)
                 return
 
@@ -8025,8 +10071,7 @@ class TUI:
         # Remote-Zahlen koennen dadurch aelter sein als der Rest — das naechste R
         # holt sie nach. Der umgekehrte Fehler waere schlimmer: ein Commit, den
         # die Liste wieder als offene Aenderung zeigt.
-        keep = {st.path: st for st in self.all_statuses
-                if st.path in self.locally_refreshed}
+        keep = {st.path: st for st in self.all_statuses if st.path in self.locally_refreshed}
         previous = {st.path: st for st in self.all_statuses}
         for st in results:
             if st.path in previous:
@@ -8044,16 +10089,25 @@ class TUI:
         sichtbar ist — sonst springt sie an den Anfang. Beim Wechsel des Filters
         ist der Sprung gewollt: Der erste Treffer ist dann das, was man sucht.
         """
-        previous = self.statuses[self.selected] if (
-            keep_selection and 0 <= self.selected < len(self.statuses)) else None
+        previous = (
+            self.statuses[self.selected]
+            if (keep_selection and 0 <= self.selected < len(self.statuses))
+            else None
+        )
         self.statuses = filter_statuses(self.all_statuses, self.filter_query, self.status_view)
         # Wiedererkannt wird über den ECHTEN Pfad, nicht über `rel`: Der
         # Anzeigename ist NFC-normalisiert, und zwei nebeneinanderliegende
         # Ordner, die sich nur in NFC/NFD unterscheiden, tragen denselben — die
         # Auswahl landete dann auf dem falschen Repo. Identität (`is`) reicht
         # hier nicht: Nach `reload()` sind alle Objekte neu.
-        index = next((i for i, st in enumerate(self.statuses)
-                      if previous is not None and st.path == previous.path), 0)
+        index = next(
+            (
+                i
+                for i, st in enumerate(self.statuses)
+                if previous is not None and st.path == previous.path
+            ),
+            0,
+        )
         self.selected = min(index, max(0, len(self.statuses) - 1))
         self.offset = 0
         self.compact_col = 0
@@ -8062,8 +10116,9 @@ class TUI:
         """Wie viele Repos der Filter ausblendet, die Aufmerksamkeit bräuchten."""
         return hidden_dirty(self.all_statuses, self.statuses)
 
-    def refresh_one(self, st: RepoStatus, refetched: str | None = None,
-                    fetch_remote: str | None = None):
+    def refresh_one(
+        self, st: RepoStatus, refetched: str | None = None, fetch_remote: str | None = None
+    ):
         """Nur ein Repo neu einlesen (nach commit/stash), Sortierung beibehalten.
 
         `refetched` nennt ein Remote, dessen Fetch soeben nachweislich gelang —
@@ -8078,8 +10133,12 @@ class TUI:
             carry_fetch_times(st, new)
             # Nur das gewählte Remote wurde neu geprüft. Fehler der anderen
             # bleiben erhalten; ein neuer Fehler des gewählten hat Vorrang.
-            untouched = RepoStatus(st.path, st.rel, branch=st.branch,
-                                   remotes=[r for r in st.remotes if r.name != fetch_remote])
+            untouched = RepoStatus(
+                st.path,
+                st.rel,
+                branch=st.branch,
+                remotes=[r for r in st.remotes if r.name != fetch_remote],
+            )
             carry_fetch_failure(untouched, new)
         # Ab jetzt ist der lokale Stand dieses Repos juenger als alles, was ein
         # laufender Hintergrund-Fetch dazu noch liefern kann.
@@ -8175,8 +10234,12 @@ class TUI:
         dirty = sum(1 for s in self.statuses if not s.clean_and_synced)
         tail = t("hdr_review", n=dirty) if dirty else t("hdr_clean")
         if self.filter_query:
-            count = t("hdr_filtered", n=len(self.statuses),
-                      total=len(self.all_statuses), q=self.filter_query)
+            count = t(
+                "hdr_filtered",
+                n=len(self.statuses),
+                total=len(self.all_statuses),
+                q=self.filter_query,
+            )
             # Ohne Treffer wäre "alles sauber ✔" eine Falschaussage — es ist
             # schlicht nichts geprüft worden.
             if not self.statuses:
@@ -8196,23 +10259,34 @@ class TUI:
             # Der Fetch laeuft nebenher; die Zahl sagt, wie viel schon eingetragen
             # ist. Ohne sie haelt man die halb aktualisierte Liste fuer das
             # Endergebnis.
-            tail += " · " + t("scan_progress", done=self.scan.done,
-                              total=self.scan.total or "?")
+            tail += " · " + t("scan_progress", done=self.scan.done, total=self.scan.total or "?")
         head = f" gitmaster_flash {__version__} · {self.root} · {count} · {tail}"
         if self.status_view != "all":
             label = t("view_short_" + self.status_view)
             hidden = t("view_hidden", n=self.hidden_dirty())
             search_width = 3 if self.scan and w < 100 else min(16, max(3, w // 6))
-            search = " /" + ellipsize(terminal_text(self.filter_query), search_width) if self.filter_query else ""
+            search = (
+                " /" + ellipsize(terminal_text(self.filter_query), search_width)
+                if self.filter_query
+                else ""
+            )
             if w < 65:
                 head = f" v{__version__} {label}{search} {len(self.statuses)}/{len(self.all_statuses)} {hidden}"
             else:
                 prefix = f"gitmaster_flash {__version__}" if w >= 100 else f"v{__version__}"
                 label = t("view_active", v=label) + search
-                detail = (f"{label} · {len(self.statuses)}/{len(self.all_statuses)} · {hidden}"
-                          if search or self.scan else t("view_header", v=label, n=len(self.statuses),
-                                           total=len(self.all_statuses), review=dirty,
-                                           hidden=self.hidden_dirty()))
+                detail = (
+                    f"{label} · {len(self.statuses)}/{len(self.all_statuses)} · {hidden}"
+                    if search or self.scan
+                    else t(
+                        "view_header",
+                        v=label,
+                        n=len(self.statuses),
+                        total=len(self.all_statuses),
+                        review=dirty,
+                        hidden=self.hidden_dirty(),
+                    )
+                )
                 head = f" {prefix} · {detail}"
             if self.scan:
                 head += f" R {self.scan.done}/{self.scan.total or '?'}"
@@ -8229,11 +10303,15 @@ class TUI:
             # Beide Körper-Renderer setzen mindestens ein Repo voraus (die
             # kompakte Ansicht rechnet mit einer Spaltenbreite). Der leere Fall
             # gehört deshalb hierher und nicht in sie hinein.
-            safe_addstr(self.scr, 1, 2,
-                        t("filter_empty_hint", q=self.filter_query)
-                        if self.filter_query else (t("view_empty") if self.status_view != "all"
-                                                   else t("no_repos_found")),
-                        curses.color_pair(C_YELLOW))
+            safe_addstr(
+                self.scr,
+                1,
+                2,
+                t("filter_empty_hint", q=self.filter_query)
+                if self.filter_query
+                else (t("view_empty") if self.status_view != "all" else t("no_repos_found")),
+                curses.color_pair(C_YELLOW),
+            )
             body_h = 1
         elif self.view_mode == "compact":
             # Die kompakte Liste braucht nur so viele Zeilen, wie ihre Spalten hoch
@@ -8257,8 +10335,9 @@ class TUI:
         safe_addstr(self.scr, h - 4, 1, note, curses.color_pair(C_YELLOW))
         # Footer dreizeilig, damit auch in schmalen Fenstern nichts abgeschnitten wird.
         # Alle Tastenkürzel groß geschrieben; sie sind bewusst redundant sichtbar.
-        app_hints = " · ".join(f"{key.upper()} {app_label(app)}"
-                               for key, app in self.cfg["apps"].items())
+        app_hints = " · ".join(
+            f"{key.upper()} {app_label(app)}" for key, app in self.cfg["apps"].items()
+        )
         short = w < 100
         if short or cell_width(t("f2", apps=app_hints)) >= w:
             app_hints = "/".join(self.cfg["apps"]) + " Apps"
@@ -8289,7 +10368,7 @@ class TUI:
         hat; im Fokus (Tab) wächst der Bereich auf ein Drittel des Fensters, um
         darin lesen und scrollen zu können.
         """
-        if h < 14:      # sehr kleines Fenster: Repos gehen vor
+        if h < 14:  # sehr kleines Fenster: Repos gehen vor
             return 0
         return max(3, h // 3) if self.focus == "log" else 3
 
@@ -8297,22 +10376,32 @@ class TUI:
         """Ausführliche Ansicht: eine Zeile je Repo, aufklappbar."""
         rows = self.build_rows()
         # Zeile des ausgewählten Repos finden, damit sie sichtbar bleibt
-        sel_row = next((i for i, r in enumerate(rows)
-                        if r[0] == "repo" and r[1] == self.selected), 0)
+        sel_row = next(
+            (i for i, r in enumerate(rows) if r[0] == "repo" and r[1] == self.selected), 0
+        )
         self.offset = scroll_window(sel_row, self.offset, body_h)
         y = top
-        for row in rows[self.offset:self.offset + body_h]:
+        for row in rows[self.offset : self.offset + body_h]:
             kind = row[0]
             if kind == "repo":
-                self.draw_repo_line(y, self.statuses[row[1]],
-                                    row[1] == self.selected and self.focus == "repos")
+                self.draw_repo_line(
+                    y, self.statuses[row[1]], row[1] == self.selected and self.focus == "repos"
+                )
             elif kind == "file":
-                text, pair = file_row(row[2], row[3], any(
-                    module.path == row[3] for module in self.statuses[row[1]].submodules))
+                text, pair = file_row(
+                    row[2],
+                    row[3],
+                    any(module.path == row[3] for module in self.statuses[row[1]].submodules),
+                )
                 safe_addstr(self.scr, y, 5, text, curses.color_pair(pair))
             elif kind == "stash":
-                safe_addstr(self.scr, y, 5, f"⚑  {row[2]}   {t('stash_row_hint')}",
-                            curses.color_pair(C_YELLOW))
+                safe_addstr(
+                    self.scr,
+                    y,
+                    5,
+                    f"⚑  {row[2]}   {t('stash_row_hint')}",
+                    curses.color_pair(C_YELLOW),
+                )
             elif kind == "empty":
                 safe_addstr(self.scr, y, 5, t("no_changes"), curses.color_pair(C_DIM))
             y += 1
@@ -8321,8 +10410,7 @@ class TUI:
         """Zeilen, Spalten, Spaltenbreite und Hinweisbedarf der kompakten Ansicht."""
         cells = compact_cells(self.statuses)
         mark_width = compact_mark_width(cells)
-        longest = max((mark_width + 1 + cell_width(name)
-                       for _, name, _ in cells), default=12)
+        longest = max((mark_width + 1 + cell_width(name) for _, name, _ in cells), default=12)
         return compact_plan(len(cells), w, body_h, longest + 1)
 
     def draw_compact(self, top: int, body_h: int, w: int) -> None:
@@ -8341,8 +10429,8 @@ class TUI:
         # die `scroll_window` nach dem Fund von 2026-09-03 bekommen hat.
         total_columns = max(1, math.ceil(len(cells) / rows)) if cells else 1
         self.compact_col = min(
-            scroll_window(sel_col, self.compact_col, columns),
-            max(0, total_columns - columns))
+            scroll_window(sel_col, self.compact_col, columns), max(0, total_columns - columns)
+        )
         for index, (mark, name, pair) in enumerate(cells):
             row, column = compact_position(index, rows)
             if not (self.compact_col <= column < self.compact_col + columns):
@@ -8352,8 +10440,11 @@ class TUI:
             # Zähler fluchten. Die Breitenberechnung muss dabei dieselbe sein wie
             # die von curses; sonst verschieben ↑2/↓3 die Namen um eine Zelle.
             name_width = max(1, column_width - mark_width - 1)
-            text = (pad_cells(ellipsize(mark, mark_width), mark_width) + " "
-                    + pad_cells(ellipsize(name, name_width), name_width))
+            text = (
+                pad_cells(ellipsize(mark, mark_width), mark_width)
+                + " "
+                + pad_cells(ellipsize(name, name_width), name_width)
+            )
             attr = color_attr(pair, index == self.selected and self.focus == "repos")
             safe_addstr(self.scr, top + row, x, text, attr)
         if hint:
@@ -8361,11 +10452,18 @@ class TUI:
             # Er steht auf seiner eigenen, von compact_plan() reservierten Zeile
             # UNTER dem Raster — in der letzten Rasterzeile überschrieb er sonst
             # einen sichtbaren Repo-Namen samt Status.
-            safe_addstr(self.scr, top + rows, max(1, w - 22),
-                        t("compact_more", a=self.compact_col + 1,
-                          b=min(total_columns, self.compact_col + columns),
-                          n=total_columns),
-                        curses.color_pair(C_DIM))
+            safe_addstr(
+                self.scr,
+                top + rows,
+                max(1, w - 22),
+                t(
+                    "compact_more",
+                    a=self.compact_col + 1,
+                    b=min(total_columns, self.compact_col + columns),
+                    n=total_columns,
+                ),
+                curses.color_pair(C_DIM),
+            )
 
     def draw_log(self, top: int, log_h: int, w: int) -> None:
         """Befehlsprotokoll unter der Liste — immer sichtbar, mit Tab bedienbar.
@@ -8375,11 +10473,14 @@ class TUI:
         müsste raten, welche Taste wohin geht.
         """
         focused = self.focus == "log"
-        title = t("log_pane_title") + (t("log_pane_focus") if focused
-                                       else t("log_pane_hint"))
-        safe_addstr(self.scr, top, 0, pad_cells(title, w - 1),
-                    curses.color_pair(C_DIM)
-                    | (curses.A_REVERSE if focused else curses.A_BOLD))
+        title = t("log_pane_title") + (t("log_pane_focus") if focused else t("log_pane_hint"))
+        safe_addstr(
+            self.scr,
+            top,
+            0,
+            pad_cells(title, w - 1),
+            curses.color_pair(C_DIM) | (curses.A_REVERSE if focused else curses.A_BOLD),
+        )
         visible = max(1, log_h - 1)
         # In der Kompaktansicht bekommt das Protokoll den ganzen Rest, `draw()`
         # vergroessert `log_h` also gegenueber `log_height()`. Der Seitenschritt
@@ -8393,12 +10494,11 @@ class TUI:
             # Die Auswahl bleibt beim Hin- und Herwechseln stehen; sie muss nur
             # sichtbar sein, deshalb wandert der Ausschnitt hinter ihr her.
             self.log_selected = min(max(0, self.log_selected or 0), len(entries) - 1)
-            self.log_top = min(
-                scroll_window(self.log_selected, self.log_top, visible), max_top)
+            self.log_top = min(scroll_window(self.log_selected, self.log_top, visible), max_top)
         else:
             # Ohne Fokus immer am Ende: die letzte Aktion ist die interessante.
             self.log_top = max_top
-        for offset, entry in enumerate(entries[self.log_top:self.log_top + visible]):
+        for offset, entry in enumerate(entries[self.log_top : self.log_top + visible]):
             index = self.log_top + offset
             pair = C_DIM
             if entry.startswith("✘"):
@@ -8406,8 +10506,7 @@ class TUI:
             elif entry.startswith("⊘"):
                 pair = C_YELLOW
             attr = color_attr(pair, focused and index == self.log_selected)
-            safe_addstr(self.scr, top + 1 + offset, 1,
-                        pad_cells(entry, w - 2), attr)
+            safe_addstr(self.scr, top + 1 + offset, 1, pad_cells(entry, w - 2), attr)
 
     # -- Dialog-Helfer ------------------------------------------------------
 
@@ -8420,7 +10519,7 @@ class TUI:
         Ja-Taste, etwa „J ⏎ = ja") wird rot nachgezeichnet. Beides trennt die
         Frage von der Liste darüber: Nach einer langen Dateiliste
         (GitHub-Vorschau) ging die Frage sonst als eine weitere farbige Zeile
-        unter (Daniel, 2026-09-02). Der Cursor
+        unter. Der Cursor
         wird sichtbar geschaltet, damit das Terminal ihn — je nach dessen
         Einstellung blinkend — hinter der Frage zeigt; ein per Attribut
         blinkender Text (A_BLINK) wird von vielen Terminals ignoriert und
@@ -8428,12 +10527,18 @@ class TUI:
         """
         h, w = self.scr.getmaxyx()
         safe_addstr(self.scr, y - 1, 0, " " * (w - 1))
-        safe_addstr(self.scr, y, 0, (" " + text).ljust(w - 1),
-                    curses.color_pair(C_ASK) | curses.A_BOLD)
+        safe_addstr(
+            self.scr, y, 0, (" " + text).ljust(w - 1), curses.color_pair(C_ASK) | curses.A_BOLD
+        )
         start = text.rfind(accent) if accent else -1
         if start >= 0:
-            safe_addstr(self.scr, y, 1 + cell_width(terminal_text(text[:start])),
-                        accent, curses.color_pair(C_ASK_KEY) | curses.A_BOLD)
+            safe_addstr(
+                self.scr,
+                y,
+                1 + cell_width(terminal_text(text[:start])),
+                accent,
+                curses.color_pair(C_ASK_KEY) | curses.A_BOLD,
+            )
         cursor_x = 1 + cell_width(terminal_text(text))
         set_cursor_visible(True)
         try:
@@ -8476,8 +10581,13 @@ class TUI:
         TUI sähe abgestürzt aus.
         """
         h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, h - 1, 0, terminal_text(text).ljust(w - 1),
-                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        safe_addstr(
+            self.scr,
+            h - 1,
+            0,
+            terminal_text(text).ljust(w - 1),
+            curses.color_pair(C_DIM) | curses.A_REVERSE,
+        )
         self.scr.refresh()
 
     def prompt_line(self, y: int, prompt: str, initial: str = "") -> str | None:
@@ -8497,8 +10607,7 @@ class TUI:
             # heraus — gmf endete beim Druck auf `/` mit einem Traceback
             # (Review-Fund 2026-09-10, an echtem curses nachgestellt).
             row = max(0, min(y, h - 1))
-            safe_addstr(self.scr, row, 1, (prompt + "".join(buf)).ljust(w - 2),
-                        curses.A_BOLD)
+            safe_addstr(self.scr, row, 1, (prompt + "".join(buf)).ljust(w - 2), curses.A_BOLD)
             cursor_x = 1 + cell_width(terminal_text(prompt + "".join(buf)))
             try:
                 self.scr.move(row, min(cursor_x, max(0, w - 2)))
@@ -8542,8 +10651,9 @@ class TUI:
             height = max(1, h - 3)
             offset = scroll_window(selected, offset, height)
             for y, i in enumerate(range(offset, min(len(STATUS_VIEWS), offset + height)), 1):
-                safe_addstr(self.scr, y, 1, t("view_" + STATUS_VIEWS[i]),
-                            color_attr(C_CYAN, i == selected))
+                safe_addstr(
+                    self.scr, y, 1, t("view_" + STATUS_VIEWS[i]), color_attr(C_CYAN, i == selected)
+                )
             safe_addstr(self.scr, h - 1, 0, t("pull_choose_footer"), curses.color_pair(C_DIM))
             self.scr.refresh()
             ch = self.scr.getch()
@@ -8571,7 +10681,7 @@ class TUI:
             answer = self.prompt_line(h - 4, t("filter_prompt"), self.filter_query)
         finally:
             set_cursor_visible(False)
-        if answer is None:          # Esc: bestehenden Filter unangetastet lassen
+        if answer is None:  # Esc: bestehenden Filter unangetastet lassen
             return
         self.filter_query = canonical_filter_query(answer)
         self.apply_filter()
@@ -8582,8 +10692,12 @@ class TUI:
         elif not self.statuses:
             self.message = t("filter_no_hit", q=self.filter_query)
         else:
-            self.message = t("filter_active", n=len(self.statuses),
-                             total=len(self.all_statuses), q=self.filter_query)
+            self.message = t(
+                "filter_active",
+                n=len(self.statuses),
+                total=len(self.all_statuses),
+                q=self.filter_query,
+            )
 
     def clear_filter(self) -> None:
         """Filter aufheben und die Auswahl auf dem sichtbaren Repo halten.
@@ -8596,8 +10710,11 @@ class TUI:
         """
         self.filter_query = ""
         self.apply_filter(keep_selection=True)
-        self.message = (t("filter_cleared") if self.status_view == "all" else
-                        t("view_active", v=t("view_" + self.status_view)))
+        self.message = (
+            t("filter_cleared")
+            if self.status_view == "all"
+            else t("view_active", v=t("view_" + self.status_view))
+        )
 
     def settings_rows(self) -> list[tuple]:
         """Zeilen der Einstellungsansicht — ohne curses, damit prüfbar.
@@ -8606,22 +10723,28 @@ class TUI:
         """
         rows: list[tuple] = []
         for setting in EDITABLE_SETTINGS:
-            rows.append(("edit", setting, t(f"set_{setting.key}"),
-                         setting_display(self.cfg, setting.key),
-                         t(f"set_{setting.key}_hint")))
+            rows.append(
+                (
+                    "edit",
+                    setting,
+                    t(f"set_{setting.key}"),
+                    setting_display(self.cfg, setting.key),
+                    t(f"set_{setting.key}_hint"),
+                )
+            )
         rows.append(("blank",))
         rows.append(("head", t("set_locked_head")))
         for key in READ_ONLY_SETTINGS:
             rows.append(("info", key, setting_display(self.cfg, key)))
         return rows
 
-    def _draw_settings_page(self, rows: list[tuple], selected: int,
-                            message: str, offset: int = 0) -> int:
+    def _draw_settings_page(
+        self, rows: list[tuple], selected: int, message: str, offset: int = 0
+    ) -> int:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         where = str(self.config_path) if self.config_path else t("set_not_saved")
-        safe_addstr(self.scr, 0, 0, (" " + t("set_title", p=where)).ljust(w - 1),
-                    curses.A_BOLD)
+        safe_addstr(self.scr, 0, 0, (" " + t("set_title", p=where)).ljust(w - 1), curses.A_BOLD)
         # Beschriftung UND Wert bekommen je eine feste Spaltenbreite. Ohne das
         # beginnt jeder Hinweis woanders, und die Werte lassen sich nicht mehr
         # untereinander vergleichen — genau dafür ist die Ansicht da.
@@ -8629,14 +10752,17 @@ class TUI:
         labels += [row[1] for row in rows if row[0] == "info"]
         values = [row[3] for row in rows if row[0] == "edit"]
         values += [row[2] for row in rows if row[0] == "info"]
-        label_w = min(max((cell_width(terminal_text(x)) for x in labels), default=10),
-                      max(8, w // 3))
+        label_w = min(
+            max((cell_width(terminal_text(x)) for x in labels), default=10), max(8, w // 3)
+        )
         # Der Wert bekommt den ganzen Rest der Zeile; nur was dann noch nicht
         # passt, wird sichtbar gekürzt. Vollständig steht er beim Ändern im
         # vorbelegten Eingabefeld.
         value_x = 4 + label_w
-        value_w = min(max((cell_width(terminal_text(x)) for x in values), default=10),
-                      max(10, w - value_x - 2))
+        value_w = min(
+            max((cell_width(terminal_text(x)) for x in values), default=10),
+            max(10, w - value_x - 2),
+        )
         visible = max(1, h - 5)
         offset = scroll_window(selected, offset, visible)
         y = 2
@@ -8653,18 +10779,36 @@ class TUI:
             mark = "›" if is_selected else " "
             if row[0] == "edit":
                 _, _, label, value, hint = row
-                safe_addstr(self.scr, y, 1, f"{mark} {pad_cells(label, label_w)}",
-                            curses.A_REVERSE if is_selected else 0)
-                safe_addstr(self.scr, y, value_x,
-                            ellipsize(terminal_text(value), value_w),
-                            color_attr(C_GREEN, is_selected))
+                safe_addstr(
+                    self.scr,
+                    y,
+                    1,
+                    f"{mark} {pad_cells(label, label_w)}",
+                    curses.A_REVERSE if is_selected else 0,
+                )
+                safe_addstr(
+                    self.scr,
+                    y,
+                    value_x,
+                    ellipsize(terminal_text(value), value_w),
+                    color_attr(C_GREEN, is_selected),
+                )
             else:
                 _, key, value = row
-                safe_addstr(self.scr, y, 1, f"{mark} {pad_cells(key, label_w)}",
-                            color_attr(C_DIM, is_selected))
-                safe_addstr(self.scr, y, value_x,
-                            ellipsize(terminal_text(value), value_w),
-                            color_attr(C_DIM, is_selected))
+                safe_addstr(
+                    self.scr,
+                    y,
+                    1,
+                    f"{mark} {pad_cells(key, label_w)}",
+                    color_attr(C_DIM, is_selected),
+                )
+                safe_addstr(
+                    self.scr,
+                    y,
+                    value_x,
+                    ellipsize(terminal_text(value), value_w),
+                    color_attr(C_DIM, is_selected),
+                )
             y += 1
         # Nur die gewählte Zeile wird erklärt, dafür über die ganze Breite. Sieben
         # Hinweise nebeneinander passten in kein Fenster und standen abgeschnitten
@@ -8674,8 +10818,13 @@ class TUI:
         if h >= 6:
             safe_addstr(self.scr, h - 3, 3, hint, curses.color_pair(C_DIM))
         safe_addstr(self.scr, h - 2, 1, message, curses.color_pair(C_YELLOW))
-        safe_addstr(self.scr, h - 1, 0, t("set_footer").ljust(w - 1),
-                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        safe_addstr(
+            self.scr,
+            h - 1,
+            0,
+            t("set_footer").ljust(w - 1),
+            curses.color_pair(C_DIM) | curses.A_REVERSE,
+        )
         self.scr.refresh()
         return offset
 
@@ -8713,13 +10862,16 @@ class TUI:
         prompt = t("set_prompt", name=t(f"set_{setting.key}"))
         set_cursor_visible(True)
         try:
-            raw = self.prompt_line(h - 2, prompt,
-                                   setting_display(self.cfg, setting.key)
-                                   if self.cfg.get(setting.key) not in (None, [], {})
-                                   else "")
+            raw = self.prompt_line(
+                h - 2,
+                prompt,
+                setting_display(self.cfg, setting.key)
+                if self.cfg.get(setting.key) not in (None, [], {})
+                else "",
+            )
         finally:
             set_cursor_visible(False)
-        if raw is None:                       # Esc: nichts ändern
+        if raw is None:  # Esc: nichts ändern
             return ""
         value, error = parse_setting(setting, raw)
         if error:
@@ -8771,21 +10923,35 @@ class TUI:
                 # Ein eigener Prozess ohne Shell hält den Editor vom TUI-Lebenszyklus
                 # getrennt. Der Ordner bleibt auch mit Leerzeichen ein Argument.
                 diagnostics = AppDiagnostics()
-                child = subprocess.Popen([path, str(st.path)], stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=diagnostics,
-                                         start_new_session=True)
+                child = subprocess.Popen(
+                    [path, str(st.path)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=diagnostics,
+                    start_new_session=True,
+                )
                 try:
                     code = child.wait(timeout=0.2)
                 except subprocess.TimeoutExpired:
                     self.pending_app_launches += 1
-                    threading.Thread(target=self._watch_app_launch,
-                                     args=(child, diagnostics, name, st.rel), daemon=True).start()
+                    threading.Thread(
+                        target=self._watch_app_launch,
+                        args=(child, diagnostics, name, st.rel),
+                        daemon=True,
+                    ).start()
                     diagnostics = None
                     self.message = t("app_starting", name=name, rel=display_git_path(st.rel))
                     return
                 _, error = self._app_launch_result(child, diagnostics)
-                self.message = (t("app_opened", name=name, rel=display_git_path(st.rel)) if code == 0
-                                else t("app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(error)[-120:]))
+                self.message = (
+                    t("app_opened", name=name, rel=display_git_path(st.rel))
+                    if code == 0
+                    else t(
+                        "app_open_failed",
+                        name=name,
+                        e=f"Exit {code}: " + terminal_text(error)[-120:],
+                    )
+                )
             except OSError as exc:
                 self.message = t("app_open_failed", name=name, e=terminal_text(str(exc))[:120])
             finally:
@@ -8797,8 +10963,21 @@ class TUI:
             return
         # `open -a <App> <Ordner>` öffnet den Repo-Ordner in der App. Fehler (z.B.
         # App kann Ordner nicht öffnen) sichtbar machen, statt still zu schlucken.
-        r = subprocess.run(["open", "-a", path, str(st.path)],
-                           capture_output=True, text=True)
+        timeout = self.cfg["git_timeout"]
+        try:
+            r = subprocess.run(
+                ["open", "-a", path, str(st.path)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            self.message = t("app_open_timeout", name=name, s=timeout)
+            return
+        except OSError as exc:
+            self.message = t("app_open_failed", name=name, e=terminal_text(exc)[:120])
+            return
         if r.returncode == 0:
             self.message = t("app_opened", name=name, rel=display_git_path(st.rel))
         else:
@@ -8823,9 +11002,13 @@ class TUI:
             except queue.Empty:
                 return
             self.pending_app_launches -= 1
-            self.message = (t("app_opened", name=name, rel=display_git_path(rel)) if code == 0
-                            else t("app_open_failed", name=name,
-                                   e=f"Exit {code}: " + terminal_text(error)[-120:]))
+            self.message = (
+                t("app_opened", name=name, rel=display_git_path(rel))
+                if code == 0
+                else t(
+                    "app_open_failed", name=name, e=f"Exit {code}: " + terminal_text(error)[-120:]
+                )
+            )
 
     def action_cd_and_quit(self) -> bool:
         st = self.current()
@@ -8852,57 +11035,21 @@ class TUI:
 
     def browse_stashes(self, st: RepoStatus, entries: list[StashEntry]):
         files: dict[str, list[StashFile]] = {}
-        patches: dict[tuple, list[str]] = {}
+        patches: dict[tuple[str, str], list[str]] = {}
         opened = {entries[0].selector} if entries else set()
-        expanded = set()
+        expanded: set[tuple[str, str]] = set()
         selected = offset = 0
         all_stashes = False
         message = ""
         timeout = self.cfg["git_timeout"]
         while entries:
-            self.scr.erase()
             h, w = self.scr.getmaxyx()
-            rows = []
-            for entry in entries:
-                is_open = entry.selector in opened
-                rows.append(("stash", entry, None, f"{'▾' if is_open else '▸'} {terminal_text(entry.label)}"))
-                if not is_open:
-                    continue
-                if entry.oid not in files:
-                    files[entry.oid] = stash_files(st.path, entry.oid, timeout)
-                if not files[entry.oid]:
-                    rows.append(("empty", entry, None, "  " + t("stash_preview_empty")))
-                for item in files[entry.oid]:
-                    key = (entry.selector, item.path)
-                    is_expanded = key in expanded
-                    code = "U" if item.untracked else item.working or item.staged
-                    rows.append(("file", entry, item,
-                                 f"  {'▾' if is_expanded else '▸'} {code} {display_git_path(item.path)}"))
-                    if is_expanded:
-                        if key not in patches:
-                            patches[key] = stash_file_diff(st.path, entry.oid, item, timeout)
-                        for line in patches[key]:
-                            for part in wrap_cells(terminal_text(line), max(1, w - 7)):
-                                rows.append(("diff", entry, item, "      " + part))
+            rows = self._stash_rows(st.path, entries, opened, expanded, files, patches, timeout, w)
             selected = min(selected, len(rows) - 1)
             _, entry, item, _ = rows[selected]
             body_h = max(1, h - 7)
             offset = scroll_window(selected, offset, body_h)
-            safe_addstr(self.scr, 0, 0, " " + t("stash_title", rel=display_git_path(st.rel)), curses.A_BOLD)
-            scope = t("stash_all") if all_stashes else terminal_text(entry.label)
-            safe_addstr(self.scr, 1, 0, t("stash_scope", scope=scope), curses.color_pair(C_YELLOW))
-            if item:
-                safe_addstr(self.scr, 2, 0, display_git_path(item.path), curses.A_BOLD)
-            for y, i in enumerate(range(offset, min(len(rows), offset + body_h)), 3):
-                row_kind, _, _, text = rows[i]
-                pair = (C_CYAN if row_kind == "stash" else C_YELLOW if row_kind == "file"
-                        else C_GREEN if text.lstrip().startswith("+")
-                        else C_RED if text.lstrip().startswith("-") else C_DIM)
-                safe_addstr(self.scr, y, 0, text, color_attr(pair, i == selected))
-            for y, line in enumerate(wrap_cells(t("stash_keys"), max(1, w - 1))[:2], h - 2):
-                safe_addstr(self.scr, y, 0, line, curses.color_pair(C_DIM))
-            safe_addstr(self.scr, h - 3, 0, terminal_text(message), curses.color_pair(C_YELLOW))
-            self.scr.refresh()
+            self._draw_stash_rows(st, rows, selected, offset, all_stashes, message, h, w, body_h)
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
                 self.message = message
@@ -8914,34 +11061,26 @@ class TUI:
             elif ch == ord("*"):
                 all_stashes = not all_stashes
             elif ch in (curses.KEY_RIGHT, curses.KEY_LEFT, ord(" "), 10, 13):
-                key = (entry.selector, item.path) if item else entry.selector
-                bucket = expanded if item else opened
-                toggle = ch not in (curses.KEY_LEFT, curses.KEY_RIGHT)
-                close = ch == curses.KEY_LEFT or (toggle and key in bucket)
-                if close:
-                    if key not in bucket and item:
-                        opened.discard(entry.selector)
-                        selected = next(i for i, row in enumerate(rows)
-                                        if row[0] == "stash" and row[1] == entry)
-                    else:
-                        bucket.discard(key)
-                        selected = next(i for i, row in enumerate(rows)
-                                        if row[0] == ("file" if item else "stash")
-                                        and row[1] == entry and row[2] == item)
-                else:
-                    bucket.add(key)
+                selected = self._toggle_stash_row(ch, rows, selected, opened, expanded)
             elif ch in map(ord, "aApPdD"):
                 action = {"a": "apply", "p": "pop", "d": "drop"}[chr(ch).lower()]
                 chosen = list(reversed(entries)) if all_stashes else [entry]
                 previous_index = entries.index(entry)
                 message = self.change_stashes(st, entries, chosen, action)
                 if message != t("cmdlog_cancelled"):
-                    self.show_pager(t("stash_title", rel=display_git_path(st.rel)), message.splitlines())
+                    self.show_pager(
+                        t("stash_title", rel=display_git_path(st.rel)), message.splitlines()
+                    )
                 entries = read_stashes(st.path, timeout)
                 all_stashes = False
-                selected = next((i for i, current in enumerate(entries)
-                                 if current.oid == entry.oid and current.subject == entry.subject),
-                                min(previous_index, max(0, len(entries) - 1)))
+                selected = next(
+                    (
+                        i
+                        for i, current in enumerate(entries)
+                        if current.oid == entry.oid and current.subject == entry.subject
+                    ),
+                    min(previous_index, max(0, len(entries) - 1)),
+                )
                 offset = 0
                 opened = {entries[selected].selector} if entries else set()
                 expanded.clear()
@@ -8951,43 +11090,177 @@ class TUI:
                     return
         self.message = t("no_stash")
 
-    def change_stashes(self, st: RepoStatus, entries: list[StashEntry],
-                       chosen: list[StashEntry], action: str) -> str:
+    @staticmethod
+    def _stash_rows(
+        repo: Path,
+        entries: list[StashEntry],
+        opened: set[str],
+        expanded: set[tuple[str, str]],
+        files: dict[str, list[StashFile]],
+        patches: dict[tuple[str, str], list[str]],
+        timeout: int,
+        w: int,
+    ) -> list[StashRow]:
+        rows: list[StashRow] = []
+        for entry in entries:
+            is_open = entry.selector in opened
+            rows.append(
+                ("stash", entry, None, f"{'▾' if is_open else '▸'} {terminal_text(entry.label)}")
+            )
+            if not is_open:
+                continue
+            if entry.oid not in files:
+                files[entry.oid] = stash_files(repo, entry.oid, timeout)
+            if not files[entry.oid]:
+                rows.append(("empty", entry, None, "  " + t("stash_preview_empty")))
+            for item in files[entry.oid]:
+                key = (entry.selector, item.path)
+                is_expanded = key in expanded
+                code = "U" if item.untracked else item.working or item.staged
+                rows.append(
+                    (
+                        "file",
+                        entry,
+                        item,
+                        f"  {'▾' if is_expanded else '▸'} {code} {display_git_path(item.path)}",
+                    )
+                )
+                if is_expanded:
+                    if key not in patches:
+                        patches[key] = stash_file_diff(repo, entry.oid, item, timeout)
+                    for line in patches[key]:
+                        for part in wrap_cells(terminal_text(line), max(1, w - 7)):
+                            rows.append(("diff", entry, item, "      " + part))
+        return rows
+
+    def _draw_stash_rows(
+        self,
+        st: RepoStatus,
+        rows: list[StashRow],
+        selected: int,
+        offset: int,
+        all_stashes: bool,
+        message: str,
+        h: int,
+        w: int,
+        body_h: int,
+    ) -> None:
+        _, entry, item, _ = rows[selected]
+        self.scr.erase()
+        safe_addstr(
+            self.scr, 0, 0, " " + t("stash_title", rel=display_git_path(st.rel)), curses.A_BOLD
+        )
+        scope = t("stash_all") if all_stashes else terminal_text(entry.label)
+        safe_addstr(self.scr, 1, 0, t("stash_scope", scope=scope), curses.color_pair(C_YELLOW))
+        if item:
+            safe_addstr(self.scr, 2, 0, display_git_path(item.path), curses.A_BOLD)
+        for y, i in enumerate(range(offset, min(len(rows), offset + body_h)), 3):
+            row_kind, _, _, text = rows[i]
+            pair = (
+                C_CYAN
+                if row_kind == "stash"
+                else C_YELLOW
+                if row_kind == "file"
+                else C_GREEN
+                if text.lstrip().startswith("+")
+                else C_RED
+                if text.lstrip().startswith("-")
+                else C_DIM
+            )
+            safe_addstr(self.scr, y, 0, text, color_attr(pair, i == selected))
+        for y, line in enumerate(wrap_cells(t("stash_keys"), max(1, w - 1))[:2], h - 2):
+            safe_addstr(self.scr, y, 0, line, curses.color_pair(C_DIM))
+        safe_addstr(self.scr, h - 3, 0, terminal_text(message), curses.color_pair(C_YELLOW))
+        self.scr.refresh()
+
+    @staticmethod
+    def _toggle_stash_row(
+        ch: int,
+        rows: list[StashRow],
+        selected: int,
+        opened: set[str],
+        expanded: set[tuple[str, str]],
+    ) -> int:
+        _, entry, item, _ = rows[selected]
+        toggle = ch not in (curses.KEY_LEFT, curses.KEY_RIGHT)
+        if item is not None:
+            key = (entry.selector, item.path)
+            if ch == curses.KEY_LEFT and key not in expanded:
+                opened.discard(entry.selector)
+                return next(
+                    i for i, row in enumerate(rows) if row[0] == "stash" and row[1] == entry
+                )
+            if ch == curses.KEY_LEFT or (toggle and key in expanded):
+                expanded.discard(key)
+                return next(
+                    i
+                    for i, row in enumerate(rows)
+                    if row[0] == "file" and row[1] == entry and row[2] == item
+                )
+            expanded.add(key)
+        elif ch == curses.KEY_LEFT or (toggle and entry.selector in opened):
+            opened.discard(entry.selector)
+            return next(i for i, row in enumerate(rows) if row[0] == "stash" and row[1] == entry)
+        else:
+            opened.add(entry.selector)
+        return selected
+
+    def change_stashes(
+        self, st: RepoStatus, entries: list[StashEntry], chosen: list[StashEntry], action: str
+    ) -> str:
         timeout = self.cfg["git_timeout"]
         label = t("stash_" + action)
         try:
             target = stash_target(st.path, timeout, clean=True) if action != "drop" else None
             if read_stashes(st.path, timeout) != entries:
                 return t("stash_guard")
-            lines = [label, "", t("stash_warning"), "",
-                     t("stash_delete_warning" if action == "drop" else "stash_order"), ""]
+            lines = [
+                label,
+                "",
+                t("stash_warning"),
+                "",
+                t("stash_delete_warning" if action == "drop" else "stash_order"),
+                "",
+            ]
             if action != "drop" and len(chosen) > 1:
                 lines += [t("stash_batch_hint"), ""]
             if target:
-                lines += [f"HEAD: {terminal_text(target.head_ref or '(detached)')} · {target.head_oid}", ""]
+                lines += [
+                    f"HEAD: {terminal_text(target.head_ref or '(detached)')} · {target.head_oid}",
+                    "",
+                ]
             for entry in chosen:
                 lines.append(terminal_text(entry.label) + f" · {entry.oid[:12]}")
-                lines.extend("    " + display_git_path(item.path)
-                             for item in stash_files(st.path, entry.oid, timeout))
+                lines.extend(
+                    "    " + display_git_path(item.path)
+                    for item in stash_files(st.path, entry.oid, timeout)
+                )
                 if action != "drop":
                     lines.append(format_git_command(safe_stash_args("apply", entry.oid)))
                 if action != "apply":
                     lines.append(format_git_command(safe_stash_args("drop", entry.selector)))
                 lines.append("")
             question = t("stash_question", action=label, n=len(chosen), yes=t("yes_accent"))
-            if not self.confirm_in_pager(t("stash_title", rel=display_git_path(st.rel)), lines, question):
+            if not self.confirm_in_pager(
+                t("stash_title", rel=display_git_path(st.rel)), lines, question
+            ):
                 log_cancelled(st.path, ("stash", action))
                 return t("cmdlog_cancelled")
             self.show_busy(label)
             count, error = run_stash_action(st.path, entries, chosen, action, timeout, target)
-            return t("stash_stopped", n=count, e=error) if error else t("stash_done", action=label, n=count)
+            return (
+                t("stash_stopped", n=count, e=error)
+                if error
+                else t("stash_done", action=label, n=count)
+            )
         except (GitReadError, OSError) as exc:
             return t("stash_preview_failed", e=terminal_text(exc))
         finally:
             self.refresh_one(st)
 
-    def _draw_pager_page(self, title: str, lines: list[str], top: int,
-                         reserved: int, footer_key: str) -> tuple[int, int, int]:
+    def _draw_pager_page(
+        self, title: str, lines: list[str], top: int, reserved: int, footer_key: str
+    ) -> tuple[int, int, int]:
         """Eine Pager-Seite zeichnen: Titelzeile, Textkörper, Fußzeile.
 
         ``reserved`` Zeilen direkt über der Fußzeile bleiben frei — dort stellt
@@ -9004,11 +11277,11 @@ class TUI:
         # Erst neutralisieren, dann nach sichtbaren Terminalzellen umbrechen.
         # Sonst wird etwa U+202E nach dem Umbruch zu sechs sichtbaren Zeichen
         # und die verlustfreie H-Ansicht schneidet sie wieder ab.
-        wrapped = [part for line in lines
-                   for part in wrap_cells(
-                       terminal_text(line), max(1, w - 1))]
+        wrapped = [
+            part for line in lines for part in wrap_cells(terminal_text(line), max(1, w - 1))
+        ]
         top = min(top, max(0, len(wrapped) - body_h))
-        for y, line in enumerate(wrapped[top:top + body_h], start=1):
+        for y, line in enumerate(wrapped[top : top + body_h], start=1):
             # Diff-Zeilen leicht einfärben: + grün, - rot, @@ gelb.
             pair = 0
             if line.startswith("+") and not line.startswith("+++"):
@@ -9020,9 +11293,13 @@ class TUI:
             safe_addstr(self.scr, y, 0, line, pair)
         a = top + 1
         b = min(len(wrapped), top + body_h)
-        safe_addstr(self.scr, h - 1, 0,
-                    t(footer_key, a=a, b=b, n=len(wrapped)).ljust(w - 1),
-                    curses.color_pair(C_DIM) | curses.A_REVERSE)
+        safe_addstr(
+            self.scr,
+            h - 1,
+            0,
+            t(footer_key, a=a, b=b, n=len(wrapped)).ljust(w - 1),
+            curses.color_pair(C_DIM) | curses.A_REVERSE,
+        )
         return top, body_h, len(wrapped)
 
     @staticmethod
@@ -9043,8 +11320,7 @@ class TUI:
         """Einfacher scrollbarer Textbetrachter (↑/↓/PgUp/PgDn, q/Esc schließt)."""
         top = 0
         while True:
-            top, body_h, total = self._draw_pager_page(
-                title, lines, top, 0, "pager_footer")
+            top, body_h, total = self._draw_pager_page(title, lines, top, 0, "pager_footer")
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
@@ -9053,8 +11329,7 @@ class TUI:
             if scrolled is not None:
                 top = scrolled
 
-    def confirm_in_pager(self, title: str, lines: list[str],
-                         question: str) -> bool:
+    def confirm_in_pager(self, title: str, lines: list[str], question: str) -> bool:
         """Scrollbare Vorschau mit Rückfrage in der vorletzten Zeile.
 
         Die Antwort wird wie in `prompt_line()` getippt und mit ⏎ abgeschickt:
@@ -9075,7 +11350,8 @@ class TUI:
             while True:
                 # Zwei reservierte Zeilen: Leerzeile und Frage-Balken.
                 top, body_h, total = self._draw_pager_page(
-                    title, lines, top, 2, "pager_footer_confirm")
+                    title, lines, top, 2, "pager_footer_confirm"
+                )
                 h, _ = self.scr.getmaxyx()
                 answer = "".join(buf)
                 self.draw_question(h - 2, question + answer, t("yes_accent"))
@@ -9117,19 +11393,20 @@ class TUI:
         # frueher tat; `changed` ist derselbe Grund, den `collect_status()` fuer
         # ein waehrend des Fetchs verschwundenes Remote nennt
         # (Review-Fund 2026-09-10).
-        blocked = (("changed", "") if config is None
-                   else fetch_remote_block_reason(
-                       st.path, config, st.branch, self.cfg["git_timeout"]))
+        if config is None:
+            self.message = remote_check_message(remote, "changed", 0, "", self.cfg["fetch_timeout"])
+            return None
+        blocked = fetch_remote_block_reason(st.path, config, st.branch, self.cfg["git_timeout"])
         if blocked is not None:
             self.message = remote_check_message(
-                remote, blocked[0], 0, blocked[1], self.cfg["fetch_timeout"])
+                remote, blocked[0], 0, blocked[1], self.cfg["fetch_timeout"]
+            )
             return None
         # Der Fetch kann bei großen Repos oder langsamem Netz spürbar dauern;
         # ohne Zwischenmeldung stünde das alte Bild starr da (Befund 2026-08-22).
         self.show_busy(t("fetch_busy", r=remote))
         try:
-            r = fetch_remote_safely(
-                st.path, config, st.branch, self.cfg["fetch_timeout"])
+            r = fetch_remote_safely(st.path, config, st.branch, self.cfg["fetch_timeout"])
         except RemoteConfigChangedError:
             self.refresh_one(st)
             self.message = t("transfer_changed")
@@ -9142,12 +11419,16 @@ class TUI:
             self.message = t("fetch_outcome_unknown", r=remote)
             return None
         if r.returncode != 0:
-            self.message = (t("transfer_auth_missing", r=remote)
-                            if credentials_missing(
-                                r, keychain_helper=remote_uses_keychain_helper(
-                                    st.path, remote, self.cfg["git_timeout"]))
-                            else t("transfer_fetch_failed", r=remote,
-                                   code=r.returncode))
+            self.message = (
+                t("transfer_auth_missing", r=remote)
+                if credentials_missing(
+                    r,
+                    keychain_helper=remote_uses_keychain_helper(
+                        st.path, remote, self.cfg["git_timeout"]
+                    ),
+                )
+                else t("transfer_fetch_failed", r=remote, code=r.returncode)
+            )
             return None
         after = read_remote_config_or_none(st.path, self.cfg, remote)
         if after != config:
@@ -9158,14 +11439,14 @@ class TUI:
         # ist — ein alter Fetch-Fehler dazu darf den Refresh nicht überleben.
         return self.refresh_one(st, refetched=remote)
 
-    def _transfer_message(self, check: TransferCheck, remote: str,
-                          branch: str) -> str:
+    def _transfer_message(self, check: TransferCheck, remote: str, branch: str) -> str:
         if check.reason == "dirty":
             return t("transfer_dirty")
         if check.reason == "unsafe-transport":
-            return t("transfer_unsafe_transport",
-                     k=check.evidence or " / ".join(
-                         shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS))
+            return t(
+                "transfer_unsafe_transport",
+                k=check.evidence or " / ".join(shown for _, shown, _ in TRANSPORT_CONFIG_SETTINGS),
+            )
         if check.reason == "detached":
             return t("transfer_detached")
         if check.reason == "inspect-failed":
@@ -9186,15 +11467,15 @@ class TUI:
             return t("pull_operation")
         return check.reason
 
-    def _run_approved_push(self, st: RepoStatus,
-                           check: TransferCheck) -> subprocess.CompletedProcess | None:
+    def _run_approved_push(
+        self, st: RepoStatus, check: TransferCheck
+    ) -> subprocess.CompletedProcess | None:
         """Den gebundenen Push ausführen; fehlendes Prozessergebnis bleibt unklar."""
-        args = safe_push_args(
-            check.transfer_url, check.branch, check.head_oid, check.target_oid)
+        args = safe_push_args(check.transfer_url, check.branch, check.head_oid, check.target_oid)
         try:
             return run_git_logged(
-                st.path, *args, timeout=self.cfg["fetch_timeout"],
-                env=TRANSFER_OBJECT_ENV)
+                st.path, *args, timeout=self.cfg["fetch_timeout"], env=TRANSFER_OBJECT_ENV
+            )
         except OSError:
             # Wie beim Commit kann der Prozess bereits serverseitig gewirkt
             # haben, obwohl Python sein Ergebnis nicht mehr lesen konnte.
@@ -9213,8 +11494,9 @@ class TUI:
     # `inspect_transfer()` prüft. Aus derselben Angabe zu lesen, die geprüft
     # werden soll, hieße den Abgleich abzuschaffen.
 
-    def _approved_transfer(self, st: RepoStatus, remote: RemoteStatus,
-                           changed_key: str, *, expected_public: bool):
+    def _approved_transfer(
+        self, st: RepoStatus, remote: RemoteStatus, changed_key: str, *, expected_public: bool
+    ):
         """Fetchen, gegen den gezeigten Stand abgleichen, Übertragung prüfen.
 
         Liefert `(fresh, check)` oder `None`; die Meldung setzt die Methode
@@ -9223,24 +11505,34 @@ class TUI:
         fresh = self._fetch_remote(st, remote.name)
         if not fresh:
             return None
-        if (fresh.branch != st.branch
-                or self._remote_approval_signature(
-                    self._remote(fresh, remote.name))
-                != self._remote_approval_signature(remote)):
+        if fresh.branch != st.branch or self._remote_approval_signature(
+            self._remote(fresh, remote.name)
+        ) != self._remote_approval_signature(remote):
             self.message = t(changed_key)
             return None
-        check = inspect_transfer(fresh.path, remote.name, fresh.branch, "push",
-                                 self.cfg["git_timeout"],
-                                 expected_public=expected_public)
+        check = inspect_transfer(
+            fresh.path,
+            remote.name,
+            fresh.branch,
+            "push",
+            self.cfg["git_timeout"],
+            expected_public=expected_public,
+        )
         if not check.ready:
-            self.message = self._transfer_message(
-                check, remote.name, fresh.branch)
+            self.message = self._transfer_message(check, remote.name, fresh.branch)
             return None
         return fresh, check
 
-    def _reapproved_transfer(self, fresh: RepoStatus, remote_name: str,
-                             check: TransferCheck, changed_key: str, *,
-                             action: str, expected_public: bool | None = None):
+    def _reapproved_transfer(
+        self,
+        fresh: RepoStatus,
+        remote_name: str,
+        check: TransferCheck,
+        changed_key: str,
+        *,
+        action: str,
+        expected_public: bool | None = None,
+    ):
         """Vor der Übertragung erneut fetchen und die Freigabe prüfen.
 
         Ändert sich der freigegebene Zustand nach der Rückfrage, wird die
@@ -9250,17 +11542,22 @@ class TUI:
         newest = self._fetch_remote(fresh, remote_name)
         if not newest:
             return None
-        final = inspect_transfer(newest.path, remote_name, newest.branch, action,
-                                 self.cfg["git_timeout"],
-                                 expected_public=expected_public)
-        if (not final.ready
-                or final.approval_signature() != check.approval_signature()):
+        final = inspect_transfer(
+            newest.path,
+            remote_name,
+            newest.branch,
+            action,
+            self.cfg["git_timeout"],
+            expected_public=expected_public,
+        )
+        if not final.ready or final.approval_signature() != check.approval_signature():
             self.message = t(changed_key)
             return None
         return newest, final
 
-    def _push_and_report(self, newest: RepoStatus, final: TransferCheck,
-                         remote: RemoteStatus, pushed_key: str) -> None:
+    def _push_and_report(
+        self, newest: RepoStatus, final: TransferCheck, remote: RemoteStatus, pushed_key: str
+    ) -> None:
         """Den freigegebenen Push ausführen und sein Ergebnis benennen.
 
         Ein erfolgreicher Push mit misslungener Tracking-Aktualisierung ist
@@ -9274,8 +11571,7 @@ class TUI:
             # Reihenfolge: erst das Tracking nachziehen, dann neu einlesen.
             # Andersherum zeigte die Liste noch den Stand von VOR der
             # Aktualisierung, also weiterhin ausstehende Commits.
-            tracking = update_tracking_after_push(
-                newest.path, final, self.cfg["git_timeout"])
+            tracking = update_tracking_after_push(newest.path, final, self.cfg["git_timeout"])
             self.refresh_one(newest)
             # Der Push ist hier belegt gelungen. Die Meldung darf deshalb nur
             # noch benennen, was am Tracking-Ref offen blieb — und zwar den
@@ -9288,17 +11584,21 @@ class TUI:
             return
         self.refresh_one(newest)
         if credentials_missing(
-                r, keychain_helper=remote_uses_keychain_helper(
-                    newest.path, remote.name, self.cfg["git_timeout"],
-                    for_push=True)):
+            r,
+            keychain_helper=remote_uses_keychain_helper(
+                newest.path, remote.name, self.cfg["git_timeout"], for_push=True
+            ),
+        ):
             self.message = t("transfer_auth_missing", r=remote.name)
         else:
             self.message = t("push_outcome_unknown", code=r.returncode)
 
-    def choose_pull_remote(self, st: RepoStatus, allow_all: bool = True,
-                           fetch_only: bool = False) -> str | None:
+    def choose_pull_remote(
+        self, st: RepoStatus, allow_all: bool = True, fetch_only: bool = False
+    ) -> str | None:
         options = ([(None, t("pull_all"))] if allow_all else []) + [
-            (remote.name, remote.badge()) for remote in st.remotes]
+            (remote.name, remote.badge()) for remote in st.remotes
+        ]
         if not st.remotes:
             self.message = t("pull_no_remotes")
             return None
@@ -9307,14 +11607,24 @@ class TUI:
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0, " " + t("fetch_one_title" if fetch_only else "pull_choose",
-                                               rel=display_git_path(st.rel), b=st.branch),
-                        curses.A_BOLD)
+            safe_addstr(
+                self.scr,
+                0,
+                0,
+                " "
+                + t(
+                    "fetch_one_title" if fetch_only else "pull_choose",
+                    rel=display_git_path(st.rel),
+                    b=st.branch,
+                ),
+                curses.A_BOLD,
+            )
             height = max(1, h - 3)
             offset = scroll_window(selected, offset, height)
             for y, i in enumerate(range(offset, min(len(options), offset + height)), 1):
-                safe_addstr(self.scr, y, 1, terminal_text(options[i][1]),
-                            color_attr(C_CYAN, i == selected))
+                safe_addstr(
+                    self.scr, y, 1, terminal_text(options[i][1]), color_attr(C_CYAN, i == selected)
+                )
             safe_addstr(self.scr, h - 1, 0, t("pull_choose_footer"), curses.color_pair(C_DIM))
             self.scr.refresh()
             ch = self.scr.getch()
@@ -9380,8 +11690,7 @@ class TUI:
                     failures.append(name)
                     # Ein Refresh kann das Repo aus der Arbeitsansicht nehmen.
                     # Weitere Fetches bleiben trotzdem am ursprünglichen Ziel.
-                    st = next((entry for entry in self.all_statuses
-                               if entry.path == repo_path), st)
+                    st = next((entry for entry in self.all_statuses if entry.path == repo_path), st)
                 else:
                     st = fresh
             if failures:
@@ -9396,28 +11705,44 @@ class TUI:
         if fresh.branch != st.branch:
             self.message = t("pull_changed")
             return
-        check = inspect_transfer(fresh.path, selected, fresh.branch, "pull", self.cfg["git_timeout"])
+        check = inspect_transfer(
+            fresh.path, selected, fresh.branch, "pull", self.cfg["git_timeout"]
+        )
         if not check.ready:
             self.message = self._transfer_message(check, selected, fresh.branch)
             return
         args = safe_pull_args(check.target_oid)
-        lines = [t("pull_effect", n=check.behind), t("pull_caution"), "",
-                 display_remote_url(check.transfer_url), "", *check.commits, "", *check.files,
-                 "", format_git_command(args)]
-        if not self.confirm_in_pager(t("pull_title", r=selected, b=fresh.branch, rel=display_git_path(fresh.rel)),
-                                     lines, t("pull_confirm")):
+        lines = [
+            t("pull_effect", n=check.behind),
+            t("pull_caution"),
+            "",
+            display_remote_url(check.transfer_url),
+            "",
+            *check.commits,
+            "",
+            *check.files,
+            "",
+            format_git_command(args),
+        ]
+        if not self.confirm_in_pager(
+            t("pull_title", r=selected, b=fresh.branch, rel=display_git_path(fresh.rel)),
+            lines,
+            t("pull_confirm"),
+        ):
             log_cancelled(fresh.path, args)
             self.message = t("cancelled")
             return
-        reapproved = self._reapproved_transfer(fresh, selected, check, "pull_changed",
-                                               action="pull")
+        reapproved = self._reapproved_transfer(
+            fresh, selected, check, "pull_changed", action="pull"
+        )
         if not reapproved:
             return
         newest, final = reapproved
         self.show_busy(t("pull_title", r=selected, b=check.branch, rel=newest.rel))
         try:
-            result = run_git_logged(newest.path, *args, timeout=self.cfg["git_timeout"],
-                                    env=TRANSFER_OBJECT_ENV)
+            result = run_git_logged(
+                newest.path, *args, timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV
+            )
         except OSError:
             self.refresh_one(newest)
             self.message = t("pull_unknown")
@@ -9426,30 +11751,56 @@ class TUI:
             curses.flushinp()
         self.refresh_one(newest)
         if result.returncode != 0:
-            collision = any(marker in result.stderr for marker in (
-                "untracked working tree files would be overwritten",
-                "Updating the following directories would lose untracked files in them"))
+            collision = any(
+                marker in result.stderr
+                for marker in (
+                    "untracked working tree files would be overwritten",
+                    "Updating the following directories would lose untracked files in them",
+                )
+            )
             if collision:
                 self.message = t("pull_local_collision")
-                COMMAND_LOG.extend("  " + terminal_text(line) for line in result.stderr.splitlines() if line.strip())
+                COMMAND_LOG.extend(
+                    "  " + terminal_text(line)
+                    for line in result.stderr.splitlines()
+                    if line.strip()
+                )
                 del COMMAND_LOG[:-COMMAND_LOG_MAX]
             else:
                 self.message = t("pull_failed", code=result.returncode, e=last_error_line(result))
             return
         try:
-            branch_result = run_git(newest.path, "symbolic-ref", "-q", "HEAD",
-                                    timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
-            head_result = run_git(newest.path, "rev-parse", "--verify", f"refs/heads/{final.branch}",
-                                  timeout=self.cfg["git_timeout"], env=TRANSFER_OBJECT_ENV)
+            branch_result = run_git(
+                newest.path,
+                "symbolic-ref",
+                "-q",
+                "HEAD",
+                timeout=self.cfg["git_timeout"],
+                env=TRANSFER_OBJECT_ENV,
+            )
+            head_result = run_git(
+                newest.path,
+                "rev-parse",
+                "--verify",
+                f"refs/heads/{final.branch}",
+                timeout=self.cfg["git_timeout"],
+                env=TRANSFER_OBJECT_ENV,
+            )
         except OSError:
             self.message = t("pull_unknown")
             return
         # Ein erfolgreicher Git-Prozess allein belegt noch keinen Fast-Forward.
-        applied = (branch_result.returncode == 0 and head_result.returncode == 0
-                   and branch_result.stdout.strip() == f"refs/heads/{final.branch}"
-                   and head_result.stdout.strip() == final.target_oid)
-        self.message = (t("pull_done", r=selected, b=check.branch, n=check.behind)
-                        if applied else t("pull_unknown"))
+        applied = (
+            branch_result.returncode == 0
+            and head_result.returncode == 0
+            and branch_result.stdout.strip() == f"refs/heads/{final.branch}"
+            and head_result.stdout.strip() == final.target_oid
+        )
+        self.message = (
+            t("pull_done", r=selected, b=check.branch, n=check.behind)
+            if applied
+            else t("pull_unknown")
+        )
 
     def action_sync_push(self):
         """Einfacher Push ausschließlich zum nichtöffentlichen Sync-Remote."""
@@ -9467,20 +11818,20 @@ class TUI:
         if remote.public:
             self.message = t("public_simple_block")
             return
-        approved = self._approved_transfer(st, remote, "transfer_changed",
-                                           expected_public=False)
+        approved = self._approved_transfer(st, remote, "transfer_changed", expected_public=False)
         if not approved:
             return
         fresh, check = approved
         if not self.confirm(t("confirm_sync_push", n=check.ahead, r=remote.name)):
-            log_cancelled(fresh.path, safe_push_args(
-                check.transfer_url, check.branch, check.head_oid,
-                check.target_oid))
+            log_cancelled(
+                fresh.path,
+                safe_push_args(check.transfer_url, check.branch, check.head_oid, check.target_oid),
+            )
             self.message = t("cancelled")
             return
-        reapproved = self._reapproved_transfer(fresh, remote.name, check,
-                                               "transfer_changed",
-                                               action="push", expected_public=False)
+        reapproved = self._reapproved_transfer(
+            fresh, remote.name, check, "transfer_changed", action="push", expected_public=False
+        )
         if not reapproved:
             return
         newest, final = reapproved
@@ -9502,8 +11853,7 @@ class TUI:
         if not remote.transfer_safe:
             self.message = t("remote_url_mismatch", r=remote.name)
             return
-        approved = self._approved_transfer(st, remote, "github_changed",
-                                           expected_public=True)
+        approved = self._approved_transfer(st, remote, "github_changed", expected_public=True)
         if not approved:
             return
         fresh, check = approved
@@ -9523,17 +11873,20 @@ class TUI:
         # der Liste und verlangte den getippten Satz „PUSH <remote>" — dort
         # wurde sie leicht übersehen (Entscheidung 2026-08-22).
         if not self.confirm_in_pager(
-                t("github_preview", rel=fresh.rel, r=remote.name, b=fresh.branch),
-                lines, t("github_confirm", r=remote.name)):
-            log_cancelled(fresh.path, safe_push_args(
-                check.transfer_url, check.branch, check.head_oid,
-                check.target_oid))
+            t("github_preview", rel=fresh.rel, r=remote.name, b=fresh.branch),
+            lines,
+            t("github_confirm", r=remote.name),
+        ):
+            log_cancelled(
+                fresh.path,
+                safe_push_args(check.transfer_url, check.branch, check.head_oid, check.target_oid),
+            )
             self.message = t("github_cancelled")
             return
 
-        reapproved = self._reapproved_transfer(fresh, remote.name, check,
-                                               "github_changed",
-                                               action="push", expected_public=True)
+        reapproved = self._reapproved_transfer(
+            fresh, remote.name, check, "github_changed", action="push", expected_public=True
+        )
         if not reapproved:
             return
         newest, final = reapproved
@@ -9555,14 +11908,19 @@ class TUI:
         if st:
             self.show_busy(t("reading"))
             fresh = self.refresh_one(st)
-            self.show_pager(t("worktrees_title", rel=display_git_path(fresh.rel)), worktree_lines(fresh, self.all_statuses))
+            self.show_pager(
+                t("worktrees_title", rel=display_git_path(fresh.rel)),
+                worktree_lines(fresh, self.all_statuses),
+            )
 
     def action_submodules(self):
         st = self.current()
         if st:
             self.show_busy(t("reading"))
             fresh = self.refresh_one(st)
-            self.show_pager(t("submodules_title", rel=display_git_path(fresh.rel)), submodule_lines(fresh))
+            self.show_pager(
+                t("submodules_title", rel=display_git_path(fresh.rel)), submodule_lines(fresh)
+            )
 
     # -- Änderungen ansehen (A) ---------------------------------------------
 
@@ -9581,9 +11939,18 @@ class TUI:
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0,
-                        (" " + t("changes_title", rel=display_git_path(st.rel)) + " · "
-                         + t("diff_mode_" + mode)).ljust(w - 1), curses.A_BOLD)
+            safe_addstr(
+                self.scr,
+                0,
+                0,
+                (
+                    " "
+                    + t("changes_title", rel=display_git_path(st.rel))
+                    + " · "
+                    + t("diff_mode_" + mode)
+                ).ljust(w - 1),
+                curses.A_BOLD,
+            )
             safe_addstr(self.scr, 1, 1, t("changes_modes"), curses.color_pair(C_CYAN))
             body_h = max(1, h - 4)
             off = scroll_window(sel, off, body_h)
@@ -9591,12 +11958,20 @@ class TUI:
                 safe_addstr(self.scr, 2, 1, t("diff_mode_empty"), curses.color_pair(C_DIM))
             for y, index in enumerate(range(off, min(len(files), off + body_h)), start=2):
                 entry = files[index]
-                text, pair = file_row(entry.code, entry.path, any(
-                    module.path == entry.path for module in st.submodules))
+                text, pair = file_row(
+                    entry.code,
+                    entry.path,
+                    any(module.path == entry.path for module in st.submodules),
+                )
                 safe_addstr(self.scr, y, 1, text, color_attr(pair, index == sel))
             footer = "changes_footer" if w >= 65 else "changes_footer_short"
-            safe_addstr(self.scr, h - 1, 0, t(footer).ljust(w - 1),
-                        curses.color_pair(C_DIM) | curses.A_REVERSE)
+            safe_addstr(
+                self.scr,
+                h - 1,
+                0,
+                t(footer).ljust(w - 1),
+                curses.color_pair(C_DIM) | curses.A_REVERSE,
+            )
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
@@ -9617,10 +11992,19 @@ class TUI:
                 entry = files[sel]
                 ok, text = file_diff(st.path, entry.code, entry.path, self.cfg["git_timeout"], mode)
                 if not ok:
-                    self.message = t("diff_failed", p=display_git_path(entry.path), e=terminal_text(text))
+                    self.message = t(
+                        "diff_failed", p=display_git_path(entry.path), e=terminal_text(text)
+                    )
                     return
-                self.show_pager(t("diff_title_mode", p=display_git_path(entry.path), mode=t("diff_mode_" + mode)),
-                                (text or t("diff_empty")).splitlines())
+                self.show_pager(
+                    t(
+                        "diff_title_mode",
+                        p=display_git_path(entry.path),
+                        mode=t("diff_mode_" + mode),
+                    ),
+                    (text or t("diff_empty")).splitlines(),
+                )
+
     # -- Repo-Info mit Remote- und Branch-Auswahl ---------------------------
 
     def action_repo_info(self):
@@ -9630,15 +12014,12 @@ class TUI:
             return
         fresh = self.refresh_one(st)
         view = build_info_view(fresh, self.cfg)
-        selected = 0        # Index in view.blocks (Remotes und Branches)
-        top = 0             # erste sichtbare Zeile
-        note = ""           # Ergebnis der letzten Prüfung/Aktion
-        followed = None     # Block, zu dem zuletzt hingescrollt wurde
+        selected = 0  # Index in view.blocks (Remotes und Branches)
+        top = 0  # erste sichtbare Zeile
+        note = ""  # Ergebnis der letzten Prüfung/Aktion
+        followed = None  # Block, zu dem zuletzt hingescrollt wurde
         while True:
-            self.scr.erase()
             h, w = self.scr.getmaxyx()
-            title = t("repo_info_title", rel=terminal_text(fresh.rel))
-            safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
             body_h = max(1, h - 4)
             selected = min(selected, max(0, len(view.blocks) - 1))
             block = view.blocks[selected] if view.blocks else None
@@ -9655,20 +12036,7 @@ class TUI:
                     top = min(first, max(0, last - body_h + 1))
             followed = block
             top = max(0, min(top, max(0, len(view.lines) - body_h)))
-            for y, index in enumerate(range(top, min(len(view.lines), top + body_h)),
-                                      start=1):
-                mark = (curses.A_REVERSE
-                        if block and block[2] <= index <= block[3] else 0)
-                safe_addstr(self.scr, y, 0, view.lines[index], mark)
-            safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
-            footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
-            safe_addstr(self.scr, h - 2, 0, t("info_footer_nav").ljust(w - 1), footer_dim)
-            # Die Aktionszeile richtet sich nach dem gewählten Block: ein Branch
-            # kennt kein "prüfen", ein Remote kein "gemergt".
-            actions = t("info_footer_actions_branch" if block and block[0] == "branch"
-                        else "info_footer_actions")
-            safe_addstr(self.scr, h - 1, 0, actions.ljust(w - 1), footer_dim)
-            self.scr.refresh()
+            self._draw_repo_info(fresh, view, block, top, note, h, w, body_h)
             ch = self.scr.getch()
             if ch in (ord("q"), ord("Q"), 27):
                 return
@@ -9676,9 +12044,9 @@ class TUI:
                 selected = max(0, selected - 1)
             elif ch == curses.KEY_DOWN:
                 selected = min(max(0, len(view.blocks) - 1), selected + 1)
-            elif ch == 9 and view.blocks:      # Tab: durchzykeln
+            elif ch == 9 and view.blocks:  # Tab: durchzykeln
                 selected = (selected + 1) % len(view.blocks)
-            elif ch == curses.KEY_BTAB and view.blocks:   # Shift-Tab: zurück
+            elif ch == curses.KEY_BTAB and view.blocks:  # Shift-Tab: zurück
                 selected = (selected - 1) % len(view.blocks)
             elif ch == curses.KEY_NPAGE:
                 top = min(max(0, len(view.lines) - body_h), top + body_h)
@@ -9705,15 +12073,47 @@ class TUI:
                 else:
                     note = self.message
 
-    def _check_selected_remote(self, st: RepoStatus,
-                               block: tuple[str, str, int, int] | None) -> str:
+    def _draw_repo_info(
+        self,
+        st: RepoStatus,
+        view: InfoView,
+        block: tuple[str, str, int, int] | None,
+        top: int,
+        note: str,
+        h: int,
+        w: int,
+        body_h: int,
+    ) -> None:
+        self.scr.erase()
+        title = t("repo_info_title", rel=terminal_text(st.rel))
+        safe_addstr(self.scr, 0, 0, (" " + title).ljust(w - 1), curses.A_BOLD)
+        for y, index in enumerate(range(top, min(len(view.lines), top + body_h)), start=1):
+            mark = curses.A_REVERSE if block and block[2] <= index <= block[3] else 0
+            safe_addstr(self.scr, y, 0, view.lines[index], mark)
+        safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
+        footer_dim = curses.color_pair(C_DIM) | curses.A_REVERSE
+        safe_addstr(self.scr, h - 2, 0, t("info_footer_nav").ljust(w - 1), footer_dim)
+        # Die Aktionszeile richtet sich nach dem gewählten Block: ein Branch
+        # kennt kein "prüfen", ein Remote kein "gemergt".
+        actions = t(
+            "info_footer_actions_branch"
+            if block and block[0] == "branch"
+            else "info_footer_actions"
+        )
+        safe_addstr(self.scr, h - 1, 0, actions.ljust(w - 1), footer_dim)
+        self.scr.refresh()
+
+    def _check_selected_remote(
+        self, st: RepoStatus, block: tuple[str, str, int, int] | None
+    ) -> str:
         """`git ls-remote` gegen das gewählte Remote; nennt die Ursache beim Namen."""
         if not block:
             return t("info_no_remotes")
         name = block[1]
         h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, h - 3, 1, t("check_running", r=name).ljust(w - 2),
-                    curses.color_pair(C_YELLOW))
+        safe_addstr(
+            self.scr, h - 3, 1, t("check_running", r=name).ljust(w - 2), curses.color_pair(C_YELLOW)
+        )
         self.scr.refresh()
         timeout = self.cfg["fetch_timeout"]
         outcome, refs, detail = check_remote(st.path, name, timeout)
@@ -9722,15 +12122,10 @@ class TUI:
         return message
 
     def _remove_remote(self, st: RepoStatus, name: str) -> bool:
-        """Remote nach Vorschau und getippter Bestätigung aus der Config nehmen.
+        """Remote nach Vorschau und getippter Bestätigung entfernen.
 
-        Bis 0.18.7 stand in diesem Dialog ein „Rückgängig"-Block aus
-        `git remote add`-Zeilen. Der war eine falsche Zusage: `git remote
-        remove` löscht auch refs/remotes/<name>/* samt Reflogs, und die
-        stellt kein Befehl wieder her. 0.18.8 nahm die Aktion deshalb ganz
-        heraus. Seit 0.22.14 ist sie wieder da und sagt das Gegenteil: nicht
-        rückgängig machbar — und zählt vorher, was verloren geht
-        (Entscheidung Daniel, 2026-09-11).
+        Git entfernt auch die Tracking-Refs samt Reflogs. Erneutes Anlegen
+        derselben URL stellt sie nicht wieder her.
         """
         try:
             facts = remote_removal_facts(st.path, name, self.cfg)
@@ -9743,8 +12138,10 @@ class TUI:
         args = ("remote", "remove", name)
         lines = self._remote_removal_lines(st, name, facts, format_git_command(args))
         if not self.confirm_in_pager(
-                t("remove_title", rel=display_git_path(st.rel), r=name),
-                lines, t("remove_confirm", r=name)):
+            t("remove_title", rel=display_git_path(st.rel), r=name),
+            lines,
+            t("remove_confirm", r=name),
+        ):
             log_cancelled(st.path, args)
             self.message = t("remove_cancelled")
             return False
@@ -9766,28 +12163,38 @@ class TUI:
         return True
 
     @staticmethod
-    def _remote_removal_lines(st: RepoStatus, name: str, facts: RemoteRemovalFacts,
-                              command: str) -> list[str]:
+    def _remote_removal_lines(
+        st: RepoStatus, name: str, facts: RemoteRemovalFacts, command: str
+    ) -> list[str]:
         """Die Vorschau-Zeilen des Entfernen-Dialogs (Pager, getippte Rückfrage)."""
         remote = facts.remote
         lines: list[str] = []
         # Adressen wie auf der Info-Seite: redigiert, Fetch und Push nur
         # getrennt, wenn sie wirklich abweichen.
         if remote.push_urls == remote.fetch_urls:
-            lines.extend(f"{t('info_fetch_push_url')}: {display_remote_url(url)}"
-                         for url in remote.fetch_urls)
+            lines.extend(
+                f"{t('info_fetch_push_url')}: {display_remote_url(url)}"
+                for url in remote.fetch_urls
+            )
         else:
-            lines.extend(f"{t('info_fetch_url')}: {display_remote_url(url)}"
-                         for url in remote.fetch_urls)
-            lines.extend(f"{t('info_push_url')}: {display_remote_url(url)}"
-                         for url in remote.push_urls)
+            lines.extend(
+                f"{t('info_fetch_url')}: {display_remote_url(url)}" for url in remote.fetch_urls
+            )
+            lines.extend(
+                f"{t('info_push_url')}: {display_remote_url(url)}" for url in remote.push_urls
+            )
         lines.append("")
         lines.append(t("remove_what_happens"))
         lines.append(t("remove_effect_config", r=name))
         lines.append(t("remove_effect_refs", r=name, n=len(facts.tracking_refs)))
         if facts.tracking_branches:
-            lines.append(t("remove_effect_upstream", r=name, b=", ".join(
-                terminal_text(branch) for branch in facts.tracking_branches)))
+            lines.append(
+                t(
+                    "remove_effect_upstream",
+                    r=name,
+                    b=", ".join(terminal_text(branch) for branch in facts.tracking_branches),
+                )
+            )
         lines.append(t("remove_effect_safe"))
         lines.append(t("remove_effect_server"))
         lines.append("")
@@ -9825,18 +12232,30 @@ class TUI:
         # den Arbeitsbaum vor dem Commit nicht (insbesondere keine .gitignore).
         # Nur Eintraege, fuer die es gegenueber HEAD ueberhaupt etwas zu
         # committen gibt, sind an- und abwaehlbar (committable_against_head).
-        items = [
-            {"code": entry.code, "path": entry.path,
-             "include": committable_against_head(entry, modules.get(entry.path)),
-             "committable": committable_against_head(entry, modules.get(entry.path)),
-             "submodule": entry.path in modules,
-             "reference": entry.path in modules and modules[entry.path].worktree_kind != "file",
-             "rename_group": entry.rename_group}
-            for entry in st.files
-        ]
-        if not any(item["committable"] for item in items) and any(item["submodule"] for item in items):
-            only_contents = all(item["submodule"] and module_content_only(modules[item["path"]]) for item in items)
-            self.message = t("submodule_only_contents" if only_contents else "submodule_commit_unavailable")
+        items = []
+        for entry in st.files:
+            module = modules.get(entry.path)
+            committable = committable_against_head(entry, module)
+            items.append(
+                {
+                    "code": entry.code,
+                    "path": entry.path,
+                    "include": committable,
+                    "committable": committable,
+                    "submodule": module is not None,
+                    "reference": module is not None and module.worktree_kind != "file",
+                    "rename_group": entry.rename_group,
+                }
+            )
+        if not any(item["committable"] for item in items) and any(
+            item["submodule"] for item in items
+        ):
+            only_contents = all(
+                item["submodule"] and module_content_only(modules[item["path"]]) for item in items
+            )
+            self.message = t(
+                "submodule_only_contents" if only_contents else "submodule_commit_unavailable"
+            )
             return
         sel = 0
         off = 0
@@ -9845,45 +12264,7 @@ class TUI:
         # sinnvolle Teilmenge" unbemerkt und G sähe kaputt aus.
         note = ""
         while True:
-            self.scr.erase()
-            h, w = self.scr.getmaxyx()
-            chosen = sum(1 for it in items if it["include"])
-            head = t("commit_title", rel=display_git_path(st.rel), n=chosen, total=len(items))
-            safe_addstr(self.scr, 0, 0, (" " + head).ljust(w - 1), curses.A_BOLD)
-            body_h = max(1, h - 4)
-            off = scroll_window(sel, off, body_h)
-            # Die Breite der Pfadspalte richtet sich nach der LÄNGSTEN
-            # Beschriftung. Eine feste Zahl schnitt die längste still ab —
-            # sichtbar wurde das erst, als eine dritte dazukam.
-            # Die 6 Zellen daneben sind fest: der Statuscode, die zwei
-            # Leerzeichen dahinter, das eine vor der Beschriftung und die zwei,
-            # die safe_addstr() an den Rändern frei lässt.
-            label_keys = ["do_commit", "do_skip", "do_nothing_vs_head", "do_embedded_repo"]
-            if any(item["submodule"] for item in items):
-                label_keys.extend(("do_submodule_content", "do_submodule_skip", "do_commit_reference"))
-            label_width = max(cell_width(t(key)) for key in label_keys)
-            path_width = max(1, w - label_width - 6)
-            for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
-                it = items[i]
-                if not it["committable"]:
-                    # Zwei verschiedene Gruende, zwei verschiedene Saetze: ein
-                    # Ordner-Eintrag ist ein fremdes Repo, kein gestagter und
-                    # dann geloeschter Pfad.
-                    label = t(("do_submodule_content" if module_content_only(modules[it["path"]])
-                               else "do_submodule_skip") if it["submodule"] else
-                              "do_embedded_repo" if it["path"].endswith("/") else "do_nothing_vs_head")
-                    pair = C_DIM
-                elif it["include"]:
-                    label, pair = t("do_commit_reference" if it["reference"] else "do_commit"), C_GREEN
-                else:
-                    label, pair = t("do_skip"), C_DIM
-                safe_addstr(self.scr, y, 1,
-                            f"{it['code']}  {pad_cells(display_git_path(it['path']), path_width)} {label}",
-                            color_attr(pair, i == sel))
-            safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
-            safe_addstr(self.scr, h - 2, 0, t("commit_footer").ljust(w - 1),
-                        curses.color_pair(C_DIM) | curses.A_REVERSE)
-            self.scr.refresh()
+            off = self._draw_commit_selection(st, items, modules, sel, off, note)
             ch = self.scr.getch()
             note = ""
             if ch == curses.KEY_UP:
@@ -9891,23 +12272,7 @@ class TUI:
             elif ch == curses.KEY_DOWN:
                 sel = min(len(items) - 1, sel + 1)
             elif ch == ord(" "):
-                selected = items[sel]
-                include = not selected["include"]
-                # Ein Pfad ist EINE Entscheidung. Zwei Zeilen koennen denselben
-                # Pfad tragen: Nach `git rm --cached x` meldet der Status ihn
-                # als `D ` (aus dem Index entfernt) UND als `??` (im
-                # Arbeitsbaum noch da). Getrennt angehakt, widersprachen sich
-                # die beiden Zeilen auf dem Schirm, waehrend `_commit_step2()`
-                # sie ohnehin wieder zu einem Pfad zusammenfaltet — das Haekchen
-                # auf der einen Zeile blieb also wirkungslos
-                # (Review-Fund 2026-09-03). Ein Rename-Paar haengt aus dem
-                # gleichen Grund zusammen, nur ueber verschiedene Pfade.
-                related = [it for it in items
-                           if it["path"] == selected["path"]
-                           or (selected["rename_group"]
-                               and it["rename_group"] == selected["rename_group"])]
-                for it in related:
-                    it["include"] = include and it["committable"]
+                self._toggle_commit_item(items, sel)
             elif ch in (ord("a"), ord("A")):
                 for it in items:
                     it["include"] = it["committable"]
@@ -9922,6 +12287,95 @@ class TUI:
             elif ch == 27:
                 self.message = t("commit_cancelled")
                 return
+
+    def _draw_commit_selection(
+        self,
+        st: RepoStatus,
+        items: list[dict],
+        modules: dict[str, SubmoduleInfo],
+        sel: int,
+        off: int,
+        note: str,
+    ) -> int:
+        self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        chosen = sum(1 for it in items if it["include"])
+        head = t("commit_title", rel=display_git_path(st.rel), n=chosen, total=len(items))
+        safe_addstr(self.scr, 0, 0, (" " + head).ljust(w - 1), curses.A_BOLD)
+        body_h = max(1, h - 4)
+        off = scroll_window(sel, off, body_h)
+        # Die Breite der Pfadspalte richtet sich nach der LÄNGSTEN
+        # Beschriftung. Eine feste Zahl schnitt die längste still ab —
+        # sichtbar wurde das erst, als eine dritte dazukam.
+        # Die 6 Zellen daneben sind fest: der Statuscode, die zwei
+        # Leerzeichen dahinter, das eine vor der Beschriftung und die zwei,
+        # die safe_addstr() an den Rändern frei lässt.
+        label_keys = ["do_commit", "do_skip", "do_nothing_vs_head", "do_embedded_repo"]
+        if any(item["submodule"] for item in items):
+            label_keys.extend(("do_submodule_content", "do_submodule_skip", "do_commit_reference"))
+        label_width = max(cell_width(t(key)) for key in label_keys)
+        path_width = max(1, w - label_width - 6)
+        for y, i in enumerate(range(off, min(len(items), off + body_h)), start=1):
+            it = items[i]
+            if not it["committable"]:
+                # Zwei verschiedene Gruende, zwei verschiedene Saetze: ein
+                # Ordner-Eintrag ist ein fremdes Repo, kein gestagter und
+                # dann geloeschter Pfad.
+                label = t(
+                    (
+                        "do_submodule_content"
+                        if module_content_only(modules[it["path"]])
+                        else "do_submodule_skip"
+                    )
+                    if it["submodule"]
+                    else "do_embedded_repo"
+                    if it["path"].endswith("/")
+                    else "do_nothing_vs_head"
+                )
+                pair = C_DIM
+            elif it["include"]:
+                label, pair = t("do_commit_reference" if it["reference"] else "do_commit"), C_GREEN
+            else:
+                label, pair = t("do_skip"), C_DIM
+            safe_addstr(
+                self.scr,
+                y,
+                1,
+                f"{it['code']}  {pad_cells(display_git_path(it['path']), path_width)} {label}",
+                color_attr(pair, i == sel),
+            )
+        safe_addstr(self.scr, h - 3, 1, note, curses.color_pair(C_YELLOW))
+        safe_addstr(
+            self.scr,
+            h - 2,
+            0,
+            t("commit_footer").ljust(w - 1),
+            curses.color_pair(C_DIM) | curses.A_REVERSE,
+        )
+        self.scr.refresh()
+        return off
+
+    @staticmethod
+    def _toggle_commit_item(items: list[dict], sel: int) -> None:
+        selected = items[sel]
+        include = not selected["include"]
+        # Ein Pfad ist EINE Entscheidung. Zwei Zeilen koennen denselben
+        # Pfad tragen: Nach `git rm --cached x` meldet der Status ihn
+        # als `D ` (aus dem Index entfernt) UND als `??` (im
+        # Arbeitsbaum noch da). Getrennt angehakt, widersprachen sich
+        # die beiden Zeilen auf dem Schirm, waehrend `_commit_step2()`
+        # sie ohnehin wieder zu einem Pfad zusammenfaltet — das Haekchen
+        # auf der einen Zeile blieb also wirkungslos
+        # (Review-Fund 2026-09-03). Ein Rename-Paar haengt aus dem
+        # gleichen Grund zusammen, nur ueber verschiedene Pfade.
+        related = [
+            it
+            for it in items
+            if it["path"] == selected["path"]
+            or (selected["rename_group"] and it["rename_group"] == selected["rename_group"])
+        ]
+        for it in related:
+            it["include"] = include and it["committable"]
 
     @staticmethod
     def commit_group_label(group: CommitGroup) -> str:
@@ -9958,23 +12412,31 @@ class TUI:
             it["include"] = it.get("committable", True) and it["path"] in chosen
         return t("group_applied", g=self.commit_group_label(picked))
 
-    def _choose_commit_group(self, groups: list) -> tuple | None:
+    def _choose_commit_group(self, groups: list[CommitGroup]) -> CommitGroup | None:
         """Kleine Auswahlliste der Vorschlaege; Esc/Q schliesst sie."""
         sel = 0
         off = 0
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
-            safe_addstr(self.scr, 0, 0, (" " + t("group_title")).ljust(w - 1),
-                        curses.A_BOLD)
+            safe_addstr(self.scr, 0, 0, (" " + t("group_title")).ljust(w - 1), curses.A_BOLD)
             body_h = max(1, h - 4)
             off = scroll_window(sel, off, body_h)
-            for y, i in enumerate(range(off, min(len(groups), off + body_h)),
-                                  start=2):
-                safe_addstr(self.scr, y, 2, self.commit_group_label(groups[i]),
-                            curses.A_REVERSE if i == sel else 0)
-            safe_addstr(self.scr, h - 2, 0, t("group_footer").ljust(w - 1),
-                        curses.color_pair(C_DIM) | curses.A_REVERSE)
+            for y, i in enumerate(range(off, min(len(groups), off + body_h)), start=2):
+                safe_addstr(
+                    self.scr,
+                    y,
+                    2,
+                    self.commit_group_label(groups[i]),
+                    curses.A_REVERSE if i == sel else 0,
+                )
+            safe_addstr(
+                self.scr,
+                h - 2,
+                0,
+                t("group_footer").ljust(w - 1),
+                curses.color_pair(C_DIM) | curses.A_REVERSE,
+            )
             self.scr.refresh()
             ch = self.scr.getch()
             if ch == curses.KEY_UP:
@@ -9991,11 +12453,10 @@ class TUI:
         # Dieser Snapshot stammt im normalen TUI-Pfad aus dem Listen-Scan VOR
         # Dateiauswahl und Message. Ein Checkout während des Dialogs darf nicht
         # still den neuen Branch zur Freigabegrundlage machen.
-        approved_ui_head = (st.head_oid if st.head_oid != ""
-                            else _SIGNATURE_UNSET)
-        approved_ui_ref = (f"refs/heads/{st.branch}"
-                           if st.branch not in ("?", "(detached)")
-                           else _SIGNATURE_UNSET)
+        approved_ui_head = st.head_oid if st.head_oid != "" else _SIGNATURE_UNSET
+        approved_ui_ref = (
+            f"refs/heads/{st.branch}" if st.branch not in ("?", "(detached)") else _SIGNATURE_UNSET
+        )
         to_commit = [it["path"] for it in items if it["include"] and it.get("committable", True)]
         if not to_commit:
             self.message = t("nothing_selected")
@@ -10006,13 +12467,17 @@ class TUI:
         recent = [line for line in r.stdout.splitlines() if line.strip()]
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        safe_addstr(self.scr, 0, 0, (" " + t("commit_in", rel=display_git_path(st.rel))).ljust(w - 1),
-                    curses.A_BOLD)
+        safe_addstr(
+            self.scr,
+            0,
+            0,
+            (" " + t("commit_in", rel=display_git_path(st.rel))).ljust(w - 1),
+            curses.A_BOLD,
+        )
         # Layout von unten her planen: die Eingabezeile muss sichtbar bleiben.
         prompt_y = max(4, h - 2)
         y = 2
-        safe_addstr(self.scr, y, 1, t("to_commit_n", n=len(to_commit)),
-                    curses.color_pair(C_GREEN))
+        safe_addstr(self.scr, y, 1, t("to_commit_n", n=len(to_commit)), curses.color_pair(C_GREEN))
         y += 2
         # Nur so viele Beispiele zeigen, wie über der Eingabezeile Platz haben.
         room = max(0, prompt_y - y - 2)
@@ -10021,8 +12486,7 @@ class TUI:
             safe_addstr(self.scr, y, 1, t("recent_msgs"))
             y += 1
             for msg in shown_recent:
-                safe_addstr(self.scr, y, 3, f"· {terminal_text(msg)}",
-                            curses.color_pair(C_DIM))
+                safe_addstr(self.scr, y, 3, f"· {terminal_text(msg)}", curses.color_pair(C_DIM))
                 y += 1
         msg = self.prompt_line(prompt_y, t("commit_msg_prompt"))
         if msg is None:
@@ -10041,10 +12505,9 @@ class TUI:
             if approved_ref is None:
                 self.message = t("commit_detached")
                 return True
-            if ((approved_ui_head is not _SIGNATURE_UNSET
-                 and head_before != approved_ui_head)
-                    or (approved_ui_ref is not _SIGNATURE_UNSET
-                        and approved_ref != approved_ui_ref)):
+            if (approved_ui_head is not _SIGNATURE_UNSET and head_before != approved_ui_head) or (
+                approved_ui_ref is not _SIGNATURE_UNSET and approved_ref != approved_ui_ref
+            ):
                 self.message = t("commit_failed", e="HEAD changed after UI approval")
                 self.refresh_one(st)
                 return True
@@ -10054,12 +12517,17 @@ class TUI:
             # Ab hier kann es dauern: `git commit` führt den pre-commit-Hook des
             # Repos aus, der oft Linter oder Tests startet.
             self.show_busy(t("commit_running", s=commit_t))
-            r = commit_selected(
-                st.path, list(dict.fromkeys(to_commit)), msg, t_, commit_t,
-                expected_head=head_before, expected_ref=approved_ref)
+            commit = commit_selected(
+                st.path,
+                list(dict.fromkeys(to_commit)),
+                msg,
+                t_,
+                commit_t,
+                expected_head=head_before,
+                expected_ref=approved_ref,
+            )
         except CommitAdoptionError as e:
-            self.message = t(
-                "commit_exists_index_failed", oid=e.committed_head[:12])
+            self.message = t("commit_exists_index_failed", oid=e.committed_head[:12])
             self.refresh_one(st)
             return True
         except CommitOutcomeUnknownError:
@@ -10070,26 +12538,22 @@ class TUI:
             self.message = t("commit_failed", e=str(e)[:120])
             self.refresh_one(st)
             return True
-        except subprocess.TimeoutExpired as exc:
+        except CommitTimeoutError as exc:
             # Git und der von ihm gestartete Hook wurden beendet. Ob der Commit
             # vorher noch fertig wurde (z.B. hing nur der post-commit-Hook), weiß
             # nur das Repo selbst — deshalb den HEAD vergleichen, statt zu raten.
             # Existiert ein neuer Commit, prüft finish_interrupted_commit Eltern
             # und Baum nur lesend. Nach einem Timeout darf weder HEAD noch Index
             # automatisch verändert werden, weil die Herkunft nicht beweisbar ist.
-            proof_names = ("approved_head", "approved_ref", "approved_tree",
-                           "reflog_action")
-            if not all(hasattr(exc, name) for name in proof_names):
-                # Der Timeout lag in einer Vorbereitung/Schutzprüfung; `git
-                # commit` wurde noch nicht gestartet und ein ungebundenes
-                # Dateiabild darf hier keinesfalls als Commit-Nachweis dienen.
-                self.message = t("commit_timeout_none", s=commit_t)
-                self.refresh_one(st)
-                return True
             try:
                 done = finish_interrupted_commit(
-                    st.path, exc.approved_head, t_,
-                    exc.approved_tree, exc.approved_ref, exc.reflog_action)
+                    st.path,
+                    exc.approved_head,
+                    t_,
+                    exc.approved_tree,
+                    exc.approved_ref,
+                    exc.reflog_action,
+                )
             except subprocess.TimeoutExpired:
                 self.message = t("commit_outcome_unknown")
                 self.refresh_one(st)
@@ -10102,70 +12566,38 @@ class TUI:
                 self.message = t("commit_outcome_unknown")
                 self.refresh_one(st)
                 return True
-            self.message = t("commit_timeout_done" if done else "commit_timeout_none",
-                             s=commit_t)
+            self.message = t("commit_timeout_done" if done else "commit_timeout_none", s=commit_t)
+            self.refresh_one(st)
+            return True
+        except subprocess.TimeoutExpired:
+            self.message = t("commit_timeout_none", s=commit_t)
             self.refresh_one(st)
             return True
         finally:
             # Tasten, die während der Wartezeit gedrückt wurden, würden sonst
             # anschließend als Kommandos ausgeführt (⏎ aus Ungeduld z.B.).
             curses.flushinp()
-        if r.returncode != 0:
-            self.message = t("commit_failed", e=r.stderr.strip()[:120])
+        if commit.returncode != 0:
+            self.message = t("commit_failed", e=commit.stderr.strip()[:120])
             self.refresh_one(st)
             return True
         self.refresh_one(st)
-        undo = commit_undo_command(
-            r.approved_head, r.committed_head, r.approved_ref)
+        if commit.committed_head is None or commit.approved_ref is None:
+            self.message = t("commit_outcome_unknown")
+            return True
+        undo = commit_undo_command(commit.approved_head, commit.committed_head, commit.approved_ref)
         self.message = t("committed_in", rel=display_git_path(st.rel), undo=undo)
         return True
 
     # -- Hauptschleife -------------------------------------------------------
 
-    def dispatch_action(self, key: str) -> None:
-        """Einen Buchstabenbefehl ausführen.
+    def toggle_list_layout(self) -> None:
+        self.view_mode = "detail" if self.view_mode == "compact" else "compact"
 
-        Bewusst von der Hauptschleife getrennt: So liegt jede Aktion, die Git
-        aufruft, hinter genau einer Absicherung gegen Timeouts (siehe `run`).
-        """
-        if key == "C":
-            self.action_commit_wizard()
-        elif key == "R":
-            self.start_background_scan()
-        elif key == "N":
-            self.action_refresh_local()
-        elif key == "U":
-            self.action_fetch_one()
-        elif key == "X":
-            self.action_stop_scan()
-        elif key == "L":
-            self.action_pull()
-        elif key == "P":
-            self.action_sync_push()
-        elif key == "G":
-            self.action_github_push()
-        elif key == "H":
-            self.action_git_help()
-        elif key == "I":
-            self.action_repo_info()
-        elif key == "W":
-            self.action_worktrees()
-        elif key == "O":
-            self.action_submodules()
-        elif key == "A":
-            self.action_file_changes()
-        elif key == "M":
-            # Ansicht wechseln — die Auswahl bleibt auf demselben Repo, damit
-            # man in der Übersicht suchen und im Detail weiterarbeiten kann.
-            self.view_mode = "detail" if self.view_mode == "compact" else "compact"
-        elif key == "B":
-            self.action_work_view()
-        elif key == "S":
-            self.action_stash_show()
-        elif key == "/":
-            self.action_filter()
-        elif key == ",":
-            self.action_settings()
+    def dispatch_action(self, key: str) -> None:
+        action = KEY_BINDINGS.get(key)
+        if action is not None:
+            getattr(self, action)()
         elif key in self.cfg["apps"]:
             self.action_open_app(key)
 
@@ -10188,7 +12620,9 @@ class TUI:
         `curses.error`, statt einfach zu warten. Das begrenzte Warten bleibt
         deshalb strikt auf diese eine Stelle beschraenkt.
         """
-        self.scr.timeout(BACKGROUND_POLL_MS if self.scan or self.pending_app_launches else MEASUREMENT_POLL_MS)
+        self.scr.timeout(
+            BACKGROUND_POLL_MS if self.scan or self.pending_app_launches else MEASUREMENT_POLL_MS
+        )
         try:
             return self.scr.getch()
         finally:
@@ -10201,91 +12635,83 @@ class TUI:
             self.draw()
             ch = self._wait_for_key()
             if ch == -1:
-                # Nur der Zeitgeber für Scanfortschritt oder Messalter. Keine Eingabe heisst
-                # auch: die Meldung stehen lassen, sonst waere sie nach 200 ms weg.
+                # Ein Timer-Tick lässt die letzte Meldung stehen.
                 continue
             self.message = ""
-            st = self.current()
-            # Tab schaltet den Fokus zwischen Repo-Liste und Protokoll um; im
-            # Protokoll bedeuten die Cursortasten dann scrollen statt auswählen.
-            if ch == 9:
-                self.focus = "log" if self.focus == "repos" else "repos"
-                if self.focus == "log" and self.log_selected is None:
-                    # Erster Besuch: beim neuesten Befehl anfangen.
-                    self.log_selected = max(0, len(COMMAND_LOG) - 1)
+            if self._handle_log_key(ch) or self._navigate_repos(ch):
                 continue
-            if self.focus == "log":
-                last = max(0, len(COMMAND_LOG) - 1)
-                current = self.log_selected or 0
-                if ch == curses.KEY_UP:
-                    self.log_selected = max(0, current - 1)
-                    continue
-                if ch == curses.KEY_DOWN:
-                    self.log_selected = min(last, current + 1)
-                    continue
-                if ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
-                    step = max(1, self.log_visible)
-                    self.log_selected = max(0, min(
-                        last, current + (step if ch == curses.KEY_NPAGE else -step)))
-                    continue
-                if ch == 27:
-                    self.focus = "repos"
-                    continue
-            # Cursor-/Sondertasten zuerst; Buchstaben danach case-insensitiv.
-            if ch == curses.KEY_UP:
-                self.selected = max(0, self.selected - 1)
-                continue
-            elif ch == curses.KEY_DOWN:
-                # Untere Schranke: Bei leerer Trefferliste ergäbe
-                # `min(len - 1, …)` genau -1, und -1 ist der letzte Eintrag.
-                self.selected = max(0, min(len(self.statuses) - 1,
-                                           self.selected + 1))
-                continue
-            elif ch == curses.KEY_RIGHT and st:
-                if self.view_mode == "compact":
-                    # Kompakt: eine Spalte weiter statt aufklappen.
-                    self.selected = self.compact_step(+1)
-                else:
-                    self.expanded.add(st.path)
-                continue
-            elif ch == curses.KEY_LEFT and st:
-                if self.view_mode == "compact":
-                    self.selected = self.compact_step(-1)
-                else:
-                    self.expanded.discard(st.path)
-                continue
-            elif ch in (10, 13, curses.KEY_ENTER):
+            if ch in (10, 13, curses.KEY_ENTER):
                 if self.action_cd_and_quit():
                     return
                 continue
-            elif ch == 27:  # Esc
-                # Bei aktivem Filter räumt Esc erst ihn weg. Sonst beendete die
-                # naheliegendste Taste zum Abbrechen einer Einschränkung gleich
-                # das ganze Programm.
-                if self.filter_query:
-                    self.clear_filter()
-                    continue
-                if self.status_view != "all":
-                    self.status_view = "all"
-                    self.apply_filter(keep_selection=True)
-                    self.message = t("view_active", v=t("view_all"))
+            if ch == 27:
+                if self._clear_active_view():
                     continue
                 return
-
-            # Buchstaben-Kürzel: groß ODER klein akzeptieren (F wie f).
             try:
                 key = chr(ch).upper()
             except ValueError:
                 continue
             if key == "Q":
                 return
-            # Jeder Git-Aufruf kann hängen bleiben (langsamer Hook, langsames Netz).
-            # Ein Timeout ist dann eine Auskunft und kein Grund, die Übersicht zu
-            # beenden — vorher stieg gmf an dieser Stelle mit einem Traceback aus.
             try:
                 self.dispatch_action(key)
             except subprocess.TimeoutExpired as exc:
                 self.handle_action_timeout(exc)
+
+    def _handle_log_key(self, ch: int) -> bool:
+        if ch == 9:
+            self.focus = "log" if self.focus == "repos" else "repos"
+            if self.focus == "log" and self.log_selected is None:
+                self.log_selected = max(0, len(COMMAND_LOG) - 1)
+            return True
+        if self.focus != "log":
+            return False
+        if ch == 27:
+            self.focus = "repos"
+            return True
+        step = {
+            curses.KEY_UP: -1,
+            curses.KEY_DOWN: 1,
+            curses.KEY_NPAGE: max(1, self.log_visible),
+            curses.KEY_PPAGE: -max(1, self.log_visible),
+        }.get(ch)
+        if step is None:
+            return False
+        last = max(0, len(COMMAND_LOG) - 1)
+        self.log_selected = max(0, min(last, (self.log_selected or 0) + step))
+        return True
+
+    def _navigate_repos(self, ch: int) -> bool:
+        if ch == curses.KEY_UP:
+            self.selected = max(0, self.selected - 1)
+            return True
+        if ch == curses.KEY_DOWN:
+            self.selected = max(0, min(len(self.statuses) - 1, self.selected + 1))
+            return True
+        if ch not in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            return False
+        st = self.current()
+        if st is None:
+            return False
+        if self.view_mode == "compact":
+            self.selected = self.compact_step(1 if ch == curses.KEY_RIGHT else -1)
+        elif ch == curses.KEY_RIGHT:
+            self.expanded.add(st.path)
+        else:
+            self.expanded.discard(st.path)
+        return True
+
+    def _clear_active_view(self) -> bool:
+        if self.filter_query:
+            self.clear_filter()
+            return True
+        if self.status_view != "all":
+            self.status_view = "all"
+            self.apply_filter(keep_selection=True)
+            self.message = t("view_active", v=t("view_all"))
+            return True
+        return False
 
     def handle_action_timeout(self, exc: subprocess.TimeoutExpired) -> None:
         """Nach einem Aktions-Timeout melden UND das Repo defensiv neu einlesen.
@@ -10321,7 +12747,7 @@ def init_colors():
     # Farben in beide Richtungen, damit der Balken auch in hellen Terminals ein
     # Balken bleibt. Schwarz auf Gelb war der erste Versuch: ANSI-Gelb ist in
     # den meisten Farbschemata ein dunkles Oliv und ANSI-Schwarz ein Dunkelgrau,
-    # der Kontrast war zu flau (Daniel, 2026-09-02).
+    # der Kontrast war zu flau.
     curses.init_pair(C_ASK, curses.COLOR_WHITE, curses.COLOR_BLACK)
     curses.init_pair(C_ASK_KEY, curses.COLOR_RED, curses.COLOR_BLACK)
 
@@ -10349,19 +12775,34 @@ def _demo_env() -> dict[str, str]:
     anderen Repo. Identität und Datum stehen deshalb hier explizit; globale und
     System-Gitconfig bleiben außen vor.
     """
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("GIT_")}
-    env.update(GIT_AUTHOR_DATE=DEMO_DATE, GIT_COMMITTER_DATE=DEMO_DATE,
-               GIT_AUTHOR_NAME="Demo", GIT_AUTHOR_EMAIL="demo@example.invalid",
-               GIT_COMMITTER_NAME="Demo", GIT_COMMITTER_EMAIL="demo@example.invalid",
-               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        GIT_AUTHOR_DATE=DEMO_DATE,
+        GIT_COMMITTER_DATE=DEMO_DATE,
+        GIT_AUTHOR_NAME="Demo",
+        GIT_AUTHOR_EMAIL="demo@example.invalid",
+        GIT_COMMITTER_NAME="Demo",
+        GIT_COMMITTER_EMAIL="demo@example.invalid",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+    )
     return env
 
 
+def _demo_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return _run_process_group(
+        ["git", "-C", str(repo), *args],
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+        env={**_demo_env(), **NONINTERACTIVE_GIT_ENV},
+    )
+
+
 def _dgit(repo: Path, *args: str) -> str:
-    """git-Aufruf in der Demo-Sandbox; wirft bei Fehler (Sandbox muss sauber bauen)."""
-    return subprocess.run(["git", "-C", str(repo), *args], check=True,
-                          capture_output=True, text=True, env=_demo_env()).stdout.strip()
+    """git-Aufruf in der Demo-Sandbox; die Sandbox muss vollständig bauen."""
+    result = _demo_git(repo, *args)
+    result.check_returncode()
+    return result.stdout.strip()
 
 
 def _dgit_conflict(repo: Path, *args: str) -> None:
@@ -10372,11 +12813,11 @@ def _dgit_conflict(repo: Path, *args: str) -> None:
     Exit 0 (kein Konflikt entstanden) und jeder andere Code sind ein Fehler und
     fliegen auf, statt still ein falsches Demo-Bild zu bauen.
     """
-    result = subprocess.run(["git", "-C", str(repo), *args], check=False,
-                            capture_output=True, text=True, env=_demo_env())
+    result = _demo_git(repo, *args)
     if result.returncode != 1:
-        raise subprocess.CalledProcessError(result.returncode, result.args,
-                                            result.stdout, result.stderr)
+        raise subprocess.CalledProcessError(
+            result.returncode, result.args, result.stdout, result.stderr
+        )
 
 
 def _demo_harden(repo: Path) -> None:
@@ -10430,8 +12871,9 @@ def _demo_commit(repo: Path, fname: str, content: str, msg: str) -> None:
     _dgit(repo, "commit", "-qm", msg)
 
 
-def _demo_extra_remote(root: Path, repo: Path, remote: str, branch: str = "main",
-                       url: str | None = None) -> None:
+def _demo_extra_remote(
+    root: Path, repo: Path, remote: str, branch: str = "main", url: str | None = None
+) -> None:
     """Zweites Remote (z.B. `github`, `backup`) mit aktuellem Stand anlegen.
 
     Es wird immer gegen ein lokales bare-Repo gepusht. `url` stellt die Adresse
@@ -10493,11 +12935,10 @@ def build_demo_sandbox(base: Path) -> Path:
     # github/main = Basis. Derselbe Helfer wie bei allen anderen Repos: Der
     # Block stand hier Zeile fuer Zeile ein zweites Mal, und eine Aenderung an
     # der Remote-Anlage haette dieses eine Repo stillschweigend ausgelassen.
-    _demo_extra_remote(root, repo, "github",
-                       url="https://github.com/example/webshop-frontend.git")
+    _demo_extra_remote(root, repo, "github", url="https://github.com/example/webshop-frontend.git")
     for i in range(3):
         _demo_commit(repo, "app.js", f"// build {i}\n", f"feat: change {i}")
-    _dgit(repo, "push", "-q", "origin", "main")               # origin synchron
+    _dgit(repo, "push", "-q", "origin", "main")  # origin synchron
     _dgit(repo, "branch", "--set-upstream-to=github/main", "main")
 
     # 2) modified + untracked
@@ -10520,8 +12961,8 @@ def build_demo_sandbox(base: Path) -> Path:
     # 5) 1 Commit hinter dem Sync-Remote
     repo, _ = _demo_repo(root, "invoice-parser")
     _demo_commit(repo, "parser.py", "v2\n", "fix: parsing")
-    _dgit(repo, "push", "-q", "origin", "main")               # origin voraus
-    _dgit(repo, "reset", "--hard", "-q", "HEAD~1")            # lokal 1 zurück
+    _dgit(repo, "push", "-q", "origin", "main")  # origin voraus
+    _dgit(repo, "reset", "--hard", "-q", "HEAD~1")  # lokal 1 zurück
 
     # 6) Merge-Konflikt (2 Dateien) + erhaltener Stash
     repo, _ = _demo_repo(root, "ml-experiments")
@@ -10530,12 +12971,12 @@ def build_demo_sandbox(base: Path) -> Path:
     _dgit(repo, "push", "-q", "origin", "main")
     (repo / "a.txt").write_text("a-stash\n")
     (repo / "b.txt").write_text("b-stash\n")
-    _dgit(repo, "stash")                                       # Stash: a/b geändert
+    _dgit(repo, "stash")  # Stash: a/b geändert
     (repo / "a.txt").write_text("a-head\n")
     (repo / "b.txt").write_text("b-head\n")
     _dgit(repo, "commit", "-qam", "conflicting change")
     _dgit(repo, "push", "-q", "origin", "main")
-    _dgit_conflict(repo, "stash", "pop")       # erzeugt Konflikt, behält Stash
+    _dgit_conflict(repo, "stash", "pop")  # erzeugt Konflikt, behält Stash
 
     # 7) nur ein Stash (Baum sonst sauber)
     repo, _ = _demo_repo(root, "game-jam")
@@ -10559,8 +13000,20 @@ def build_demo_sandbox(base: Path) -> Path:
 
     # 13) eigener Branch, Submodul-Inhalt und drei Commits voraus
     repo, _ = _demo_repo(root, "iot-firmware", branch="develop")
-    _dgit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-b", "main",
-          "--name", "library", str(root / "_remotes" / "notes-vault.git"), "deps/library")
+    _dgit(
+        repo,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        "-b",
+        "main",
+        "--name",
+        "library",
+        str(root / "_remotes" / "notes-vault.git"),
+        "deps/library",
+    )
     _demo_harden(repo / "deps/library")
     # Die Clone-Adresse ist temporär; im Commit steht eine stabile, zu origin
     # relative URL, damit auch dieser Demo-Baum überall dieselbe OID erhält.
@@ -10578,8 +13031,7 @@ def build_demo_sandbox(base: Path) -> Path:
     # 15) privat auf zwei Remotes synchron, auf GitHub noch nicht veröffentlicht
     repo, _ = _demo_repo(root, "docs-portal")
     _demo_extra_remote(root, repo, "backup")
-    _demo_extra_remote(root, repo, "github",
-                       url="https://github.com/example/docs-portal.git")
+    _demo_extra_remote(root, repo, "github", url="https://github.com/example/docs-portal.git")
     _demo_ahead(repo, 1)
     _dgit(repo, "push", "-q", "origin", "main")
     _dgit(repo, "push", "-q", "backup", "main")
@@ -10591,8 +13043,7 @@ def build_demo_sandbox(base: Path) -> Path:
 
     # 17) gleiche öffentliche Dateien bei getrennter Veröffentlichungshistorie
     repo, _ = _demo_repo(root, "auth-service")
-    _demo_extra_remote(root, repo, "github",
-                       url="https://github.com/example/auth-service.git")
+    _demo_extra_remote(root, repo, "github", url="https://github.com/example/auth-service.git")
     _demo_ahead(repo, 2)
     _dgit(repo, "push", "-q", "origin", "main")
     tree = _dgit(repo, "rev-parse", "HEAD^{tree}")
@@ -10640,7 +13091,7 @@ def build_demo_sandbox(base: Path) -> Path:
     (repo / "case.txt").write_text("head\n")
     _dgit(repo, "commit", "-qam", "conflicting change")
     _dgit(repo, "push", "-q", "origin", "master")
-    _dgit_conflict(repo, "stash", "pop")       # erzeugt Konflikt, behält Stash
+    _dgit_conflict(repo, "stash", "pop")  # erzeugt Konflikt, behält Stash
 
     # 25) Änderung + Stash gleichzeitig
     repo, _ = _demo_repo(root, "vpn-config")
@@ -10672,79 +13123,144 @@ def build_demo_sandbox(base: Path) -> Path:
 # main
 # ---------------------------------------------------------------------------
 
-def main(argv: list[str] | None = None) -> int:
+
+def cli_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="Fast TUI overview of every Git repo below the current directory.")
-    ap.add_argument("root", nargs="?", default=".",
-                    help="start directory for the repo scan (default: current dir)")
-    ap.add_argument("--list", action="store_true",
-                    help="non-interactive text list")
-    ap.add_argument("--json", action="store_true",
-                    help="non-interactive JSON output (machine-readable)")
-    ap.add_argument("--file-diff", metavar="PATH",
-                    help="read one relative file diff; root must be its repository root")
-    ap.add_argument("--stashes", action="store_true",
-                    help=t("stash_cli_help"))
-    ap.add_argument("--diff-mode", choices=DIFF_MODES,
-                    help="with --file-diff: combined (default), staged or unstaged")
-    ap.add_argument("--compare", nargs=2, metavar=("HERE_JSON", "THERE_JSON"),
-                    help="compare two saved --json snapshots without scanning, SSH or fetch")
-    ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
-                    help="colors for --list: auto uses a terminal unless NO_COLOR is set")
-    ap.add_argument("--fetch", action="store_true",
-                    help="`git fetch` each repo before output (with --list/--json)")
-    ap.add_argument("--fetch-remote", metavar="NAME",
-                    help="with --list/--json, fetch only this remote in each scanned repo; "
-                         "implies --fetch. Pass a repo as root to refresh one repo.")
-    ap.add_argument("--diff", metavar="HOST[:PATH]",
-                    help="compare this machine's repos with HOST over ssh and print "
-                         "only the differences. Branches, index, and working trees stay "
-                         "untouched; config.json may be created and --fetch updates safe "
-                         "remote-tracking refs. Needs `ssh HOST` to work; "
-                         "gitmaster_flash need NOT be installed there. PATH overrides "
-                         "the directory scanned on the other side.")
-    ap.add_argument("--filter", metavar="TEXT", default="",
-                    help="only show repos whose path contains ALL whitespace-separated "
-                         "terms (case-insensitive, any order). Applies to --list, "
-                         "--json and --diff (there on both machines alike), and "
-                         "preselects the filter in the TUI, where / changes it.")
-    ap.add_argument("--view", choices=STATUS_VIEWS, default="all",
-                    help="work view in addition to the path filter; comparisons keep "
-                         "a repo on both sides when either side matches")
-    ap.add_argument("--lang", choices=["en", "de"],
-                    help="UI language (overrides config; default: auto from $LANG)")
-    ap.add_argument("--demo", action="store_true",
-                    help="build a throwaway sandbox of fake repos and run on it")
-    ap.add_argument("--cd-file", metavar="FILE",
-                    help="(internal, for the gmf wrapper) write the ⏎ target path here")
+        description="Fast TUI overview of every Git repo below the current directory."
+    )
+    ap.add_argument(
+        "root",
+        nargs="?",
+        default=".",
+        help="start directory for the repo scan (default: current dir)",
+    )
+    ap.add_argument("--list", action="store_true", help="non-interactive text list")
+    ap.add_argument(
+        "--json", action="store_true", help="non-interactive JSON output (machine-readable)"
+    )
+    read_mode = ap.add_mutually_exclusive_group()
+    read_mode.add_argument(
+        "--file-diff",
+        metavar="PATH",
+        help="read one relative file diff; root must be its repository root",
+    )
+    read_mode.add_argument(
+        "--stashes",
+        action="store_true",
+        help="read all stashes grouped by file; optionally with --json",
+    )
+    ap.add_argument(
+        "--diff-mode",
+        choices=DIFF_MODES,
+        help="with --file-diff: combined (default), staged or unstaged",
+    )
+    read_mode.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("HERE_JSON", "THERE_JSON"),
+        help="compare two saved --json snapshots without scanning, SSH or fetch",
+    )
+    ap.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="colors for --list: auto uses a terminal unless NO_COLOR is set",
+    )
+    ap.add_argument(
+        "--fetch",
+        action="store_true",
+        help="`git fetch` each repo before output (with --list/--json)",
+    )
+    ap.add_argument(
+        "--fetch-remote",
+        metavar="NAME",
+        help="with --list/--json, fetch only this remote in each scanned repo; "
+        "implies --fetch. Pass a repo as root to refresh one repo.",
+    )
+    ap.add_argument(
+        "--diff",
+        metavar="HOST[:PATH]",
+        help="compare this machine's repos with HOST over ssh and print "
+        "only the differences. Branches, index, and working trees stay "
+        "untouched; config.json may be created and --fetch updates safe "
+        "remote-tracking refs. Needs `ssh HOST` to work; "
+        "gitmaster_flash need NOT be installed there. PATH overrides "
+        "the directory scanned on the other side.",
+    )
+    ap.add_argument(
+        "--filter",
+        metavar="TEXT",
+        default="",
+        help="only show repos whose path contains ALL whitespace-separated "
+        "terms (case-insensitive, any order). Applies to --list, "
+        "--json and --diff (there on both machines alike), and "
+        "preselects the filter in the TUI, where / changes it.",
+    )
+    ap.add_argument(
+        "--view",
+        choices=STATUS_VIEWS,
+        default="all",
+        help="work view in addition to the path filter; comparisons keep "
+        "a repo on both sides when either side matches",
+    )
+    ap.add_argument(
+        "--lang",
+        choices=["en", "de"],
+        help="UI language (overrides config; default: auto from $LANG)",
+    )
+    ap.add_argument(
+        "--demo", action="store_true", help="build a throwaway sandbox of fake repos and run on it"
+    )
+    ap.add_argument(
+        "--cd-file",
+        metavar="FILE",
+        help="(internal, for the gmf wrapper) write the ⏎ target path here",
+    )
     ap.add_argument("--version", action="version", version=__version__)
-    args = ap.parse_args(argv)
-    global UI_LANG
-    UI_LANG = resolve_lang(DEFAULT_CONFIG, args.lang)
-    if args.stashes:
-        if (args.file_diff is not None or args.diff_mode is not None or args.compare or args.diff
-                or args.demo or args.fetch or args.fetch_remote is not None or args.list
-                or args.filter or args.view != "all" or args.color != "auto"):
-            ap.error(t("stash_cli_options"))
-        return print_stashes(Path(args.root), as_json=args.json)
-    if args.file_diff is not None:
-        if (args.compare or args.diff or args.demo or args.fetch or args.fetch_remote is not None
-                or args.list or args.filter or args.view != "all" or args.color != "auto"):
-            ap.error(t("cli_file_diff_options"))
-        return print_file_diff(args.root, args.file_diff, args.diff_mode or "combined", as_json=args.json)
-    if args.diff_mode is not None:
+    return ap
+
+
+def validate_cli(ap: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    scan = args.diff or args.demo or args.fetch or args.fetch_remote is not None
+    list_output = args.list or args.color != "auto"
+    status_filter = args.filter or args.view != "all"
+    # Der Wrapper setzt --cd-file bei jedem Aufruf. Nur der TUI-Weg nutzt es.
+    if args.diff_mode is not None and args.file_diff is None:
         ap.error(t("cli_file_diff_mode"))
-    if args.compare:
-        if args.diff or args.demo or args.fetch or args.fetch_remote is not None:
-            ap.error(t("cli_compare_options"))
-        return run_offline_comparison(args.compare, as_json=args.json,
-                                      query=canonical_filter_query(args.filter), view=args.view)
+    if args.stashes and (scan or list_output or status_filter):
+        ap.error(t("stash_cli_options"))
+    if args.file_diff is not None and (scan or list_output or status_filter):
+        ap.error(t("cli_file_diff_options"))
+    if args.compare and scan:
+        ap.error(t("cli_compare_options"))
     if args.fetch_remote is not None:
         if args.diff or (sys.stdout.isatty() and not (args.list or args.json)):
             ap.error(t("cli_fetch_remote_output"))
         if not args.fetch_remote or args.fetch_remote.startswith("-"):
             ap.error(t("cli_fetch_remote_name"))
         args.fetch = True
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = cli_parser()
+    args = ap.parse_args(argv)
+    global UI_LANG
+    UI_LANG = resolve_lang(DEFAULT_CONFIG, args.lang)
+    validate_cli(ap, args)
+    if args.stashes:
+        cfg = load_config(create=False)
+        return print_stashes(Path(args.root), as_json=args.json, timeout=cfg["git_timeout"])
+    if args.file_diff is not None:
+        return print_file_diff(
+            args.root, args.file_diff, args.diff_mode or "combined", as_json=args.json
+        )
+    if args.compare:
+        return run_offline_comparison(
+            args.compare,
+            as_json=args.json,
+            query=canonical_filter_query(args.filter),
+            view=args.view,
+        )
 
     if args.demo:
         # Demo ignoriert die persönliche Config bewusst: generische Apps + Sprache,
@@ -10764,8 +13280,9 @@ def main(argv: list[str] | None = None) -> int:
         # eine andere OID und `make-screens.py --check` wäre nicht reproduzierbar.
         for key in [key for key in os.environ if key.startswith("GIT_")]:
             os.environ.pop(key, None)
-        os.environ.update({key: value for key, value in _demo_env().items()
-                           if key.startswith("GIT_")})
+        os.environ.update(
+            {key: value for key, value in _demo_env().items() if key.startswith("GIT_")}
+        )
         print(t("demo_built", p=sandbox), file=sys.stderr)
         root = sandbox
     else:
@@ -10782,23 +13299,30 @@ def main(argv: list[str] | None = None) -> int:
     query = canonical_filter_query(args.filter)
 
     if args.diff:
-        return run_diff(args.diff, root, cfg, fetch=args.fetch, as_json=args.json,
-                        query=query, view=args.view)
+        return run_diff(
+            args.diff, root, cfg, fetch=args.fetch, as_json=args.json, query=query, view=args.view
+        )
 
     if args.list or args.json or not sys.stdout.isatty():
-        all_statuses = collect_all(root, cfg, fetch=args.fetch,
-                                   fetch_remote=args.fetch_remote)
+        all_statuses = collect_all(root, cfg, fetch=args.fetch, fetch_remote=args.fetch_remote)
         statuses = filter_statuses(all_statuses, query, args.view)
         if args.json:
             # Objekt statt nacktem Array (seit 0.6.0): nur so lassen sich Version und
             # Wurzel mitgeben — beim Vergleich zweier Macs muss erkennbar sein, ob
             # dieselbe Fassung dahintersteht. Die Repos liegen unter "repos".
-            payload = make_snapshot(root, statuses, all_statuses=all_statuses,
-                                    query=query, view=args.view)
+            payload = make_snapshot(
+                root, statuses, all_statuses=all_statuses, query=query, view=args.view
+            )
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
-            print_list(statuses, root, query,
-                       hidden_dirty(all_statuses, statuses), view=args.view, color=args.color)
+            print_list(
+                statuses,
+                root,
+                query,
+                hidden_dirty(all_statuses, statuses),
+                view=args.view,
+                color=args.color,
+            )
         # Ein Filter ohne Treffer sähe an Exit-Code und Ausgabe wie "alles in
         # Ordnung" aus. Der Hinweis geht nach stderr, damit er weder die Liste
         # noch das JSON verunreinigt und der Exit-Code skriptbar bleibt.
@@ -10813,8 +13337,15 @@ def main(argv: list[str] | None = None) -> int:
         init_colors()
         # Der Demo-Modus bekommt KEINEN Pfad: Seine Config ist eine Wegwerfkopie
         # der Defaults, und ein Screenshot-Lauf darf die echte Datei nie ändern.
-        TUI(stdscr, root, cfg, args.cd_file, query,
-            None if args.demo else CONFIG_PATH, status_view=args.view).run()
+        TUI(
+            stdscr,
+            root,
+            cfg,
+            args.cd_file,
+            query,
+            None if args.demo else CONFIG_PATH,
+            status_view=args.view,
+        ).run()
 
     curses.wrapper(_run)
     return 0

@@ -14,9 +14,10 @@ Die TUI benötigt curses aus der Standardbibliothek, ein POSIX-Terminal und eine
 UTF-8-Locale. Zusätzliche Python-Module sind nicht nötig. App-Tasten nutzen auf
 macOS `open -a`; Linux startet einen konfigurierten ausführbaren Starter in der
 lokalen Desktopsitzung und übergibt das Repository als ein Ordnerargument.
-SSH-Sitzungen bleiben gesperrt. Der Linux-Installer (`install-linux.sh`) unterstützt Bash,
-Fish und Zsh einschließlich Enter-Verzeichniswechsel. Der bisherige macOS-Installer
-und Build-/Release-Skripte benötigen Zsh. Ohne Zsh werden auf Linux die
+App-Tasten brauchen eine lokale Desktopsitzung. Der gemeinsame Installer
+unterstützt Bash, Fish und Zsh einschließlich Enter-Verzeichniswechsel.
+Der macOS-Einstieg verwendet standardmäßig Zsh. Die Build- und Release-Skripte
+verwenden Zsh. Siehe [Installationsanleitung](installation.de.md). Ohne Zsh werden auf Linux die
 Zsh-spezifischen Tests übersprungen. Die optionale Archiv-Prüfsummenprüfung
 benötigt zusätzlich `shasum` und wird ohne dieses Werkzeug übersprungen. Windows und andere als die erfassten OS-Versionen
 sind nicht validiert.
@@ -33,7 +34,7 @@ Jede Kombination protokolliert Interpreter-, Git- und Produktversion, Quellhash,
 Exit-Codes, Dauer und Testzahl. Full ist der Standard und enthält bestehende
 Sicherheits-, CLI- und Release-Fixtures. Core wählt nur die separat gepflegten
 Funktionsverträge; es ersetzt die vollständige Sicherheitssuite nicht.
-`--screens` prüft die sechs erzeugten Bilder. Keine Laufzeit wird installiert oder
+`--screens` prüft die acht erzeugten Bilder. Keine Laufzeit wird installiert oder
 aktualisiert. Temporäre PATH-Wrapper wählen das verlangte Git ohne globale
 Einstellungen. Fehlende oder zu alte Laufzeiten sind ein Fehler, kein übersprungener
 Erfolg.

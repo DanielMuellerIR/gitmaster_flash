@@ -1,21 +1,22 @@
 """Echte lokale Remotes: Pull-Quelle, Freigabe und abweichender Sync-Upstream."""
-import os
+
 import importlib.util
+import os
 import pty
 import select
-import sys
-import time
-from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import gitmaster_flash as gmf
 
-
 spec = importlib.util.spec_from_file_location(
-    "gmf_pull_screens", Path(gmf.__file__).parent / "docs/make-screens.py")
+    "gmf_pull_screens", Path(gmf.__file__).parent / "docs/make-screens.py"
+)
 screens = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(screens)
 
@@ -26,8 +27,9 @@ def cleanup_pty(pid, fd):
     try:
         os.close(fd)
     finally:
-        descendants += [later for later in screens._descendant_pids(pid)
-                        if later not in descendants]
+        descendants += [
+            later for later in screens._descendant_pids(pid) if later not in descendants
+        ]
         screens._terminate_pty_child(pid)
         screens._terminate_descendants(descendants)
 
@@ -36,8 +38,9 @@ class PullTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.env = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull,
-                                               "GIT_CONFIG_NOSYSTEM": "1"})
+        self.env = mock.patch.dict(
+            os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        )
         self.env.start()
         for name in ("origin.git", "mirror.git"):
             self.git(self.root, "init", "--bare", "-b", "main", name)
@@ -73,8 +76,9 @@ class PullTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def git(self, root, *args):
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                                text=True, timeout=10)
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
@@ -93,10 +97,13 @@ class PullTests(unittest.TestCase):
         hook.chmod(0o755)
         self.pull()
         self.assertTrue((self.repo / "incoming.txt").exists())
-        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"),
-                         self.git(self.peer, "rev-parse", "HEAD"))
-        self.assertEqual(self.git(self.repo, "rev-parse", "--symbolic-full-name", "@{upstream}"),
-                         "refs/remotes/mirror/main")
+        self.assertEqual(
+            self.git(self.repo, "rev-parse", "HEAD"), self.git(self.peer, "rev-parse", "HEAD")
+        )
+        self.assertEqual(
+            self.git(self.repo, "rev-parse", "--symbolic-full-name", "@{upstream}"),
+            "refs/remotes/mirror/main",
+        )
         self.assertFalse(hook_marker.exists())
         preview = "\n".join(self.ui.confirm_in_pager.call_args.args[1])
         self.assertIn("incoming", preview)
@@ -144,11 +151,14 @@ class PullTests(unittest.TestCase):
                 raise OSError(24, "Too many open files")
             return original_reader(repo, *args, **kwargs)
 
-        with mock.patch.object(gmf, "run_git_logged", side_effect=write), \
-             mock.patch.object(gmf, "run_git", side_effect=read):
+        with (
+            mock.patch.object(gmf, "run_git_logged", side_effect=write),
+            mock.patch.object(gmf, "run_git", side_effect=read),
+        ):
             self.pull()
-        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"),
-                         self.git(self.peer, "rev-parse", "HEAD"))
+        self.assertEqual(
+            self.git(self.repo, "rev-parse", "HEAD"), self.git(self.peer, "rev-parse", "HEAD")
+        )
         self.assertEqual(self.ui.message, gmf.t("pull_unknown"))
 
     def test_branch_reader_oserror_after_successful_merge_is_reported(self):
@@ -160,17 +170,20 @@ class PullTests(unittest.TestCase):
     def test_squash_config_cannot_change_fast_forward(self):
         self.git(self.repo, "config", "branch.main.mergeOptions", "--squash")
         self.pull()
-        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"),
-                         self.git(self.peer, "rev-parse", "HEAD"))
+        self.assertEqual(
+            self.git(self.repo, "rev-parse", "HEAD"), self.git(self.peer, "rev-parse", "HEAD")
+        )
         self.assertEqual(self.git(self.repo, "status", "--porcelain"), "")
         self.assertEqual(self.ui.message, gmf.t("pull_done", r="origin", b="main", n=1))
 
     def test_success_without_target_head_is_not_reported_as_pull(self):
         original = gmf.run_git_logged
+
         def no_merge(repo, *args, **kwargs):
             if "merge" in args:
                 return subprocess.CompletedProcess(args, 0, "", "")
             return original(repo, *args, **kwargs)
+
         with mock.patch.object(gmf, "run_git_logged", side_effect=no_merge):
             self.pull()
         self.assertFalse((self.repo / "incoming.txt").exists())
@@ -190,8 +203,12 @@ class PullTests(unittest.TestCase):
         self.git(self.repo, "commit", "-m", "local")
         self.git(self.peer, "push", "origin", "sequence")
         self.git(self.repo, "fetch", "origin")
-        result = subprocess.run(["git", "-C", str(self.repo), "cherry-pick", first, second],
-                                capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            ["git", "-C", str(self.repo), "cherry-pick", first, second],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         self.assertNotEqual(result.returncode, 0)
         (self.repo / "base.txt").write_text("resolved\n")
         self.git(self.repo, "add", "base.txt")
@@ -203,26 +220,32 @@ class PullTests(unittest.TestCase):
         self.pull()
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
         self.assertFalse(self.ui.confirm_in_pager.called)
-        self.assertEqual(gmf.inspect_transfer(self.repo, "origin", "main", "pull").reason,
-                         "operation-in-progress")
+        self.assertEqual(
+            gmf.inspect_transfer(self.repo, "origin", "main", "pull").reason,
+            "operation-in-progress",
+        )
 
     def test_aborted_pty_terminates_running_git_session(self):
         wrapper = self.root / "bin"
         wrapper.mkdir()
         pid_file = self.root / "git.pid"
         script = wrapper / "git"
-        script.write_text(f"#!{sys.executable}\nimport os,time\n"
-                          f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
-                          "time.sleep(120)\n")
+        script.write_text(
+            f"#!{sys.executable}\nimport os,time\n"
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
         script.chmod(0o755)
         pid, fd = pty.fork()
         if pid == 0:
             env = dict(os.environ, PATH=str(wrapper) + os.pathsep + os.environ["PATH"])
             # Wie beim echten CLI-Start einen frischen Interpreter ausführen.
             # Ein fork erbt sonst Sperren und Abbruchzustand der übrigen Tests.
-            code = (f"import sys; sys.path.insert(0, {str(Path(gmf.__file__).parent)!r}); "
-                    "from pathlib import Path; import gitmaster_flash as gmf; "
-                    f"gmf.run_git(Path({str(self.repo)!r}), 'ls-remote', 'origin', timeout=120)")
+            code = (
+                f"import sys; sys.path.insert(0, {str(Path(gmf.__file__).parent)!r}); "
+                "from pathlib import Path; import gitmaster_flash as gmf; "
+                f"gmf.run_git(Path({str(self.repo)!r}), 'ls-remote', 'origin', timeout=120)"
+            )
             os.execve(sys.executable, [sys.executable, "-c", code], env)
         git_pid = None
         try:
@@ -279,14 +302,17 @@ class PullTests(unittest.TestCase):
                 raise OSError("temporary fetch failure")
             return fetch(repo, remote, *args)
 
-        self.ui.all_statuses = [measured(repo, self.root, self.ui.cfg)
-                                for repo in (self.repo, other)]
+        self.ui.all_statuses = [
+            measured(repo, self.root, self.ui.cfg) for repo in (self.repo, other)
+        ]
         self.ui.status_view = "access"
         self.ui.apply_filter()
         self.ui.choose_pull_remote.return_value = ""
         other_refs = gmf.read_ref_snapshot(other, 10)
-        with mock.patch.object(gmf, "collect_status", side_effect=measured), \
-             mock.patch.object(gmf, "fetch_remote_safely", side_effect=fetched):
+        with (
+            mock.patch.object(gmf, "collect_status", side_effect=measured),
+            mock.patch.object(gmf, "fetch_remote_safely", side_effect=fetched),
+        ):
             self.pull()
         self.assertEqual([repo for repo, _ in calls], [self.repo, self.repo])
         self.assertEqual({name for _, name in calls}, {"origin", "mirror"})
@@ -312,9 +338,11 @@ class PullTests(unittest.TestCase):
 
     def test_branch_switch_to_same_oid_during_confirmation_stops_pull(self):
         self.git(self.repo, "branch", "other")
+
         def confirm(*args):
             self.git(self.repo, "switch", "other")
             return True
+
         self.ui.confirm_in_pager.side_effect = confirm
         self.pull()
         self.assertFalse((self.repo / "incoming.txt").exists())
@@ -326,6 +354,7 @@ class PullTests(unittest.TestCase):
             self.commit("newer")
             self.git(self.peer, "push", "origin", "main")
             return True
+
         self.ui.confirm_in_pager.side_effect = confirm
         self.pull()
         self.assertFalse((self.repo / "incoming.txt").exists())
@@ -336,8 +365,10 @@ class PullTests(unittest.TestCase):
         head = self.git(self.repo, "rev-parse", "HEAD")
         marker = self.repo / ".git/MERGE_HEAD"
         marker.write_text(head + "\n")
-        self.assertEqual(gmf.inspect_transfer(self.repo, "origin", "main", "pull").reason,
-                         "operation-in-progress")
+        self.assertEqual(
+            gmf.inspect_transfer(self.repo, "origin", "main", "pull").reason,
+            "operation-in-progress",
+        )
         marker.unlink()
         self.git(self.repo, "checkout", "--detach")
         self.pull()
@@ -366,8 +397,20 @@ class PullTests(unittest.TestCase):
         pid, fd = pty.fork()
         if pid == 0:
             env = dict(os.environ, TERM="xterm-256color", HOME=str(self.root / "test-home"))
-            os.execve(sys.executable, [sys.executable, str(Path(gmf.__file__)),
-                                     str(self.root), "--lang", "en", "--filter", "local"], env)
+            os.execve(
+                sys.executable,
+                [
+                    sys.executable,
+                    str(Path(gmf.__file__)),
+                    str(self.root),
+                    "--lang",
+                    "en",
+                    "--filter",
+                    "local",
+                ],
+                env,
+            )
+
         def until(marker):
             data = b""
             deadline = time.monotonic() + 15
@@ -382,6 +425,7 @@ class PullTests(unittest.TestCase):
                         break
                     data += chunk
             self.assertIn(marker, data, data[-1500:])
+
         try:
             until(b"L pull")
             os.write(fd, b"l")

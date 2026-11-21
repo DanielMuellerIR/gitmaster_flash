@@ -28,8 +28,6 @@ class MeasurementRefreshTests(unittest.TestCase):
         lang = patch.object(gmf, "UI_LANG", "en")
         lang.start()
         self.addCleanup(lang.stop)
-        gmf.resume_git_calls()
-        self.addCleanup(gmf.resume_git_calls)
         self.repo, self.bare = gmf._demo_repo(self.root, "project")
 
     def status(self, fetch=False, remote=None):
@@ -76,9 +74,11 @@ class MeasurementRefreshTests(unittest.TestCase):
         old = self.status(True)
         calls = []
         original = gmf.fetch_remote_safely
+
         def tracked(repo, remote, branch, timeout):
             calls.append(remote.name)
             return original(repo, remote, branch, timeout)
+
         with patch.object(gmf, "fetch_remote_safely", side_effect=tracked):
             new = self.status(True, "backup")
         self.assertEqual(calls, ["backup"])
@@ -102,10 +102,12 @@ class MeasurementRefreshTests(unittest.TestCase):
 
     def test_configuration_race_does_not_claim_successful_fetch(self):
         original = gmf.fetch_remote_safely
+
         def changed(repo, remote, branch, timeout):
             result = original(repo, remote, branch, timeout)
             gmf._dgit(repo, "config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*")
             return result
+
         with patch.object(gmf, "fetch_remote_safely", side_effect=changed):
             new = self.status(True)
         self.assertTrue(new.fetch_error)
@@ -135,14 +137,17 @@ class MeasurementRefreshTests(unittest.TestCase):
         self.assertEqual(gmf.measurement_age(""), "unknown")
         self.assertEqual(gmf.measurement_age(gmf.utc_now()), "<1m")
         now = datetime.datetime.now(datetime.timezone.utc)
-        self.assertEqual(gmf.measurement_age((now-datetime.timedelta(hours=3)).isoformat()), "3h")
-        self.assertEqual(gmf.measurement_age((now+datetime.timedelta(hours=3)).isoformat()), "clock changed")
+        self.assertEqual(gmf.measurement_age((now - datetime.timedelta(hours=3)).isoformat()), "3h")
+        self.assertEqual(
+            gmf.measurement_age((now + datetime.timedelta(hours=3)).isoformat()), "clock changed"
+        )
 
     def test_local_refresh_wins_over_scan_and_stop_keeps_completed_results(self):
         old = self.status()
         ui = self.ui(old)
         scan = Mock()
         import queue
+
         scan.queue = queue.Queue()
         scan.done = 0
         ui.scan = scan
@@ -160,7 +165,10 @@ class MeasurementRefreshTests(unittest.TestCase):
 
     def test_fetch_action_selects_remote_and_refuses_overlap_with_background(self):
         ui = self.ui(self.status())
-        with patch.object(ui, "choose_pull_remote", return_value="origin"), patch.object(ui, "show_busy"):
+        with (
+            patch.object(ui, "choose_pull_remote", return_value="origin"),
+            patch.object(ui, "show_busy"),
+        ):
             ui.dispatch_action("U")
         self.assertTrue(ui.current().remotes[0].fetched_at)
         ui.scan = Mock()
@@ -171,6 +179,7 @@ class MeasurementRefreshTests(unittest.TestCase):
     def test_cli_named_fetch_is_scoped_and_json_has_measurements(self):
         import io
         from contextlib import redirect_stdout
+
         output = io.StringIO()
         gmf._demo_extra_remote(self.root, self.repo, "backup")
         with patch.object(gmf, "load_config", return_value=self.cfg), redirect_stdout(output):
@@ -178,58 +187,63 @@ class MeasurementRefreshTests(unittest.TestCase):
         self.assertEqual(code, 0)
         data = json.loads(output.getvalue())["repos"][0]
         self.assertTrue(data["measured_at"])
-        times = {r["name"]:r["fetched_at"] for r in data["remotes"]}
+        times = {r["name"]: r["fetched_at"] for r in data["remotes"]}
         self.assertTrue(times["backup"])
         self.assertEqual(times["origin"], "")
 
 
 class ScopedCancellationTests(unittest.TestCase):
-    def setUp(self):
-        gmf.resume_git_calls()
-        self.addCleanup(gmf.resume_git_calls)
-
     def test_scan_cancellation_leaves_independent_process_and_next_scan_alive(self):
         scope = gmf.GitCallScope()
+        foreground_scope = gmf.GitCallScope()
         results = {}
-        def run(key, owned):
+
+        def run(key, owner):
             def call():
-                return gmf._run_process_group([sys.executable, "-c", "import time; time.sleep(30)"],
-                                               stdin=subprocess.DEVNULL, timeout=35)
-            results[key] = scope.call(call) if owned else call()
-        background = threading.Thread(target=run, args=("scan", True))
-        foreground = threading.Thread(target=run, args=("foreground", False))
+                return gmf._run_process_group(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdin=subprocess.DEVNULL,
+                    timeout=35,
+                )
+
+            results[key] = owner.call(call)
+
+        background = threading.Thread(target=run, args=("scan", scope))
+        foreground = threading.Thread(target=run, args=("foreground", foreground_scope))
         background.start()
         foreground.start()
         self.addCleanup(background.join, 5)
         self.addCleanup(foreground.join, 5)
-        self.addCleanup(gmf.cancel_git_calls)
-        deadline = time.monotonic()+5
-        while time.monotonic()<deadline:
-            with gmf._LIVE_LOCK:
-                live = list(gmf._LIVE_PROCESSES)
+        self.addCleanup(scope.cancel)
+        self.addCleanup(foreground_scope.cancel)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with scope.lock, foreground_scope.lock:
+                independent = list(foreground_scope.processes)
                 owned = list(scope.processes)
-            if len(live)==2 and len(owned)==1:
+            if len(independent) == 1 and len(owned) == 1:
                 break
-            time.sleep(.01)
-        self.assertEqual(len(live), 2)
-        outside = next(proc for proc in live if proc not in owned)
+            time.sleep(0.01)
+        self.assertEqual(len(owned), 1)
+        self.assertEqual(len(independent), 1)
+        outside = independent[0]
         scope.cancel()
         background.join(5)
         self.assertFalse(background.is_alive())
         self.assertIsNone(outside.poll(), "unabhängige Aktion wurde beendet")
-        self.assertFalse(gmf._CANCEL.is_set())
         with self.assertRaises(gmf.GitCancelled), patch.object(gmf.subprocess, "Popen") as popen:
             scope.call(gmf.run_git, Path("."), "status")
         popen.assert_not_called()
         other = gmf.GitCallScope()
         done = other.call(
-            lambda: gmf._run_process_group(["/bin/echo", "ok"], stdin=subprocess.DEVNULL, timeout=5))
+            lambda: gmf._run_process_group(["/bin/echo", "ok"], stdin=subprocess.DEVNULL, timeout=5)
+        )
         self.assertEqual(done.stdout.strip(), "ok")
-        gmf._kill_process_group(outside)
+        foreground_scope.cancel()
         foreground.join(5)
         self.assertFalse(foreground.is_alive())
         self.assertFalse(scope.processes)
-        self.assertFalse(gmf._LIVE_PROCESSES)
+        self.assertFalse(foreground_scope.processes)
 
     def test_scope_is_restored_after_failure(self):
         scope = gmf.GitCallScope()

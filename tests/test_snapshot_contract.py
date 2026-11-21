@@ -6,15 +6,15 @@ import json
 import os
 import pty
 import select
-import signal
-import time
-from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 import gitmaster_flash as g
@@ -30,8 +30,14 @@ class SnapshotContractTests(unittest.TestCase):
         self.addCleanup(language.stop)
 
     def status(self, name="project", **kwargs):
-        return g.RepoStatus(self.root / name, name, branch="main", head_oid="a" * 40,
-                            measured_at="2020-01-01T00:00:00+00:00", **kwargs)
+        return g.RepoStatus(
+            self.root / name,
+            name,
+            branch="main",
+            head_oid="a" * 40,
+            measured_at="2020-01-01T00:00:00+00:00",
+            **kwargs,
+        )
 
     def snapshot(self, statuses=None):
         return g.make_snapshot(self.root, [self.status()] if statuses is None else statuses)
@@ -44,12 +50,16 @@ class SnapshotContractTests(unittest.TestCase):
     def compare(self, here, there, *options):
         left, right = self.file("here.json", here), self.file("there.json", there)
         output, error = io.StringIO(), io.StringIO()
-        with patch.object(g, "load_config", side_effect=AssertionError("config read")), \
-                patch.object(g, "collect_all", side_effect=AssertionError("scan")), \
-                patch.object(g, "fetch_remote_status", side_effect=AssertionError("SSH")), \
-                redirect_stdout(output), redirect_stderr(error):
-            code = g.main(["/nonexistent-root", "--compare", str(left), str(right),
-                           "--lang", "en", *options])
+        with (
+            patch.object(g, "load_config", side_effect=AssertionError("config read")),
+            patch.object(g, "collect_all", side_effect=AssertionError("scan")),
+            patch.object(g, "fetch_remote_status", side_effect=AssertionError("SSH")),
+            redirect_stdout(output),
+            redirect_stderr(error),
+        ):
+            code = g.main(
+                ["/nonexistent-root", "--compare", str(left), str(right), "--lang", "en", *options]
+            )
         return code, output.getvalue(), error.getvalue()
 
     def test_findings_are_language_independent_and_keep_raw_unborn_identity(self):
@@ -63,8 +73,12 @@ class SnapshotContractTests(unittest.TestCase):
             with patch.object(g, "UI_LANG", language):
                 findings = g.diff_findings(left, right, "same", "same")
                 messages.append([finding["message"] for finding in findings])
-                results.append([{key: value for key, value in finding.items() if key != "message"}
-                                for finding in findings])
+                results.append(
+                    [
+                        {key: value for key, value in finding.items() if key != "message"}
+                        for finding in findings
+                    ]
+                )
                 self.assertEqual(g.diff_status(left, right, "same", "same"), messages[-1])
         self.assertEqual(results[0], results[1])
         self.assertNotEqual(messages[0], messages[1])
@@ -85,8 +99,15 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertTrue(all(row["values"]["count"] == 1 for row in failed))
 
     def test_equal_public_content_does_not_create_shared_sync_work(self):
-        remote = g.RemoteStatus("github", public=True, is_sync=True,
-                                branch_exists=True, ahead=9, behind=2, content_equal=True)
+        remote = g.RemoteStatus(
+            "github",
+            public=True,
+            is_sync=True,
+            branch_exists=True,
+            ahead=9,
+            behind=2,
+            content_equal=True,
+        )
         payload = self.snapshot([self.status(remote="github", ahead=9, behind=2, remotes=[remote])])
         self.assertEqual(g.diff_findings(payload, payload, "here", "there"), [])
         code, output, error = self.compare(payload, payload, "--json")
@@ -94,10 +115,14 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(json.loads(output)["findings"], [])
         output = io.StringIO()
         st = self.status(remote="github", ahead=9, behind=2, remotes=[remote])
-        with patch.object(g, "collect_all", return_value=[st]), patch.object(
-                g, "fetch_remote_status", return_value=payload), redirect_stdout(output):
-            self.assertEqual(g.run_diff("example", self.root, g.DEFAULT_CONFIG,
-                                        fetch=False, as_json=True), 0)
+        with (
+            patch.object(g, "collect_all", return_value=[st]),
+            patch.object(g, "fetch_remote_status", return_value=payload),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                g.run_diff("example", self.root, g.DEFAULT_CONFIG, fetch=False, as_json=True), 0
+            )
         self.assertEqual(json.loads(output.getvalue())["findings"], [])
         for legacy in (False, True):
             other = copy.deepcopy(payload)
@@ -105,14 +130,18 @@ class SnapshotContractTests(unittest.TestCase):
                 other["repos"][0]["remotes"][0].pop("content_equal")
             else:
                 other["repos"][0]["remotes"][0]["public"] = False
-            self.assertIn("sync_even", [r["type"] for r in g.diff_findings(other, other, "here", "there")])
+            self.assertIn(
+                "sync_even", [r["type"] for r in g.diff_findings(other, other, "here", "there")]
+            )
 
     def test_content_inspection_failure_is_local_on_each_affected_side(self):
         remote = g.RemoteStatus("github", public=True, branch_exists=True, content_equal=True)
         healthy = self.snapshot([self.status(remotes=[remote])])
         for side in ("here", "there"):
             broken = copy.deepcopy(healthy)
-            broken["repos"][0]["remotes"][0].update(content_equal=None, content_error="cannot read tree")
+            broken["repos"][0]["remotes"][0].update(
+                content_equal=None, content_error="cannot read tree"
+            )
             left, right = (broken, healthy) if side == "here" else (healthy, broken)
             code, output, error = self.compare(left, right, "--json", "--view", "access")
             self.assertEqual(code, 1, error)
@@ -128,12 +157,18 @@ class SnapshotContractTests(unittest.TestCase):
         broken["repos"][0]["fetch_error"] = True
         broken["repos"][0]["remotes"][0]["fetch_failed"] = True
         findings = g.diff_findings(broken, healthy, "here", "there")
-        self.assertEqual({r["type"] for r in findings},
-                         {"publication_inspection_failed", "fetch_failed_side"})
+        self.assertEqual(
+            {r["type"] for r in findings}, {"publication_inspection_failed", "fetch_failed_side"}
+        )
 
     def test_different_checked_out_branches_do_not_create_remote_delta_drift(self):
-        here = self.snapshot([self.status(remotes=[g.RemoteStatus("origin", branch_exists=True,
-                                                                ahead=1, is_sync=True)])])
+        here = self.snapshot(
+            [
+                self.status(
+                    remotes=[g.RemoteStatus("origin", branch_exists=True, ahead=1, is_sync=True)]
+                )
+            ]
+        )
         there = copy.deepcopy(here)
         there["repos"][0]["branch"] = "topic"
         there["repos"][0]["remotes"][0]["ahead"] = 7
@@ -142,8 +177,17 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(findings[0]["values"], {"here_branch": "main", "there_branch": "topic"})
 
     def test_security_findings_name_changed_fields_without_exporting_urls(self):
-        here = self.snapshot([self.status(remotes=[g.RemoteStatus("origin", branch_exists=True,
-                                                                fetch_fingerprints=["opaque-a"])])])
+        here = self.snapshot(
+            [
+                self.status(
+                    remotes=[
+                        g.RemoteStatus(
+                            "origin", branch_exists=True, fetch_fingerprints=["opaque-a"]
+                        )
+                    ]
+                )
+            ]
+        )
         there = copy.deepcopy(here)
         there["repos"][0]["remotes"][0]["fetch_fingerprints"] = ["opaque-b"]
         there["repos"][0]["remotes"][0]["url"] = "https://user:secret-token@example.invalid/repo"
@@ -177,7 +221,9 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(report["findings"], [])
         self.assertEqual(report["differences"], [])
         self.assertEqual(report["sources"]["there"]["generated_at"], "2022-01-01T00:00:00Z")
-        self.assertEqual(report["sources"]["there"]["local_measurement"]["earliest"], "2021-01-01T00:00:00Z")
+        self.assertEqual(
+            report["sources"]["there"]["local_measurement"]["earliest"], "2021-01-01T00:00:00Z"
+        )
         self.assertNotIn("\x1b", output)
 
     def test_legacy_object_snapshots_are_accepted_with_explicit_limits(self):
@@ -186,9 +232,15 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         report = json.loads(output)
         self.assertEqual(report["findings"], [])
-        self.assertEqual({row["code"] for row in report["limitations"]}, {
-            "legacy_schema", "head_identity_unknown", "branch_inventory_unknown",
-            "local_measurement_unknown"})
+        self.assertEqual(
+            {row["code"] for row in report["limitations"]},
+            {
+                "legacy_schema",
+                "head_identity_unknown",
+                "branch_inventory_unknown",
+                "local_measurement_unknown",
+            },
+        )
         code, output, error = self.compare(payload, payload)
         self.assertEqual(code, 0, error)
         self.assertIn("legacy JSON", output)
@@ -227,9 +279,12 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual([row["type"] for row in data["findings"]], ["dirty"])
 
     def test_future_schema_malformed_json_and_duplicate_keys_are_rejected(self):
-        for text in ('{"version":"x","version":"y","repos":[]}',
-                     '{"version":"x","repos":[],"extra":NaN}',
-                     '{"version":"x","repos":[],"extra":Infinity}', '{broken'):
+        for text in (
+            '{"version":"x","version":"y","repos":[]}',
+            '{"version":"x","repos":[],"extra":NaN}',
+            '{"version":"x","repos":[],"extra":Infinity}',
+            "{broken",
+        ):
             path = self.root / "bad.json"
             path.write_text(text)
             with self.assertRaises(ValueError):
@@ -255,9 +310,29 @@ class SnapshotContractTests(unittest.TestCase):
         broken["view"] = {"id": "all", "matches": 1, "total": 6, "hidden_attention": 0}
         self.assertFalse(g._valid_remote_payload(broken))
 
+    def test_schema_error_identifies_a_nested_field_without_echoing_input(self):
+        payload = self.snapshot(
+            [self.status("incoming-repo-name", remotes=[g.RemoteStatus("incoming-remote-name")])]
+        )
+        payload["repos"][0]["remotes"][0]["ahead"] = "incoming-invalid-value\x1b[31m"
+        expected_path = "repos[0].remotes[0].ahead"
+
+        code, output, offline_error = self.compare(payload, self.snapshot(), "--json")
+        self.assertEqual(code, 2)
+        self.assertEqual(output, "")
+        result = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with patch.object(g, "_run_process_group", return_value=result):
+            with self.assertRaises(RuntimeError) as error:
+                g.fetch_remote_status("example", "~/projects", fetch=False)
+        for error_text in (offline_error, str(error.exception)):
+            with self.subTest(error=error_text):
+                self.assertIn(expected_path, error_text)
+                self.assertNotIn("incoming-", error_text)
+                self.assertNotIn("\x1b", error_text)
+
     def test_overflowed_json_numbers_are_rejected_in_unknown_nested_fields(self):
         for number in ("1e999", "-1e999", "1.5e999", "-1.5e999"):
-            text = '{"version":"x","repos":[],"extra":{"nested":[' + number + ']}}'
+            text = '{"version":"x","repos":[],"extra":{"nested":[' + number + "]}}"
             path = self.root / "overflow.json"
             path.write_text(text, encoding="utf-8")
             for language in ("en", "de"):
@@ -267,8 +342,9 @@ class SnapshotContractTests(unittest.TestCase):
                             g.parse_snapshot_json(text)
                     output, error = io.StringIO(), io.StringIO()
                     with redirect_stdout(output), redirect_stderr(error):
-                        code = g.main(["--compare", str(path), str(path),
-                                       "--json", "--lang", language])
+                        code = g.main(
+                            ["--compare", str(path), str(path), "--json", "--lang", language]
+                        )
                     self.assertEqual(code, 2)
                     self.assertEqual(output.getvalue(), "")
                     self.assertTrue(error.getvalue())
@@ -313,7 +389,10 @@ class SnapshotContractTests(unittest.TestCase):
 
     def test_compare_rejects_network_options_before_reading_or_creating_config(self):
         output = io.StringIO()
-        with patch.object(g, "load_config", side_effect=AssertionError("config")), redirect_stderr(output):
+        with (
+            patch.object(g, "load_config", side_effect=AssertionError("config")),
+            redirect_stderr(output),
+        ):
             with self.assertRaises(SystemExit) as stopped:
                 g.main(["--compare", "one.json", "two.json", "--fetch", "--lang", "de"])
         self.assertEqual(stopped.exception.code, 2)
@@ -321,9 +400,12 @@ class SnapshotContractTests(unittest.TestCase):
 
     def test_color_policy_is_explicit_and_json_stays_plain(self):
         for policy, terminal, no_color, expected in (
-                ("auto", False, False, False), ("auto", True, False, True),
-                ("auto", True, True, False), ("always", False, True, True),
-                ("never", True, False, False)):
+            ("auto", False, False, False),
+            ("auto", True, False, True),
+            ("auto", True, True, False),
+            ("always", False, True, True),
+            ("never", True, False, False),
+        ):
             output = io.StringIO()
             output.isatty = lambda: terminal
             environment = {"NO_COLOR": ""} if no_color else {}
@@ -356,17 +438,35 @@ class SnapshotContractTests(unittest.TestCase):
         marker = self.root / "unexpected-command"
         for name in ("git", "ssh"):
             executable = binaries / name
-            executable.write_text("#!/bin/sh\nprintf called > " + shlex.quote(str(marker)) + "\nexit 99\n")
+            executable.write_text(
+                "#!/bin/sh\nprintf called > " + shlex.quote(str(marker)) + "\nexit 99\n"
+            )
             executable.chmod(0o755)
-        environment = dict(os.environ, PATH=str(binaries), HOME=str(home), PYTHONDONTWRITEBYTECODE="1")
-        result = subprocess.run([sys.executable, g.__file__, "--compare", str(left), str(right),
-                                 "--json", "--lang", "en"], env=environment, capture_output=True,
-                                text=True, timeout=15)
+        environment = dict(
+            os.environ, PATH=str(binaries), HOME=str(home), PYTHONDONTWRITEBYTECODE="1"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                g.__file__,
+                "--compare",
+                str(left),
+                str(right),
+                "--json",
+                "--lang",
+                "en",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
         self.assertEqual(result.returncode, 1, result.stderr)
         report = json.loads(result.stdout)
         self.assertTrue(any(row["type"] == "head" for row in report["findings"]))
         self.assertFalse(marker.exists())
         self.assertFalse((home / ".config").exists())
+
     def test_list_auto_color_uses_a_real_pty_and_stays_plain_in_a_pipe(self):
         with patch.dict(os.environ, g._demo_env(), clear=True):
             repo, _ = g._demo_repo(self.root, "terminal")
@@ -379,14 +479,20 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(piped.returncode, 0, piped.stderr)
         self.assertNotIn(b"\x1b[", piped.stdout)
         master, slave = pty.openpty()
-        proc = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
-                                stdout=slave, stderr=slave, start_new_session=True)
+        proc = subprocess.Popen(
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+        )
         os.close(slave)
         output = bytearray()
         try:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                ready, _, _ = select.select([master], [], [], .1)
+                ready, _, _ = select.select([master], [], [], 0.1)
                 if not ready:
                     continue
                 try:
@@ -405,7 +511,6 @@ class SnapshotContractTests(unittest.TestCase):
             if proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
-
 
 
 if __name__ == "__main__":

@@ -64,10 +64,22 @@ CSI = re.compile(r"\x1b\[([?0-9;]*)([A-Za-z`@])")
 FG = "#d8d8d8"
 BG = "#1c1c1c"
 ANSI = {
-    30: "#3b3b3b", 31: "#e06c75", 32: "#98c379", 33: "#e5c07b",
-    34: "#61afef", 35: "#c678dd", 36: "#56b6c2", 37: "#d8d8d8",
-    90: "#7f7f7f", 91: "#e06c75", 92: "#98c379", 93: "#e5c07b",
-    94: "#61afef", 95: "#c678dd", 96: "#56b6c2", 97: "#ffffff",
+    30: "#3b3b3b",
+    31: "#e06c75",
+    32: "#98c379",
+    33: "#e5c07b",
+    34: "#61afef",
+    35: "#c678dd",
+    36: "#56b6c2",
+    37: "#d8d8d8",
+    90: "#7f7f7f",
+    91: "#e06c75",
+    92: "#98c379",
+    93: "#e5c07b",
+    94: "#61afef",
+    95: "#c678dd",
+    96: "#56b6c2",
+    97: "#ffffff",
 }
 
 # Flächenfarben (ESC[4xm). Deliberately deeper than the foreground tones above: a
@@ -75,10 +87,22 @@ ANSI = {
 # foreground shades would wash out under text — the TUI puts white text on red for
 # the selected line, and on #e06c75 that would be barely readable.
 ANSI_BG = {
-    40: "#1c1c1c", 41: "#a11c26", 42: "#3f7d3f", 43: "#8a6d1f",
-    44: "#2f5d9e", 45: "#7d3f8a", 46: "#1f6d75", 47: "#d8d8d8",
-    100: "#3b3b3b", 101: "#a11c26", 102: "#3f7d3f", 103: "#8a6d1f",
-    104: "#2f5d9e", 105: "#7d3f8a", 106: "#1f6d75", 107: "#ffffff",
+    40: "#1c1c1c",
+    41: "#a11c26",
+    42: "#3f7d3f",
+    43: "#8a6d1f",
+    44: "#2f5d9e",
+    45: "#7d3f8a",
+    46: "#1f6d75",
+    47: "#d8d8d8",
+    100: "#3b3b3b",
+    101: "#a11c26",
+    102: "#3f7d3f",
+    103: "#8a6d1f",
+    104: "#2f5d9e",
+    105: "#7d3f8a",
+    106: "#1f6d75",
+    107: "#ffffff",
 }
 
 
@@ -97,17 +121,17 @@ def _split_keys(keys: bytes) -> list:
     KEY_DOWN, but only if it is not glued to the next keypress."""
     out, i = [], 0
     while i < len(keys):
-        if keys[i:i + 2] == b"\x1b[":
+        if keys[i : i + 2] == b"\x1b[":
             j = i + 2
             while j < len(keys) and not (0x40 <= keys[j] <= 0x7E):
                 j += 1
-            out.append(keys[i:j + 1])
+            out.append(keys[i : j + 1])
             i = j + 1
-        elif keys[i:i + 2] == b"\x1bO":              # application cursor keys
-            out.append(keys[i:i + 3])
+        elif keys[i : i + 2] == b"\x1bO":  # application cursor keys
+            out.append(keys[i : i + 3])
             i += 3
         else:
-            out.append(keys[i:i + 1])
+            out.append(keys[i : i + 1])
             i += 1
     return out
 
@@ -117,11 +141,16 @@ class Cell:
 
     def __init__(self):
         self.ch, self.fg, self.bold, self.rev = " ", FG, False, False
-        self.bg = None                                   # None = window background
+        self.bg = None  # None = window background
 
 
-def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
-                    first_wait: float = 60.0, marker: bytes | None = None) -> bytes:
+def _read_pty_until(
+    fd: int,
+    quiet: float = 0.5,
+    cap: float = 90.0,
+    first_wait: float = 60.0,
+    marker: bytes | None = None,
+) -> bytes:
     """Read a pty until its output has reached ``marker`` and then settled.
 
     A quiet period alone is not enough after a confirmed Git action: a hook or Git
@@ -156,10 +185,10 @@ def _read_pty_until(fd: int, quiet: float = 0.5, cap: float = 90.0,
         now = time.monotonic()
         if last is None:
             if now - start > first_wait:
-                break                            # nothing ever came
+                break  # nothing ever came
             continue
         if marker_seen and now - last >= quiet:
-            return got                           # expected state has settled
+            return got  # expected state has settled
 
     if marker is not None and not marker_seen:
         shown = marker.decode("utf-8", "backslashreplace")
@@ -186,8 +215,9 @@ def _descendant_pids(pid: int) -> list[int]:
     verlangt. Die Eltern-Kind-Kette in `ps` verbindet sie dagegen weiterhin.
     """
     try:
-        listing = subprocess.run(["ps", "-Ao", "pid=,ppid="],
-                                 capture_output=True, text=True, timeout=10)
+        listing = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, timeout=10
+        )
     except (OSError, subprocess.SubprocessError):
         return []
     children: dict[int, list[int]] = {}
@@ -217,6 +247,7 @@ def _terminate_descendants(pids: list[int]) -> None:
     (`waitpid`); nach dem Signal übernimmt init sie. `os.kill(pid, 0)` fragt nur
     ab, ob es den Prozess noch gibt.
     """
+
     def alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)
@@ -264,16 +295,27 @@ def _terminate_pty_child(pid: int) -> None:
         pass
 
 
-def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
-                   cols: int = COLS, rows: int = ROWS,
-                   ready_marker: bytes | None = None,
-                   key_markers: dict[int, bytes] | None = None) -> list:
+def _render_in_pty(
+    args: list,
+    keys: bytes,
+    settle: float,
+    owned_tmp: str,
+    cols: int = COLS,
+    rows: int = ROWS,
+    ready_marker: bytes | None = None,
+    key_markers: dict[int, bytes] | None = None,
+) -> list:
     """Run the program in a pty, feed `keys`, return the final screen as a Cell grid."""
     pid, fd = pty.fork()
-    if pid == 0:                                    # child
-        os.environ.update(TERM="xterm-256color", LINES=str(rows), COLUMNS=str(cols),
-                          LANG="en_US.UTF-8", TMPDIR=owned_tmp,
-                          GMF_SCREEN_CAPTURE="1")
+    if pid == 0:  # child
+        os.environ.update(
+            TERM="xterm-256color",
+            LINES=str(rows),
+            COLUMNS=str(cols),
+            LANG="en_US.UTF-8",
+            TMPDIR=owned_tmp,
+            GMF_SCREEN_CAPTURE="1",
+        )
         os.execvp(sys.executable, [sys.executable, str(GMF)] + args)
 
     buf = b""
@@ -297,9 +339,9 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
         # mehr und ließe sie laufen.
         descendants = _descendant_pids(pid)
         try:
-            os.write(fd, b"q")                      # quit the TUI
+            os.write(fd, b"q")  # quit the TUI
         except OSError:
-            pass                                    # already gone — fine
+            pass  # already gone — fine
         time.sleep(0.2)
         try:
             os.close(fd)
@@ -308,8 +350,9 @@ def _render_in_pty(args: list, keys: bytes, settle: float, owned_tmp: str,
         # Zweiter Blick für alles, was das Kind zwischen Schnappschuss und
         # Schließen noch gestartet hat. Ein PID doppelt zu beenden schadet
         # nicht, einen zu übersehen schon.
-        descendants = descendants + [later for later in _descendant_pids(pid)
-                                     if later not in descendants]
+        descendants = descendants + [
+            later for later in _descendant_pids(pid) if later not in descendants
+        ]
         # Immer genau das Kind begrenzt einsammeln. Ein ignoriertes SIGTERM darf
         # weder den Generator noch den nächsten Screenshot blockieren.
         _terminate_pty_child(pid)
@@ -329,14 +372,13 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
     screen as text or, worse, the following line is drawn in the wrong row.
 
     Kept separate from the pty plumbing on purpose: this way the replay is testable
-    without a child process (see tests/test_gitmaster_flash.py).
+    without a child process (see tests/test_terminal_integration.py).
     """
     # Die Transferbefehle verwenden absichtlich einen zufälligen Einmal-Alias,
     # damit keine vorhandene URL-Umschreibungsregel das geprüfte Ziel umleiten
     # kann. Für reproduzierbare Referenzbilder bleibt seine Länge gleich, nur
     # der zufällige Hexteil wird im Bild vereinheitlicht.
-    text = re.sub(
-        r"gmf-pin-[0-9a-f]{32}", "gmf-pin-" + "0" * 32, text)
+    text = re.sub(r"gmf-pin-[0-9a-f]{32}", "gmf-pin-" + "0" * 32, text)
     grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
     cy = cx = 0
     cur_fg, cur_bold, cur_rev = FG, False, False
@@ -352,18 +394,17 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
         top, bottom = scroll_top, min(scroll_bottom, rows - 1)
         if top > bottom or not amount:
             return
-        block = grid[top:bottom + 1]
+        block = grid[top : bottom + 1]
         blank = abs(amount)
         if blank >= len(block):
             moved = []
-        elif amount > 0:                            # nach oben
+        elif amount > 0:  # nach oben
             moved = block[amount:]
-        else:                                       # nach unten
+        else:  # nach unten
             moved = block[:amount]
-        fresh = [[Cell() for _ in range(cols)] for _ in range(
-            min(blank, len(block)))]
+        fresh = [[Cell() for _ in range(cols)] for _ in range(min(blank, len(block)))]
         block = (moved + fresh) if amount > 0 else (fresh + moved)
-        grid[top:bottom + 1] = block
+        grid[top : bottom + 1] = block
 
     i = 0
     while i < len(text):
@@ -377,19 +418,19 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 i = m.end()
                 continue
             nums = [int(x) for x in params.split(";") if x.isdigit()]
-            first = nums[0] if nums else 1           # most commands default to 1
-            if cmd in ("H", "f"):                   # cursor home / absolute row;col
+            first = nums[0] if nums else 1  # most commands default to 1
+            if cmd in ("H", "f"):  # cursor home / absolute row;col
                 cy = (nums[0] - 1) if nums else 0
                 cx = (nums[1] - 1) if len(nums) > 1 else 0
-            elif cmd == "d":                        # absolute row, column unchanged
+            elif cmd == "d":  # absolute row, column unchanged
                 # ncurses reaches for this one a lot (ESC[34d for the footer). Without
                 # it the cursor stayed put and whole lines were drawn over each other —
                 # the footer used to end up right below the list instead of at the
                 # bottom of the window.
                 cy = first - 1
-            elif cmd in ("G", "`"):                 # absolute column, row unchanged
+            elif cmd in ("G", "`"):  # absolute column, row unchanged
                 cx = first - 1
-            elif cmd == "A":                        # cursor up / down / right / left
+            elif cmd == "A":  # cursor up / down / right / left
                 cy -= first
             elif cmd == "B":
                 cy += first
@@ -397,11 +438,11 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 cx += first
             elif cmd == "D":
                 cx -= first
-            elif cmd == "X":                        # erase n cells, cursor stays
+            elif cmd == "X":  # erase n cells, cursor stays
                 for x in range(cx, min(cols, cx + first)):
                     grid[cy][x] = Cell()
-            elif cmd == "m":                        # colours / attributes
-                for n in (nums or [0]):
+            elif cmd == "m":  # colours / attributes
+                for n in nums or [0]:
                     if n == 0:
                         cur_fg, cur_bold, cur_rev = FG, False, False
                         cur_bg = None
@@ -409,7 +450,7 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                         cur_bold = True
                     elif n == 7:
                         cur_rev = True
-                    elif n == 49:                       # background back to default
+                    elif n == 49:  # background back to default
                         cur_bg = None
                     elif n in ANSI_BG:
                         # A colour pair with a real background (the TUI uses one for
@@ -418,11 +459,11 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                         cur_bg = ANSI_BG[n]
                     elif n in ANSI:
                         cur_fg = ANSI[n]
-            elif cmd == "J":                        # erase display
+            elif cmd == "J":  # erase display
                 mode = nums[0] if nums else 0
-                if mode == 2:                       # whole screen
+                if mode == 2:  # whole screen
                     grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
-                elif mode == 0:                     # cursor -> end of screen
+                elif mode == 0:  # cursor -> end of screen
                     # curses sends the parameterless ESC[J when a new view (commit
                     # helper, pager) replaces the list. Ignoring it left the old
                     # overview bleeding through the new screen.
@@ -430,22 +471,22 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                         grid[cy][x] = Cell()
                     for y in range(cy + 1, rows):
                         grid[y] = [Cell() for _ in range(cols)]
-                elif mode == 1:                     # start of screen -> cursor
+                elif mode == 1:  # start of screen -> cursor
                     for y in range(0, cy):
                         grid[y] = [Cell() for _ in range(cols)]
                     for x in range(0, cx + 1):
                         grid[cy][x] = Cell()
-            elif cmd == "r":                        # Scrollbereich setzen (DECSTBM)
+            elif cmd == "r":  # Scrollbereich setzen (DECSTBM)
                 scroll_top = (nums[0] - 1) if nums else 0
                 scroll_bottom = (nums[1] - 1) if len(nums) > 1 else rows - 1
                 scroll_top = max(0, min(rows - 1, scroll_top))
                 scroll_bottom = max(scroll_top, min(rows - 1, scroll_bottom))
-                cy = cx = 0                         # DECSTBM setzt den Cursor heim
-            elif cmd == "S":                        # Bereich nach oben scrollen
+                cy = cx = 0  # DECSTBM setzt den Cursor heim
+            elif cmd == "S":  # Bereich nach oben scrollen
                 scroll(first)
-            elif cmd == "T":                        # Bereich nach unten scrollen
+            elif cmd == "T":  # Bereich nach unten scrollen
                 scroll(-first)
-            elif cmd in ("L", "M"):                 # Zeilen einfuegen / loeschen
+            elif cmd in ("L", "M"):  # Zeilen einfuegen / loeschen
                 # Beides wirkt wie ein Scrollen des Bereichs UNTERHALB des
                 # Cursors; ausserhalb des Scrollbereichs tut es nichts.
                 if scroll_top <= cy <= scroll_bottom:
@@ -453,10 +494,11 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                     scroll_top = cy
                     scroll(-first if cmd == "L" else first)
                     scroll_top = keep_top
-            elif cmd == "K":                        # erase line
+            elif cmd == "K":  # erase line
                 mode = nums[0] if nums else 0
-                rng = (range(cx, cols) if mode == 0 else
-                       range(0, cx + 1) if mode == 1 else range(cols))
+                rng = (
+                    range(cx, cols) if mode == 0 else range(0, cx + 1) if mode == 1 else range(cols)
+                )
                 for x in rng:
                     grid[cy][x] = Cell()
             # A terminal parks the cursor at the edge instead of leaving the screen;
@@ -500,10 +542,10 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 cx = 0
             else:
                 cy, cx = min(cy + 1, rows - 1), 0
-        elif ch == "\x08":                          # backspace: one cell to the left
+        elif ch == "\x08":  # backspace: one cell to the left
             cx = max(0, cx - 1)
         elif ch == "\x1b":
-            i += 1                                  # unknown escape: skip the byte
+            i += 1  # unknown escape: skip the byte
         elif ch >= " " and 0 <= cy < rows and 0 <= cx < cols:
             width = cell_width(ch)
             if width == 0 and cx > 0:
@@ -518,27 +560,30 @@ def replay(text: str, cols: int = COLS, rows: int = ROWS) -> list:
                 # der markierten Zeile mitten im Namen auf.
                 for extra in range(1, min(width, cols - cx)):
                     c = grid[cy][cx + extra]
-                    c.ch, c.fg, c.bold, c.rev, c.bg = (
-                        " ", cur_fg, cur_bold, cur_rev, cur_bg)
+                    c.ch, c.fg, c.bold, c.rev, c.bg = (" ", cur_fg, cur_bold, cur_rev, cur_bg)
                 cx += width
         i += 1
     return grid
 
 
-def render_in_pty(args: list, keys: bytes = b"", settle: float = 1.8,
-                  cols: int = COLS, rows: int = ROWS,
-                  ready_marker: bytes | None = None,
-                  key_markers: dict[int, bytes] | None = None) -> list:
+def render_in_pty(
+    args: list,
+    keys: bytes = b"",
+    settle: float = 1.8,
+    cols: int = COLS,
+    rows: int = ROWS,
+    ready_marker: bytes | None = None,
+    key_markers: dict[int, bytes] | None = None,
+) -> list:
     """Render inside one owned TMPDIR and clean exactly that directory in all cases."""
     # Keep the securely created unique path short enough that the complete demo
     # root and status summary both fit into the captured header before _tidy().
     with tempfile.TemporaryDirectory(prefix="gmfs-", dir="/tmp") as owned_tmp:
-        return _render_in_pty(args, keys, settle, owned_tmp, cols, rows,
-                              ready_marker, key_markers)
+        return _render_in_pty(args, keys, settle, owned_tmp, cols, rows, ready_marker, key_markers)
 
 
 def _set_line(row: list, text: str) -> None:
-    text = text.ljust(len(row))[:len(row)]
+    text = text.ljust(len(row))[: len(row)]
     for x, ch in enumerate(text):
         row[x].ch = ch
 
@@ -559,11 +604,11 @@ def _tidy(grid: list) -> None:
         line = "".join(c.ch for c in row)
         m = re.search(r"/\S*?gmf-demo-\S*?(?:/gmf-demo)?(?=\s|$)", line)
         if m:
-            _set_line(row, line[:m.start()] + "~/git" + line[m.end():])
+            _set_line(row, line[: m.start()] + "~/git" + line[m.end() :])
             line = "".join(c.ch for c in row)
         m = re.search(r"(?:\d+/\d+){2,}\s*$", line)
         if m:
-            _set_line(row, line[:m.start()])
+            _set_line(row, line[: m.start()])
 
 
 def _trim(grid: list) -> list:
@@ -576,7 +621,7 @@ def _trim(grid: list) -> list:
     for y, row in enumerate(grid):
         if any(c.ch.strip() or c.rev for c in row):
             last = y
-    return grid[:last + 1]
+    return grid[: last + 1]
 
 
 def to_svg(grid: list, title: str) -> str:
@@ -588,7 +633,7 @@ def to_svg(grid: list, title: str) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" '
         f'height="{h}" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" '
         f'font-size="13">',
-        f'<title>{title}</title>',
+        f"<title>{title}</title>",
         f'<rect width="{w}" height="{h}" rx="8" fill="{BG}"/>',
     ]
     for y, row in enumerate(grid):
@@ -598,8 +643,13 @@ def to_svg(grid: list, title: str) -> str:
         while x < cols:
             c = row[x]
             x2 = x
-            while x2 < cols and row[x2].rev == c.rev and row[x2].fg == c.fg \
-                    and row[x2].bg == c.bg and row[x2].bold == c.bold:
+            while (
+                x2 < cols
+                and row[x2].rev == c.rev
+                and row[x2].fg == c.fg
+                and row[x2].bg == c.bg
+                and row[x2].bold == c.bold
+            ):
                 x2 += 1
             runs.append((x, x2, c))
             x = x2
@@ -611,12 +661,16 @@ def to_svg(grid: list, title: str) -> str:
             # Reverse swaps the two; a pair with its own background simply keeps them.
             fill, area = (c.bg or BG, c.fg) if c.rev else (c.fg, c.bg)
             if area is not None:
-                out.append(f'<rect x="{px:.1f}" y="{pad + y * ch:.1f}" '
-                           f'width="{(x1 - x0) * cw:.1f}" height="{ch}" fill="{area}"/>')
-            esc = (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                out.append(
+                    f'<rect x="{px:.1f}" y="{pad + y * ch:.1f}" '
+                    f'width="{(x1 - x0) * cw:.1f}" height="{ch}" fill="{area}"/>'
+                )
+            esc = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             weight = ' font-weight="bold"' if c.bold else ""
-            out.append(f'<text x="{px:.1f}" y="{py:.1f}" fill="{fill}"'
-                       f'{weight} xml:space="preserve">{esc}</text>')
+            out.append(
+                f'<text x="{px:.1f}" y="{py:.1f}" fill="{fill}"'
+                f'{weight} xml:space="preserve">{esc}</text>'
+            )
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
@@ -652,39 +706,99 @@ ACTION_MARKERS = {len(_split_keys(ACTIONS)) - 1: b"git commit -m"}
 # Detailbild schaltet ein "m" zurück — beide Ansichten sollen dokumentiert sein. Die
 # Höhe je Bild ist bewusst knapp gewählt: das Fenster soll gefüllt aussehen, nicht
 # halb leer.
-SCREENS = [
-    ("compact.svg", "en", [], ACTIONS,
-     "gitmaster_flash compact view — the whole collection at a glance", COLS, 20),
-    ("command-log.svg", "en", [], ACTIONS + TAB,
-     "gitmaster_flash — the command log with the focus on it", COLS, 20),
-    ("overview.svg", "en", [], ACTIONS + b"m",
-     "gitmaster_flash detail view — problem repos sorted to the top", COLS, 35),
-    ("publication.svg", "en", ["--filter", "auth"], b"",
-     "gitmaster_flash — matching GitHub content and different history", COLS, 12),
-    ("compact.de.svg", "de", [], ACTIONS,
-     "gitmaster_flash Kompaktansicht — alle Repos auf einen Blick", COLS, 20),
-    ("command-log.de.svg", "de", [], ACTIONS + TAB,
-     "gitmaster_flash — das Befehlsprotokoll mit Fokus", COLS, 20),
-    ("overview.de.svg", "de", [], ACTIONS + b"m",
-     "gitmaster_flash Detailansicht — problematische Repos zuerst", COLS, 35),
-    ("publication.de.svg", "de", ["--filter", "auth"], b"",
-     "gitmaster_flash — gleicher GitHub-Inhalt und abweichende Historie", COLS, 12),
+SCREENS: list[tuple[str, str, list[str], bytes, str, int, int]] = [
+    (
+        "compact.svg",
+        "en",
+        [],
+        ACTIONS,
+        "gitmaster_flash compact view — the whole collection at a glance",
+        COLS,
+        20,
+    ),
+    (
+        "command-log.svg",
+        "en",
+        [],
+        ACTIONS + TAB,
+        "gitmaster_flash — the command log with the focus on it",
+        COLS,
+        20,
+    ),
+    (
+        "overview.svg",
+        "en",
+        [],
+        ACTIONS + b"m",
+        "gitmaster_flash detail view — problem repos sorted to the top",
+        COLS,
+        35,
+    ),
+    (
+        "publication.svg",
+        "en",
+        ["--filter", "auth"],
+        b"",
+        "gitmaster_flash — matching GitHub content and different history",
+        COLS,
+        12,
+    ),
+    (
+        "compact.de.svg",
+        "de",
+        [],
+        ACTIONS,
+        "gitmaster_flash Kompaktansicht — alle Repos auf einen Blick",
+        COLS,
+        20,
+    ),
+    (
+        "command-log.de.svg",
+        "de",
+        [],
+        ACTIONS + TAB,
+        "gitmaster_flash — das Befehlsprotokoll mit Fokus",
+        COLS,
+        20,
+    ),
+    (
+        "overview.de.svg",
+        "de",
+        [],
+        ACTIONS + b"m",
+        "gitmaster_flash Detailansicht — problematische Repos zuerst",
+        COLS,
+        35,
+    ),
+    (
+        "publication.de.svg",
+        "de",
+        ["--filter", "auth"],
+        b"",
+        "gitmaster_flash — gleicher GitHub-Inhalt und abweichende Historie",
+        COLS,
+        12,
+    ),
 ]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--check", action="store_true",
-                    help="exit 1 if the files would change (do not write)")
+    ap.add_argument(
+        "--check", action="store_true", help="exit 1 if the files would change (do not write)"
+    )
     args = ap.parse_args()
 
     rc = 0
     for name, lang, extra, keys, title, cols, rows in SCREENS:
-        grid = render_in_pty(["--demo", "--lang", lang] + extra, keys=keys,
-                             cols=cols, rows=rows,
-                             ready_marker=(b"27 repos" if lang == "en"
-                                           else b"27 Repos"),
-                             key_markers=ACTION_MARKERS)
+        grid = render_in_pty(
+            ["--demo", "--lang", lang] + extra,
+            keys=keys,
+            cols=cols,
+            rows=rows,
+            ready_marker=(b"27 repos" if lang == "en" else b"27 Repos"),
+            key_markers=ACTION_MARKERS,
+        )
         _tidy(grid)
         svg = to_svg(_trim(grid), title)
         if len([1 for row in grid for c in row if c.ch.strip()]) < 50:
