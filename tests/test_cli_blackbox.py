@@ -507,6 +507,7 @@ class InstallScriptTests(unittest.TestCase):
         other = shlex.quote(str(foreign))
         for content in (
             "alias -- gmf=false\n",
+            "if true; then alias -- gmf=false; fi\n",
             "function 'gmf' { print foreign; }\n",
             f"source -- {other}; source -- {same}\n",
             f"if true; then\n  source -- {other}\nfi\n",

@@ -50,9 +50,11 @@ previous versions. Repeating installation leaves identical files untouched.
 A startup file changed by the installer gets a dated `.gmf-backup-*` copy.
 Use absolute paths for the home and configuration directories.
 
-A different registration, a conflicting wrapper or shell startup code whose
-registration cannot be verified stops the install. Read the diagnostic and
-inspect the named file before editing it. For a moved checkout, update a
+The installer reads startup files without running their commands. It stops
+when it finds a foreign registration, a conflicting wrapper or a position
+where it cannot establish that its new block will run. If registration depends
+on dynamically sourced files, check availability with `gmf --version` in a new
+shell. Read the diagnostic and inspect the named file before editing it. For a moved checkout, update a
 direct Zsh source line to the new path. For a managed installation, remove
 the corresponding installer block and its generated wrapper, if present,
 before running the installer from the new path. Fish uses just the autoload

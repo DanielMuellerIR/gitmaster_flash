@@ -155,8 +155,13 @@ def active_lines(content: bytes) -> bytes:
     return b"\n".join(line for line in content.splitlines() if not line.lstrip().startswith(b"#"))
 
 
+STARTUP_COMMAND = (
+    rb"(?:^|[;(){}&|])[ \t]*"
+    rb"(?:(?:if|then|elif|else|while|until|do|!|builtin|command|noglob|nocorrect|time)[ \t]+)*"
+)
+
+
 def check_definitions(content: bytes) -> None:
-    command = rb"(?:^|[;(&|])[ \t]*(?:builtin[ \t]+)?"
     name = rb"(?:gmf|source|\.)"
     quoted_name = rb"(?:" + name + rb"|'" + name + rb"'|\"" + name + rb"\")"
     definitions = (
@@ -166,13 +171,15 @@ def check_definitions(content: bytes) -> None:
         rb"(?:unfunction|unset[ \t]+-f)[ \t]+(?:--[ \t]+)?" + quoted_name + rb"(?=[ \t;]|$)",
         rb"disable[ \t]+(?:source|\.)\b",
     )
-    if any(re.search(command + definition, content, re.MULTILINE) for definition in definitions):
+    if any(
+        re.search(STARTUP_COMMAND + definition, content, re.MULTILINE) for definition in definitions
+    ):
         raise ValueError(g.t("linux_registration_conflict"))
 
 
 def check_errexit(content: bytes, shell: str) -> None:
     if re.search(
-        rb"(?:^|[;(&|])[ \t]*(?:builtin[ \t]+)?(?:"
+        STARTUP_COMMAND + rb"(?:"
         rb"set[ \t]+(?:-[A-Za-z]*e[A-Za-z]*|(?:-[A-Za-z]+[ \t]+)*-o[ \t]+errexit)"
         rb"|setopt[ \t]+(?:[^;\n]*[ \t])?(?:errexit|err_?exit))(?=[ \t;]|$)",
         content,
@@ -243,7 +250,7 @@ def check_fish_config(config: Path) -> None:
             continue
         check_definitions(content)
         if re.search(
-            rb"(?:^|[;|])[ \t]*(?:set[ \t]+[^;\n]*\bfish_function_path\b|exit\b)",
+            STARTUP_COMMAND + rb"(?:set[ \t]+[^;\n]*\bfish_function_path\b|exit\b)",
             content,
             re.MULTILINE,
         ):

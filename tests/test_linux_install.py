@@ -74,6 +74,7 @@ raise SystemExit(int(os.environ.get('GMF_TEST_RC', '0')))
             "if true; then exit; fi\n",
             "set -e\nfalse\n",
             "set -o errexit\nfalse\n",
+            "if true; then set -e; fi\nfalse\n",
             f"{installer.START}\nexport IMPORTANT=1\n{installer.END}\n",
         ):
             with self.subTest(text=text):

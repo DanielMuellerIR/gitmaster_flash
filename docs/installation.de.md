@@ -52,8 +52,10 @@ Für jede geänderte Startdatei legt der Installer eine datierte
 `.gmf-backup-*`-Kopie an. Benutzer- und Konfigurationsordner müssen absolute
 Pfade haben.
 
-Eine andere Registrierung, ein widersprüchlicher Wrapper oder Shell-Code,
-dessen Registrierung sich nicht verifizieren lässt, hält die Installation an.
+Der Installer liest Startdateien, ohne deren Befehle auszuführen. Er bricht bei
+einer fremden Registrierung, einem widersprüchlichen Wrapper oder einer nicht
+belegten Einfügeposition ab. Hängt die Registrierung von dynamisch geladenen
+Dateien ab, lässt sie sich in einer neuen Shell mit `gmf --version` prüfen.
 Vor dem Bearbeiten die Meldung und die bezeichnete Datei prüfen. Nach dem
 Verschieben eines Checkouts eine direkte Zsh-Source-Zeile auf den neuen Pfad
 umstellen. Bei einer verwalteten Installation den zugehörigen Installer-Block
