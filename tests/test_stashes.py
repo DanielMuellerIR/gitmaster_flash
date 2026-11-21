@@ -56,6 +56,13 @@ class StashTests(unittest.TestCase):
         ui.show_busy = Mock()
         return ui, st
 
+    def test_scan_keeps_unicode_line_separator_in_one_stash_label(self):
+        entries = self.stash("one\u2028label")
+        self.assertEqual(len(entries), 1)
+        status = g.collect_status(self.repo, self.root, g.DEFAULT_CONFIG)
+        self.assertEqual(status.stashes, [entries[0].label])
+        self.assertEqual(g.status_dict(status)["stashes"], 1)
+
     def test_cli_uses_existing_git_timeout_without_creating_config(self):
         config = self.root / "config.json"
         with patch.object(g, "CONFIG_PATH", config), redirect_stdout(io.StringIO()):

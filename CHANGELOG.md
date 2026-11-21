@@ -3,6 +3,21 @@
 This file records selected changes by version. For the full history, see the
 Git log.
 
+## [0.34.3]
+
+### Fixed
+
+- Scans report damaged worktree paths and use the same stash count as the detail view.
+- File diffs show staged deletions in combined mode. Snapshot comparisons accept
+  unknown branch coverage with an omitted count.
+- Remote checks preserve URL boundaries, reject overlapping removal namespaces,
+  and bind fetch updates to the tracking ref observed before the network request.
+- Index cleanup releases each lock once. The editor launcher reports exit status
+  even when diagnostics are unavailable.
+- Shell registration protects continued Bash definitions and prints a lossless
+  activation command. The Zsh wrapper cleans up after a failed invocation.
+- The compact view hints at GitHub publication only for a unique public remote.
+
 ## [0.34.2]
 
 ### Changed

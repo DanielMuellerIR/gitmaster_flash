@@ -53,6 +53,7 @@ import concurrent.futures
 import contextlib
 import curses
 import datetime
+import errno
 import hashlib
 import json
 import math
@@ -76,7 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Literal, NamedTuple, Optional
 
-__version__ = "0.34.2"
+__version__ = "0.34.3"
 JSON_SCHEMA_VERSION = 1
 DIFF_MODES = ("combined", "staged", "unstaged")
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -917,6 +918,10 @@ TR = {
     },
     "app_starting": {"en": "Started {name}: {rel}", "de": "{name} gestartet: {rel}"},
     "app_opened": {"en": "Opened {name}: {rel}", "de": "{name} geöffnet: {rel}"},
+    "app_diagnostics_failed": {
+        "en": "Launcher diagnostics unavailable: {e}",
+        "de": "Starterdiagnose nicht verfügbar: {e}",
+    },
     "app_open_timeout": {
         "en": "Could not confirm {name} opened within {s}s.",
         "de": "Der Start von {name} ist nach {s} s noch unbestätigt.",
@@ -2684,6 +2689,11 @@ def fetch_remote_safely(
 
     source_ref = f"refs/heads/{branch}"
     destination = f"refs/remotes/{remote.name}/{branch}"
+    old = run_git(
+        repo, "rev-parse", "--verify", "-q", destination, timeout=timeout, env=TRANSFER_OBJECT_ENV
+    )
+    if old.returncode not in (0, 1):
+        return old
     pinned_url = _PinnedRemoteURL(fetch_url)
     advertised = run_git(repo, "ls-remote", "--refs", "--", pinned_url, source_ref, timeout=timeout)
     if advertised.returncode != 0:
@@ -2714,11 +2724,6 @@ def fetch_remote_safely(
             advertised.args, 128, advertised.stdout, "invalid remote object ID"
         )
 
-    old = run_git(
-        repo, "rev-parse", "--verify", "-q", destination, timeout=timeout, env=TRANSFER_OBJECT_ENV
-    )
-    if old.returncode not in (0, 1):
-        return old
     old_oid = (
         old.stdout.strip() if old.returncode == 0 else "0" * (len(source_oid) if source_oid else 40)
     )
@@ -3247,12 +3252,7 @@ def _commit_index_guard(repo: Path, timeout: int) -> Iterator[list[IndexGuard]]:
         yield guards
     finally:
         pending_exception = sys.exc_info()[0] is not None
-        cleanup_error = None
-        for owned_path, owned_fd, owned_identity in reversed(guards):
-            try:
-                _release_owned_git_lock(owned_path, owned_fd, owned_identity)
-            except OSError as exc:
-                cleanup_error = cleanup_error or exc
+        cleanup_error = _release_owned_git_locks(guards)
         if cleanup_error is not None and not pending_exception:
             # Der Block hat einen Commit versucht. Ein Aufräumfehler beweist
             # keinen sicheren Fehlschlag des Commits.
@@ -3630,6 +3630,19 @@ def _release_owned_git_lock(path: Path, fd: int | None, identity: tuple[int, int
         path.unlink()
 
 
+def _release_owned_git_locks(guards: list[IndexGuard], keep: int = 0) -> OSError | None:
+    cleanup_error = None
+    while len(guards) > keep:
+        # Der FD kann nach close() sofort wiederverwendet werden, auch wenn
+        # die anschließende Pfadoperation fehlschlägt.
+        path, fd, identity = guards.pop()
+        try:
+            _release_owned_git_lock(path, fd, identity)
+        except OSError as exc:
+            cleanup_error = cleanup_error or exc
+    return cleanup_error
+
+
 def adopt_commit_in_real_index(
     repo: Path,
     paths: list[str],
@@ -3741,8 +3754,8 @@ def adopt_commit_in_real_index(
             # Modus bestehen; 0644 würde eine strenge Prozess-Umask umgehen.
             os.fchmod(index_fd, stat.S_IMODE(index.lstat().st_mode))
         os.fsync(index_fd)
-        os.close(index_fd)
         held[0] = (held[0][0], None, held[0][2])
+        os.close(index_fd)
         os.replace(lock_paths[0], index)
         log_command(
             repo,
@@ -3757,6 +3770,8 @@ def adopt_commit_in_real_index(
             0,
         )
     finally:
+        pending_exception = sys.exc_info()[0] is not None
+        cleanup_error = None
         if temp_index is not None:
             # Git legt neben JEDEN Index, den es schreibt, eine `.lock`-Datei.
             # Auf dem Normalweg raeumt es sie selbst weg — nach einem Timeout
@@ -3770,15 +3785,12 @@ def adopt_commit_in_real_index(
                     leftover.unlink()
                 except FileNotFoundError:
                     pass
-        if external_guards:
-            # Der Aufrufer besitzt den Index-Lock weiterhin; die hier ergänzten
-            # HEAD-/Branch-Locks lösen.
-            for lock_path, fd, identity in reversed(held[1:]):
-                _release_owned_git_lock(lock_path, fd, identity)
-            del held[1:]
-        else:
-            for lock_path, fd, identity in reversed(held):
-                _release_owned_git_lock(lock_path, fd, identity)
+                except OSError as exc:
+                    cleanup_error = cleanup_error or exc
+        locks_error = _release_owned_git_locks(held, keep=1 if external_guards else 0)
+        cleanup_error = cleanup_error or locks_error
+        if cleanup_error is not None and not pending_exception:
+            raise cleanup_error
 
 
 def current_head(repo: Path, timeout: int) -> str | None:
@@ -5137,6 +5149,24 @@ def canonical_remote_target(url: str, repo: Path | None = None) -> RemoteTarget:
     return RemoteTarget(host, repo_id, fingerprint, is_local)
 
 
+def _effective_remote_urls(
+    repo: Path, output: str, configured_urls: list[str]
+) -> tuple[list[str], list[RemoteTarget], str]:
+    # Git trennt mit LF. Ein LF in einem URL-Wert wäre vom Trenner nicht zu
+    # unterscheiden. Unicode-Zeilentrenner bleiben Teil des URL-Wertes.
+    urls = output.removesuffix("\n").split("\n")
+    if not output.endswith("\n") or not any(urls):
+        raise GitReadError("remote target is empty or incomplete")
+    if any("\n" in value for value in configured_urls):
+        return [], [], "unsafe_url"
+    if not all(urls):
+        raise GitReadError("remote target is empty or incomplete")
+    try:
+        return urls, [canonical_remote_target(url, repo) for url in urls], ""
+    except (ValueError, RuntimeError, OSError):
+        return urls, [], "unsafe_url"
+
+
 def read_remote_configs(
     repo: Path, cfg: dict, *, name: str | None = None
 ) -> dict[str, RemoteConfig]:
@@ -5175,22 +5205,15 @@ def read_remote_configs(
         push_r = _required_git(
             repo, "remote", "get-url", "--push", "--all", "--", remote_name, timeout=t_
         )
-        fetch_urls = [line for line in fetch_r.stdout.splitlines() if line]
-        push_urls = [line for line in push_r.stdout.splitlines() if line]
-        if not fetch_urls or not push_urls:
-            raise GitReadError("remote target is empty")
-        try:
-            fetch_targets = [canonical_remote_target(url, repo) for url in fetch_urls]
-            fetch_invalid_reason = ""
-        except (ValueError, RuntimeError, OSError):
-            fetch_targets = []
-            fetch_invalid_reason = "unsafe_url"
-        try:
-            push_targets = [canonical_remote_target(url, repo) for url in push_urls]
-            push_invalid_reason = ""
-        except (ValueError, RuntimeError, OSError):
-            push_targets = []
-            push_invalid_reason = "unsafe_url"
+        settings = settings_by_name[remote_name]
+        configured_fetch = [value for key, value in settings if key == "url"]
+        configured_push = [value for key, value in settings if key == "pushurl"] or configured_fetch
+        fetch_urls, fetch_targets, fetch_invalid_reason = _effective_remote_urls(
+            repo, fetch_r.stdout, configured_fetch
+        )
+        push_urls, push_targets, push_invalid_reason = _effective_remote_urls(
+            repo, push_r.stdout, configured_push
+        )
         # Eine kaputte Seite sperrt nur die Richtung dieses Remotes. Andere
         # Remotes — und ein sicherer Fetch bei kaputter Push-URL — bleiben
         # funktionsfähig; Roh-URLs gelangen dabei nie in UI oder JSON.
@@ -5200,7 +5223,7 @@ def read_remote_configs(
             push_urls,
             fetch_targets,
             push_targets,
-            settings_by_name[remote_name],
+            settings,
             fetch_invalid_reason,
             push_invalid_reason,
         )
@@ -5685,13 +5708,13 @@ def file_diff(
         )
 
     if mode == "unstaged":
+        if code == "U" and not os.path.lexists(repo / path):
+            return True, ""
         r = (
             against_nothing()
             if code == "U"
             else run_git(repo, *safe_diff, "--", path, timeout=timeout, env=env)
         )
-    elif mode == "combined" and code == "U":
-        r = against_nothing()
     else:
         head = current_head(repo, timeout)
         if head is not None and not is_object_id(head):
@@ -5709,6 +5732,13 @@ def file_diff(
             )
             if head is None and current_head(repo, timeout) is not None:
                 raise GitReadError("HEAD changed during unborn staged diff")
+        elif code == "U" and (
+            head is None
+            or not _required_git(
+                repo, "ls-tree", "--full-tree", "-z", head, "--", path, timeout=timeout, env=env
+            ).stdout
+        ):
+            r = against_nothing()
         elif head is not None:
             r = run_git(repo, *safe_diff, head, "--", path, timeout=timeout, env=env)
         elif not os.path.lexists(repo / path):
@@ -5820,6 +5850,10 @@ def remote_removal_facts(repo: Path, name: str, cfg: dict) -> RemoteRemovalFacts
         if fetch_specs != [expected]:
             raise GitReadError(t("remove_refspec_unsupported"))
     prefix = f"refs/remotes/{name}/"
+    for other in remotes.keys() - {name}:
+        other_prefix = f"refs/remotes/{other}/"
+        if prefix.startswith(other_prefix) or other_prefix.startswith(prefix):
+            raise GitReadError(t("remove_refspec_unsupported"))
     refs_r = _required_git(
         repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", prefix, timeout=t_
     )
@@ -6631,12 +6665,21 @@ def path_identity(path: Path) -> tuple:
     try:
         info = path.stat()
         return ("inode", info.st_dev, info.st_ino)
-    except OSError:
-        return ("path", str(path.resolve()))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise GitReadError(f"cannot resolve topology path {path}: {exc}") from exc
+        return ("path", str(_resolve_topology_path(path)))
+
+
+def _resolve_topology_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise GitReadError(f"cannot resolve topology path {path}: {exc}") from exc
 
 
 def path_in_root(path: Path, root: Path) -> bool:
-    path, root = path.resolve(), root.resolve()
+    path, root = _resolve_topology_path(path), _resolve_topology_path(root)
     try:
         path.relative_to(root)
         return True
@@ -7148,8 +7191,7 @@ def collect_status(
         st.modified, st.deleted, st.untracked, st.conflicts, st.files = parse_porcelain(r.stdout)
         st.operation = repository_operation(repo, t_)
         # Stashes (leicht zu übersehen — deshalb deutlich anzeigen)
-        r = _required_git(repo, "stash", "list", "--format=%gd %gs", timeout=t_)
-        st.stashes = [line for line in r.stdout.splitlines() if line.strip()]
+        st.stashes = [entry.label for entry in read_stashes(repo, t_)]
         collect_topology(st, root, cfg)
         st.measured_at = utc_now()
 
@@ -8447,11 +8489,11 @@ def _compare_branches(
         elif not here_entry["current"] and not there_entry["current"]:
             here_coverage = {
                 "state": here_entry["coverage"],
-                "uncovered_commits": here_entry["uncovered_commits"],
+                "uncovered_commits": here_entry.get("uncovered_commits"),
             }
             there_coverage = {
                 "state": there_entry["coverage"],
-                "uncovered_commits": there_entry["uncovered_commits"],
+                "uncovered_commits": there_entry.get("uncovered_commits"),
             }
             if here_coverage != there_coverage:
                 findings.append(
@@ -9756,6 +9798,10 @@ def safe_addstr(win, y, x, text, attr=0):
         pass
 
 
+def public_remotes(st: RepoStatus) -> list[RemoteStatus]:
+    return [remote for remote in st.remotes if remote.public]
+
+
 def selected_repo_context_parts(st: RepoStatus, width: int) -> list[tuple[str, int]]:
     state = t("context_sync_clean") if st.sync_clean else t("context_sync_open")
     if st.publication_pending:
@@ -9772,21 +9818,20 @@ def selected_repo_context_parts(st: RepoStatus, width: int) -> list[tuple[str, i
         and not any(r.public and r.is_sync for r in st.remotes)
     ):
         actions.append("P")
-    if (
-        not st.dirty
-        and not st.operation
-        and any(
-            r.public
-            and r.ahead
-            and not r.behind
-            and r.branch_exists
-            and not r.fetch_failed
-            and r.transfer_safe
-            and not publication_content_current(r)
-            for r in st.remotes
-        )
-    ):
-        actions.append("G")
+    public = public_remotes(st)
+    if len(public) == 1:
+        remote = public[0]
+        if (
+            not st.dirty
+            and not st.operation
+            and remote.ahead
+            and not remote.behind
+            and remote.branch_exists
+            and not remote.fetch_failed
+            and remote.transfer_safe
+            and not publication_content_current(remote)
+        ):
+            actions.append("G")
     short = width < 80
     limit = 8 if short else max(8, min(20, width // 5))
     name = ellipsize(display_git_path(st.rel), limit)
@@ -10985,9 +11030,14 @@ class TUI:
     def _app_launch_result(child, diagnostics):
         try:
             code = child.wait()
-            return code, diagnostics.read_tail()
+            try:
+                error = diagnostics.read_tail()
+            except OSError as exc:
+                error = t("app_diagnostics_failed", e=str(exc))
         finally:
-            diagnostics.close()
+            with contextlib.suppress(OSError):
+                diagnostics.close()
+        return code, error
 
     def _watch_app_launch(self, child, diagnostics, name, rel):
         code, error = self._app_launch_result(child, diagnostics)
@@ -11377,11 +11427,6 @@ class TUI:
     def _remote(st: RepoStatus, name: str | None) -> RemoteStatus | None:
         return next((remote for remote in st.remotes if remote.name == name), None)
 
-    @staticmethod
-    def _remote_approval_signature(remote: RemoteStatus | None) -> tuple | None:
-        """Die im Listen-Screen sichtbare Remote- und Sicherheitsidentitaet."""
-        return remote_approval_signature(remote)
-
     def _fetch_remote(self, st: RepoStatus, remote: str) -> RepoStatus | None:
         config = read_remote_config_or_none(st.path, self.cfg, remote)
         # `None` heisst "die Config dieses Remotes ist gerade nicht belegbar" —
@@ -11503,9 +11548,9 @@ class TUI:
         fresh = self._fetch_remote(st, remote.name)
         if not fresh:
             return None
-        if fresh.branch != st.branch or self._remote_approval_signature(
+        if fresh.branch != st.branch or remote_approval_signature(
             self._remote(fresh, remote.name)
-        ) != self._remote_approval_signature(remote):
+        ) != remote_approval_signature(remote):
             self.message = t(changed_key)
             return None
         check = inspect_transfer(
@@ -11840,7 +11885,7 @@ class TUI:
         st = self.current()
         if not st:
             return
-        public = [remote for remote in st.remotes if remote.public]
+        public = public_remotes(st)
         if not public:
             self.message = t("no_github")
             return

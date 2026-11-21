@@ -84,6 +84,46 @@ raise SystemExit(int(os.environ.get('GMF_TEST_RC', '0')))
                 self.assertEqual(rc.read_text(), text)
                 self.assertFalse((self.config / "gitmaster_flash/shell/gmf.bash").exists())
 
+    def test_continued_bash_function_definition_is_preserved(self):
+        rc = self.home / ".bashrc"
+        original = b"g\\\nmf() { printf custom; }\n"
+        rc.write_bytes(original)
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", 'source "$1"; gmf', "test", str(rc)],
+            capture_output=True, timeout=10, check=True,
+        )
+        self.assertEqual(result.stdout, b"custom")
+        with self.assertRaises(ValueError):
+            self.install()
+        self.assertEqual(rc.read_bytes(), original)
+        self.assertFalse((self.config / "gitmaster_flash/shell/gmf.bash").exists())
+
+    def test_printed_activation_command_uses_the_exact_path(self):
+        wrapper = self.home / "wrapper\nquote'backslash\\\n"
+        wrapper.write_text("printf '%s' 'activated'\n")
+        for shell in ("bash", "zsh", "fish"):
+            if not shutil.which(shell):
+                continue
+            with self.subTest(shell=shell):
+                command = installer.activation_command(shell, wrapper)
+                self.assertNotIn("\n", command)
+                result = subprocess.run(
+                    [shell, "-c", command], capture_output=True, timeout=10, check=True,
+                )
+                self.assertEqual(result.stdout, b"activated")
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh unavailable")
+    def test_zsh_errexit_keeps_exit_status_and_removes_the_temp_file(self):
+        temporary = self.root / "wrapper-temp"
+        temporary.mkdir()
+        result = subprocess.run(
+            ["zsh", "-efc", 'source "$1"; gmf', "test", str(self.repo / "gmf.zsh")],
+            env=dict(os.environ, TMPDIR=str(temporary), GMF_TEST_RC="27"),
+            capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 27, result.stderr)
+        self.assertEqual(list(temporary.iterdir()), [])
+
     def test_bash_accepts_stock_noninteractive_guard(self):
         rc = self.home / ".bashrc"
         original = b"case $- in\n    *i*) ;;\n      *) return;;\nesac\n"

@@ -81,7 +81,7 @@ end
 def checked_syntax(shell: str, content: bytes) -> None:
     options = {
         "bash": ["--noprofile", "--norc", "-n"],
-        "zsh": ["-f", "-n"],
+        "zsh": ["-f", "-o", "NO_BG_NICE", "-n"],
         "fish": ["--no-config", "-n"],
     }
     environment = dict(os.environ)
@@ -190,6 +190,8 @@ def check_errexit(content: bytes, shell: str) -> None:
 
 def check_bashrc(content: bytes, installed_block: bytes | None) -> None:
     active = active_lines(content.replace(installed_block, b"") if installed_block else content)
+    # Ohne Zeilenumbruch kann ein Name über mehrere physische Zeilen verteilt sein.
+    active = re.sub(rb"(?<!\\)((?:\\\\)*)\\\n", rb"\1", active)
     if b"<<" in active:
         raise ValueError(g.t("linux_complex_rc"))
     check_definitions(active)
@@ -337,6 +339,25 @@ def prerequisites(shell: str) -> None:
         raise DependencyError(g.t("linux_dependencies", shell=shell))
 
 
+def activation_command(shell: str, wrapper: Path) -> str:
+    path = str(wrapper)
+    if g.terminal_text(path) == path:
+        quoted = quote_fish(path) if shell == "fish" else shlex.quote(path)
+    elif shell == "zsh":
+        quoted = g.zsh_quote(path)
+    elif shell == "bash":
+        quoted = "$'" + "".join(f"\\{byte:03o}" for byte in os.fsencode(path)) + "'"
+    else:
+        result = subprocess.run(
+            ["fish", "--no-config", "-c", 'string escape -- "$argv[1]"', "--", path],
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        quoted = os.fsdecode(result.stdout.removesuffix(b"\n"))
+    return "source " + quoted
+
+
 def main(argv: list[str] | None = None) -> int:
     language = argparse.ArgumentParser(add_help=False)
     language.add_argument("--lang", choices=("en", "de"))
@@ -376,15 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         wrapper, existing = install(ROOT, home, shell, config, zdotdir)
         status = "install_existing" if existing else "install_registered"
         print(g.t(status, shell=shell, p=g.display_git_path(wrapper)))
-        print(
-            g.t(
-                "linux_activate",
-                command="source "
-                + g.terminal_text(
-                    quote_fish(str(wrapper)) if shell == "fish" else shlex.quote(str(wrapper))
-                ),
-            )
-        )
+        print(g.t("linux_activate", command=activation_command(shell, wrapper)))
         return 0
     except (OSError, ValueError, ImportError, subprocess.SubprocessError) as exc:
         print(g.t("linux_failed", e=g.terminal_text(exc)), file=sys.stderr)

@@ -13,10 +13,9 @@
 GMF_SCRIPT="${${(%):-%x}:A:h}/gitmaster_flash.py"
 
 gmf() {
-  local cdfile target
+  local cdfile target rc=0
   cdfile="$(mktemp "${TMPDIR:-/tmp}/gmf_cd.XXXXXXXX")" || return 1
-  python3 "$GMF_SCRIPT" --cd-file "$cdfile" "$@"
-  local rc=$?
+  python3 "$GMF_SCRIPT" --cd-file "$cdfile" "$@" || rc=$?
   target=""
   # Kommandoersetzung entfernt abschließende Zeilenumbrüche auch aus Pfadnamen.
   [[ -s "$cdfile" ]] && { IFS= read -r -d '' target < "$cdfile" || true; }
@@ -24,5 +23,5 @@ gmf() {
   if [[ -n "$target" && -d "$target" ]]; then
     cd -- "$target" || return 1
   fi
-  return $rc
+  return "$rc"
 }

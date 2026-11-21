@@ -236,6 +236,32 @@ class CommitSafetyTests(unittest.TestCase):
 
         self.assertEqual((self.repo / ".git" / "index").read_bytes(), index_before)
 
+    def test_index_guard_releases_remaining_locks_after_branch_cleanup_error(self):
+        committed = gmf_module.current_head(self.repo, 10)
+        signature = gmf_module._real_index_signature(self.repo, 10)
+        branch_lock = self.repo / ".git" / "refs" / "heads" / "main.lock"
+        original = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.resolve() == branch_lock.resolve():
+                raise OSError("fixture branch lock cleanup failure")
+            return original(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "unlink", new=unlink),
+            mock.patch.object(gmf_module, "_release_owned_git_lock", wraps=gmf_module._release_owned_git_lock) as release,
+            self.assertRaisesRegex(OSError, "fixture branch lock cleanup failure"),
+            gmf_module._commit_index_guard(self.repo, 10) as held,
+        ):
+            gmf_module.adopt_commit_in_real_index(
+                self.repo, ["include.txt"], committed, "refs/heads/main", signature, 10,
+                _held_guards=held,
+            )
+
+        self.assertEqual([call.args[0].name for call in release.call_args_list], ["main.lock", "HEAD.lock", "index.lock"])
+        self.assertEqual(held, [])
+        self.assertFalse((self.repo / ".git" / "HEAD.lock").exists())
+
     def test_a_killed_adoption_leaves_no_lock_file_behind_in_git(self):
         """Git legt neben JEDEN Index eine `.lock`; nach SIGKILL bleibt sie.
 

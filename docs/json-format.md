@@ -112,6 +112,7 @@ scripts should use the other fields. `category` is `drift`, `sync`, `local` or
 | `submodule_inventory_failed` | local | `error`; `side` identifies the side |
 | `submodule_inspection_failed` | local | `path`, `path_key`, `error`; `side` identifies the side |
 | `submodule_state` | local | `path`, `path_key`, `here_state`, `there_state` |
+| `publication_inspection_failed` | local | `error`; `remote` and `side` identify the failed check |
 | `fetch_failed_side` | local | `count`, repositories with failed fetches |
 
 Limitation codes are `legacy_schema`, `head_identity_unknown`,

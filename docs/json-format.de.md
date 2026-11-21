@@ -116,6 +116,7 @@ nicht in Befunden.
 | `submodule_inventory_failed` | local | `error`; `side` nennt die Seite |
 | `submodule_inspection_failed` | local | `path`, `path_key`, `error`; `side` nennt die Seite |
 | `submodule_state` | local | `path`, `path_key`, `here_state`, `there_state` |
+| `publication_inspection_failed` | local | `error`; `remote` und `side` benennen die fehlgeschlagene Prüfung |
 | `fetch_failed_side` | local | `count`, Repos mit fehlgeschlagenem Fetch |
 
 Die Grenz-Codes sind `legacy_schema`, `head_identity_unknown`,

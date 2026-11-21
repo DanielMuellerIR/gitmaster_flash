@@ -71,6 +71,24 @@ class RemoteConfigurationTests(unittest.TestCase):
         self.assertIsNotNone(remote)
         self.assertEqual(remote.push_urls, ["https://example.invalid/specific/explicit.git"])
 
+    def test_local_remote_url_keeps_unicode_line_separator(self):
+        target = self.root / "one\u2028folder.git"
+        g._dgit(self.repo, "remote", "add", "origin", str(target))
+        remote = g.read_remote_configs(self.repo, g.DEFAULT_CONFIG)["origin"]
+        self.assertEqual(remote.fetch_urls, [str(target)])
+        self.assertEqual(remote.push_urls, [str(target)])
+        self.assertEqual(g.remote_fetch_url(remote), str(target.resolve()))
+
+    def test_raw_line_feed_invalidates_only_the_affected_url_direction(self):
+        target = self.root / "one\nfolder.git"
+        g._dgit(self.repo, "remote", "add", "origin", str(target))
+        push = self.root / "push.git"
+        g._dgit(self.repo, "config", "remote.origin.pushurl", str(push))
+        remote = g.read_remote_configs(self.repo, g.DEFAULT_CONFIG)["origin"]
+        self.assertEqual(remote.fetch_invalid_reason, "unsafe_url")
+        self.assertIsNone(g.remote_fetch_url(remote))
+        self.assertEqual(g.remote_push_url(remote), str(push.resolve()))
+
     def test_unusable_neighbor_url_does_not_hide_requested_remote(self):
         g._dgit(self.repo, "remote", "add", "origin", "../remote.git")
         g._dgit(self.repo, "config", "remote.other.url", "\n")

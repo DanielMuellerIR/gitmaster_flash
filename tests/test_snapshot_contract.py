@@ -90,6 +90,22 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(operation["values"]["operation"], "rebase")
         self.assertEqual(operation["side"], "there")
 
+    def test_unknown_branch_coverage_accepts_an_omitted_count_in_compare(self):
+        status = self.status(
+            branches_scanned=True,
+            branches=[
+                g.BranchInfo("main", is_head=True, oid="a" * 40, coverage="covered", uncovered_commits=0),
+                g.BranchInfo("topic", oid="b" * 40, coverage="unknown"),
+            ],
+        )
+        there = self.snapshot([status])
+        here = copy.deepcopy(there)
+        here["repos"][0]["branches"][1].pop("uncovered_commits")
+        code, output, error = self.compare(here, there, "--json")
+        self.assertEqual(code, 1, error)
+        kinds = {finding["type"] for finding in json.loads(output)["findings"]}
+        self.assertEqual(kinds, {"branch_coverage_unknown"})
+
     def test_sides_stay_distinct_even_when_human_labels_are_identical(self):
         here = self.snapshot([self.status(modified=1, fetch_error=True)])
         there = copy.deepcopy(here)

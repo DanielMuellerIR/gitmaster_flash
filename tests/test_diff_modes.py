@@ -314,6 +314,25 @@ class DiffModeTests(DiffModeFixture):
             self.assertEqual(result, 2, path)
             self.assertFalse(json.loads(output.getvalue())["ok"])
 
+    def test_cli_diff_preserves_a_staged_deletion_in_both_output_formats(self):
+        git(self.repo, "rm", "README.md")
+        for mode, expected in (("combined", 1), ("staged", 1), ("unstaged", 0)):
+            with self.subTest(mode=mode):
+                output = io.StringIO()
+                plain = io.StringIO()
+                args = [str(self.repo), "--file-diff", "README.md", "--diff-mode", mode]
+                with redirect_stdout(output):
+                    self.assertEqual(g.main([*args, "--json"]), expected)
+                with redirect_stdout(plain):
+                    self.assertEqual(g.main(args), expected)
+                payload = json.loads(output.getvalue())
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["diff"], plain.getvalue())
+                if expected:
+                    self.assertIn("deleted file mode", payload["diff"])
+                else:
+                    self.assertEqual(payload["diff"], "")
+
     def test_cli_rejects_incompatible_actions_before_any_scan(self):
         for extra in (
             ["--fetch"],
@@ -617,6 +636,33 @@ class DiffModeTests(DiffModeFixture):
             ui._loop()
         self.assertTrue(any("delayed_failure" in message for message in messages))
         self.assertEqual(ui.pending_app_launches, 0)
+
+    def test_delayed_launcher_reports_exit_when_diagnostics_are_unavailable(self):
+        app = self.root / "editor"
+        app.write_text("#!/bin/sh\n")
+        app.chmod(0o755)
+        cfg = dict(self.cfg, apps={"E": {"name": "Editor", "path": str(app)}})
+        ui = g.TUI(Mock(), self.root, cfg, None)
+        ui.statuses = [g.RepoStatus(self.repo, "project")]
+        child = Mock()
+        child.wait.side_effect = [subprocess.TimeoutExpired("editor", 0.2), 7]
+        diagnostics = Mock()
+        diagnostics.read_tail.side_effect = OSError("fixture diagnostics failed")
+        with (
+            patch.object(g.sys, "platform", "linux"),
+            patch.dict(os.environ, {"DISPLAY": ":1"}, clear=True),
+            patch.object(g.subprocess, "Popen", return_value=child),
+            patch.object(g, "AppDiagnostics", return_value=diagnostics),
+        ):
+            ui.action_open_app("E")
+            deadline = time.monotonic() + 3
+            while ui.pending_app_launches and time.monotonic() < deadline:
+                ui.drain_app_results()
+                time.sleep(0.01)
+        self.assertEqual(ui.pending_app_launches, 0)
+        self.assertIn("Exit 7", ui.message)
+        self.assertIn("fixture diagnostics failed", ui.message)
+        diagnostics.close.assert_called_once()
 
     def test_launcher_exit_does_not_wait_for_descendants_stderr(self):
         self.check_launcher_descendant(fast=False)

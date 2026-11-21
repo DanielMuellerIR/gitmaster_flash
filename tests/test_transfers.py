@@ -281,6 +281,32 @@ class TestUpstreamDeltaTwoRemotes(unittest.TestCase):
             ).stdout.strip(),
         )
 
+    def test_fetch_observes_tracking_ref_before_requesting_the_remote_branch(self):
+        remote = gmf_module.read_remote_configs(self.repo, DEFAULT_CONFIG)["github"]
+        tracked = git(self.repo, "rev-parse", "refs/remotes/github/main")
+        calls = []
+
+        def read(repo, *args, **kwargs):
+            calls.append(args)
+            output = {
+                "rev-parse": tracked + "\n",
+                "ls-remote": tracked + "\trefs/heads/main\n",
+                "cat-file": "",
+            }[args[0]]
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        with (
+            mock.patch.object(gmf_module, "fetch_remote_block_reason", return_value=None),
+            mock.patch.object(gmf_module, "read_remote_config_or_none", return_value=remote),
+            mock.patch.object(gmf_module, "run_git", side_effect=read),
+            mock.patch.object(gmf_module, "run_git_logged", return_value=subprocess.CompletedProcess([], 0, "", "")) as logged,
+        ):
+            result = gmf_module.fetch_remote_safely(self.repo, remote, "main", 10)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual([args[0] for args in calls], ["rev-parse", "ls-remote", "cat-file"])
+        self.assertEqual(logged.call_args.args[-3:], ("refs/remotes/github/main", tracked, tracked))
+
     def test_inherited_git_namespace_cannot_hide_a_safe_fetch(self):
         before = git(self.repo, "rev-parse", "HEAD")
         tree = git(self.repo, "rev-parse", "HEAD^{tree}")
@@ -2613,6 +2639,14 @@ class RemoteAndCommandLogTests(unittest.TestCase):
         git(self.repo, "config", "remote.other.fetch", "+refs/heads/*:refs/remotes/origin/*")
         with self.assertRaises(gmf_module.GitReadError):
             gmf_module.remote_removal_facts(self.repo, "origin", DEFAULT_CONFIG)
+
+    def test_nested_remote_names_block_the_removal_preview(self):
+        for name in ("team", "team/fork"):
+            git(self.repo, "config", f"remote.{name}.url", f"https://example.invalid/{name}.git")
+            git(self.repo, "config", f"remote.{name}.fetch", f"+refs/heads/*:refs/remotes/{name}/*")
+        for name in ("team", "team/fork"):
+            with self.subTest(name=name), self.assertRaises(gmf_module.GitReadError):
+                gmf_module.remote_removal_facts(self.repo, name, DEFAULT_CONFIG)
 
     def test_unicode_line_separator_survives_full_scan_and_removal_preview(self):
         name = "mirror\u2028remote"

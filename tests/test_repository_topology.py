@@ -1,11 +1,14 @@
 """Worktree-Zuordnung und Submodule bleiben lesend, pfadgebunden und unterscheidbar."""
 
 import copy
+import io
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -116,6 +119,19 @@ class WorktreeTests(TopologyFixture):
         self.assertIn("working directory missing", text)
         self.assertIn("\\r\\n", text)
         self.assertNotIn("\r", text)
+
+    def test_worktree_path_loop_is_reported_in_an_otherwise_readable_snapshot(self):
+        linked = self.root / "linked"
+        g._dgit(self.repo, "worktree", "add", "-q", "-b", "linked", str(linked))
+        linked.rename(self.root / "moved")
+        linked.symlink_to(linked.name)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = g.main([str(self.repo), "--json", "--lang", "en"])
+        self.assertIn(result, (0, 1))
+        status, = json.loads(output.getvalue())["repos"]
+        self.assertEqual(status["error"], "")
+        self.assertIn("cannot resolve topology path", status["worktrees_error"])
 
     def test_detached_and_bare_family_members_are_ordinary_metadata(self):
         linked = self.root / "detached"

@@ -98,6 +98,13 @@ class WorkViewTests(unittest.TestCase):
             g.print_list([st])
         self.assertIn("GitHub ≠", output.getvalue())
 
+    def test_compact_context_hides_action_for_multiple_public_remotes(self):
+        st = self.status(remotes=[self.remote("github", public=True, ahead=2)])
+        context = lambda: "".join(text for text, _ in g.selected_repo_context_parts(st, 110))
+        self.assertIn("I/G", context())
+        st.remotes.append(self.remote("mirror", public=True))
+        self.assertNotIn("I/G", context())
+
     def test_public_fetch_failure_does_not_falsify_private_sync_state(self):
         st = self.status(
             error="github: auth",
