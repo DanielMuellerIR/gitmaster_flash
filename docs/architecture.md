@@ -14,7 +14,8 @@ the same version without installing it remotely.
 Git calls are non-interactive and use captured output, bounded execution
 time and separate process groups. A stopped background fetch cancels that
 scan's processes. If a local tracking-ref update already started, its
-configuration check and any rollback run to completion. Commands that
+configuration check and any rollback continue with bounded local Git calls.
+The interface waits at most five seconds for its scan worker. Commands that
 change Git state enter the session log. Git's machine-readable path
 protocols preserve bytes, including newlines. The terminal view escapes
 control characters, while `path_key` in the [JSON format](json-format.md)

@@ -7514,12 +7514,10 @@ class BackgroundScan:
             self.queue.put(("failed", exc))
 
     def stop(self) -> None:
-        """Abbrechen und kurz auf das Auslaufen der Arbeiter warten.
+        """Scan-Aufrufe abbrechen und höchstens fünf Sekunden warten.
 
-        Der eigene Scope beendet nur die Git-Prozessgruppen dieses Scans und
-        verhindert neue; die Arbeiter laufen danach binnen Sekundenbruchteilen
-        aus. Das Warten ist begrenzt — ein haengender Thread darf das Beenden der
-        Oberflaeche nicht aufhalten, und die Prozesse sind da bereits tot.
+        Eine bereits begonnene lokale Tracking-Ref-Änderung schließt ihre
+        Prüfungen und eine nötige Rücknahme mit eigenen Zeitgrenzen ab.
         """
         self.scope.cancel()
         if self._thread.is_alive():

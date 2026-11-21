@@ -16,8 +16,10 @@ Git-Aufrufe laufen ohne Eingabeaufforderungen, mit erfasster Ausgabe,
 Laufzeitgrenzen und eigenen Prozessgruppen. Beim Abbruch eines Fetchs
 im Hintergrund enden die Prozesse dieses Scans. Unabhängige Aktionen
 können weiterlaufen. Eine begonnene lokale Tracking-Ref-Änderung
-schließt die Konfigurationsprüfung und gegebenenfalls die Rücknahme ab.
-Befehle, die den Git-Zustand ändern, erscheinen im
+schließt die Konfigurationsprüfung und gegebenenfalls die Rücknahme mit
+zeitlich begrenzten lokalen Git-Aufrufen ab. Die Oberfläche wartet höchstens
+fünf Sekunden auf den Scan-Thread. Befehle, die den Git-Zustand ändern,
+erscheinen im
 Sitzungsprotokoll. Die maschinenlesbaren Pfadprotokolle von Git erhalten
 die ursprünglichen Bytes einschließlich Zeilenumbrüchen. Die
 Terminalansicht maskiert Steuerzeichen. `path_key` im
